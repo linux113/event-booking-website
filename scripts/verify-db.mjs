@@ -161,7 +161,7 @@ async function main() {
     ],
     digital_passes: [
       "id", "booking_id", "pass_id", "qr_token", "qr_code_url", "valid_date",
-      "status", "checked_in", "checked_in_at", "created_at",
+      "pass_number", "status", "checked_in", "checked_in_at", "created_at",
     ],
   };
 
@@ -412,15 +412,15 @@ async function main() {
   check("updated_at refreshed by trigger", touched.updated_at > booking.updated_at);
 
   const badCheckIn = await expectError(`
-    insert into public.digital_passes (booking_id, valid_date, checked_in)
-    values ('${booking.id}', '2026-10-11', true);
+    insert into public.digital_passes (booking_id, valid_date, pass_number, checked_in)
+    values ('${booking.id}', '2026-10-11', 1, true);
   `);
   check("checked_in without checked_in_at rejected", badCheckIn !== null, badCheckIn ?? "no error");
 
   const digitalPass = (
     await q(`
-      insert into public.digital_passes (booking_id, valid_date)
-      values ('${booking.id}', '2026-10-11') returning *;
+      insert into public.digital_passes (booking_id, valid_date, pass_number)
+      values ('${booking.id}', '2026-10-11', 1) returning *;
     `)
   )[0];
   check("pass_id auto-generated", /^PS-\d{6}$/.test(digitalPass.pass_id), digitalPass.pass_id);
@@ -457,8 +457,8 @@ async function main() {
     `)
   )[0];
   await run(`
-    insert into public.digital_passes (booking_id, valid_date)
-    values ('${cascading.id}', '2026-10-11');
+    insert into public.digital_passes (booking_id, valid_date, pass_number)
+    values ('${cascading.id}', '2026-10-11', 1);
   `);
   await run(`delete from public.bookings where id = '${cascading.id}';`);
   check("deleting a booking cascades to its passes", (await count("digital_passes", `where booking_id = '${cascading.id}'`)) === 0);
@@ -1161,6 +1161,190 @@ async function main() {
   check("the status view names the event and night", status.event_name === "Garba Nights Navratri Utsav" && Boolean(status.event_date));
   const unknownToken = await rpc("get_booking_status", { p_public_token: "ffffffff-ffff-4fff-8fff-ffffffffffff" });
   check("an unknown token returns nothing", unknownToken.length === 0);
+
+  // ---------------------------------------------------------------------------
+  section("Digital pass: slots, QR tokens, ticket reads");
+  // ---------------------------------------------------------------------------
+  const slotIndex = await q(`
+    select indexdef from pg_indexes
+    where schemaname = 'public' and indexname = 'digital_passes_booking_pass_number_idx';
+  `);
+  check(
+    "one pass per slot is enforced by a unique index",
+    slotIndex.length === 1 && /unique/i.test(slotIndex[0].indexdef),
+    slotIndex[0]?.indexdef ?? "missing",
+  );
+
+  const [qrTokenIndex] = await q(`
+    select indexdef from pg_indexes
+    where schemaname = 'public' and indexname = 'digital_passes_qr_token_key';
+  `);
+  check("QR tokens are unique", /unique/i.test(qrTokenIndex?.indexdef ?? ""), qrTokenIndex?.indexdef ?? "missing");
+
+  const passesOfA = await rpc("get_booking_passes", { p_public_token: payA.public_token });
+  check("the customer's own passes come back for a paid booking", passesOfA.length === 2, `${passesOfA.length} rows`);
+  check(
+    "every pass has a human-readable id",
+    passesOfA.every((row) => /^PS-\d{6}$/.test(row.pass_id)),
+    passesOfA.map((row) => row.pass_id).join(", "),
+  );
+  check(
+    "passes are numbered 1..quantity",
+    JSON.stringify(passesOfA.map((row) => row.pass_number)) === JSON.stringify([1, 2]),
+    passesOfA.map((row) => row.pass_number).join(", "),
+  );
+  check("the ticket knows how many passes the booking has", passesOfA.every((row) => row.pass_total === 2));
+  check(
+    "every QR token is 64 hex characters of random",
+    passesOfA.every((row) => /^[0-9a-f]{64}$/.test(row.qr_token)),
+    passesOfA.map((row) => row.qr_token.slice(0, 12)).join(", "),
+  );
+  check(
+    "the two tokens are different",
+    passesOfA[0].qr_token !== passesOfA[1].qr_token,
+  );
+  check(
+    "no token leaks the booking reference or the pass id",
+    passesOfA.every((row) => !row.qr_token.includes("DND") && !row.qr_token.includes("PS")),
+  );
+  check(
+    "a pass read carries no mobile number or email",
+    !Object.keys(passesOfA[0]).some((key) => /mobile|email/i.test(key)),
+    Object.keys(passesOfA[0]).join(", "),
+  );
+  check(
+    "the stored pass rows match the read function",
+    (await q(`select count(*)::int as n from public.digital_passes where booking_id = '${payA.booking_uuid}';`))[0].n === 2,
+  );
+
+  // The database, not a code path, is what stops a booking from having two pass 1s.
+  const duplicateSlot = await (async () => {
+    try {
+      await q(`
+        insert into public.digital_passes (booking_id, valid_date, pass_number)
+        values ('${payA.booking_uuid}', '2026-10-14', 1);
+      `);
+      return null;
+    } catch (error) {
+      return error;
+    }
+  })();
+  check(
+    "a booking cannot get a second pass in the same slot",
+    duplicateSlot?.code === "23505",
+    `${duplicateSlot?.code ?? "insert succeeded"}`,
+  );
+
+  const zeroSlot = await (async () => {
+    try {
+      await q(`
+        insert into public.digital_passes (booking_id, valid_date, pass_number)
+        values ('${payA.booking_uuid}', '2026-10-14', 0);
+      `);
+      return null;
+    } catch (error) {
+      return error;
+    }
+  })();
+  check("a pass slot must be at least 1", zeroSlot?.code === "23514", `${zeroSlot?.code ?? "insert succeeded"}`);
+
+  const [ticket] = await rpc("get_pass_by_token", { p_qr_token: passesOfA[0].qr_token });
+  check("the QR token resolves to its pass", ticket?.pass_id === passesOfA[0].pass_id, ticket?.pass_id ?? "none");
+  check("the ticket names the event", ticket?.event_name === "Garba Nights Navratri Utsav", ticket?.event_name ?? "");
+  const [bookedGuest] = await q(`select customer_name from public.bookings where id = '${payA.booking_uuid}';`);
+  check("the ticket names the guest on the booking", ticket?.customer_name === bookedGuest.customer_name, ticket?.customer_name ?? "");
+  check("the ticket names the pass category", Boolean(ticket?.pass_name), ticket?.pass_name ?? "");
+  check("the ticket carries the booking reference", /^DND\d{9}$/.test(ticket?.booking_reference ?? ""), ticket?.booking_reference ?? "");
+  check("the ticket reports the payment as paid", ticket?.payment_status === "paid", ticket?.payment_status ?? "");
+  check("the ticket starts valid", ticket?.pass_status === "active" && ticket?.checked_in === false);
+  check("the ticket knows which pass of how many it is", ticket?.pass_number === 1 && ticket?.pass_total === 2);
+  check("the ticket says which night it admits", new Date(ticket?.valid_date).toISOString().slice(0, 10) === "2026-10-14");
+  check(
+    "the ticket read carries no mobile number or email",
+    !Object.keys(ticket).some((key) => /mobile|email/i.test(key)),
+    Object.keys(ticket).join(", "),
+  );
+
+  const unknownQrToken = await rpc("get_pass_by_token", { p_qr_token: "0".repeat(64) });
+  check("an unknown QR token resolves to nothing", unknownQrToken.length === 0);
+
+  // A gate scan flips the pass; the reads have to show it.
+  await run(`
+    update public.digital_passes
+    set checked_in = true, checked_in_at = now(), status = 'used'
+    where booking_id = '${payA.booking_uuid}' and pass_number = 1;
+  `);
+  const [scanned] = await rpc("get_pass_by_token", { p_qr_token: passesOfA[0].qr_token });
+  check("a scanned pass reports as used and checked in", scanned?.pass_status === "used" && scanned?.checked_in === true);
+  check("a scanned pass keeps its check-in time", Boolean(scanned?.checked_in_at));
+  await run(`
+    update public.digital_passes
+    set checked_in = false, checked_in_at = null, status = 'active'
+    where booking_id = '${payA.booking_uuid}' and pass_number = 1;
+  `);
+
+  // Refunds cancel passes: the same read must show it, not a stale VALID.
+  const refundedPasses = await rpc("get_booking_passes", { p_public_token: payB.public_token });
+  check(
+    "a refunded booking's passes read as cancelled",
+    refundedPasses.length === 2 && refundedPasses.every((row) => row.pass_status === "cancelled"),
+    refundedPasses.map((row) => row.pass_status).join(", "),
+  );
+
+  const noPassesBooking = await createBooking({ p_customer_mobile: "+919800000107", p_idempotency_key: "pay-key-7" });
+  check(
+    "a booking without passes returns no rows",
+    (await rpc("get_booking_passes", { p_public_token: noPassesBooking.public_token })).length === 0,
+  );
+
+  const [duplicateReplay] = await rpc("confirm_booking_payment", {
+    p_razorpay_order_id: ORDER_1,
+    p_razorpay_payment_id: PAYMENT_1,
+    p_amount_paise: 99800,
+  });
+  check("re-confirming does not add a pass", duplicateReplay.passes_issued === 2, `${duplicateReplay.passes_issued}`);
+  check(
+    "the booking still has exactly one pass per slot",
+    (await q(`
+      select count(*)::int as n, count(distinct pass_number)::int as slots
+      from public.digital_passes where booking_id = '${payA.booking_uuid}';
+    `))[0].n === 2 &&
+      (await q(`select count(distinct pass_number)::int as slots from public.digital_passes where booking_id = '${payA.booking_uuid}';`))[0]
+        .slots === 2,
+  );
+
+  for (const [fn, signature] of [
+    ["get_booking_passes", "uuid"],
+    ["get_pass_by_token", "text"],
+  ]) {
+    const [grants] = await q(`
+      select has_function_privilege('anon', 'public.${fn}(${signature})', 'execute') as anon_can,
+             has_function_privilege('authenticated', 'public.${fn}(${signature})', 'execute') as authenticated_can,
+             has_function_privilege('service_role', 'public.${fn}(${signature})', 'execute') as service_can;
+    `);
+    check(
+      `${fn} is service_role only`,
+      grants.anon_can === false && grants.authenticated_can === false && grants.service_can === true,
+      JSON.stringify(grants),
+    );
+  }
+
+  const scanStraightFromTable = await (async () => {
+    await run("set role anon;");
+    try {
+      await q(`select pass_id, qr_token from public.digital_passes;`);
+      return { rows: true, error: null };
+    } catch (error) {
+      return { rows: false, error: error.message };
+    } finally {
+      await run("reset role;");
+    }
+  })();
+  check(
+    "anon cannot read digital passes",
+    scanStraightFromTable.rows === false,
+    scanStraightFromTable.error ?? "rows were returned",
+  );
 
   // ---------------------------------------------------------------------------
   section("Result");

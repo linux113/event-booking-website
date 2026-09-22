@@ -170,6 +170,29 @@ export function formatTimeRange(start: string | null, end: string | null): strin
 }
 
 /**
+ * `2026-10-11T18:04:00.000Z` → `11 Oct 2026, 6:04 pm UTC`.
+ *
+ * A specific moment (when a booking was created, when a pass was scanned), as
+ * opposed to a calendar date. Locale-independent and labelled UTC, so a timestamp
+ * read at a gate or in a support reply is never ambiguous about which clock it
+ * came from. Returns the raw value if it cannot be parsed.
+ */
+export function formatTimestamp(value: string): string {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const hours24 = date.getUTCHours();
+  const hours12 = hours24 % 12 === 0 ? 12 : hours24 % 12;
+  const minutes = String(date.getUTCMinutes()).padStart(2, "0");
+
+  return `${String(date.getUTCDate()).padStart(2, "0")} ${months[date.getUTCMonth()]} ${date.getUTCFullYear()}, ${hours12}:${minutes} ${hours24 < 12 ? "am" : "pm"} UTC`;
+}
+
+/**
  * Format a whole-rupee amount, e.g. `399` → `"₹399"`.
  *
  * Uses `Intl.NumberFormat` so amounts group correctly per locale (₹1,099) and

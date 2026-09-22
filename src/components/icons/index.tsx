@@ -65,6 +65,45 @@ export function CheckIcon(props: IconProps) {
   );
 }
 
+export function DownloadIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 3v12m0 0 4.5-4.5M12 15l-4.5-4.5" />
+      <path d="M4 17v1.5A2.5 2.5 0 0 0 6.5 21h11A2.5 2.5 0 0 0 20 18.5V17" />
+    </Icon>
+  );
+}
+
+export function PrinterIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M7 9V4h10v5" />
+      <rect x="3" y="9" width="18" height="7" rx="2.5" />
+      <path d="M7 16h10v5H7z" />
+    </Icon>
+  );
+}
+
+export function ShieldCheckIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 3l7 3v6c0 4.2-2.9 7.6-7 9-4.1-1.4-7-4.8-7-9V6l7-3Z" />
+      <path d="m9 12 2 2 4-4" />
+    </Icon>
+  );
+}
+
+export function QrCodeIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="3" width="7" height="7" rx="1.5" />
+      <rect x="14" y="3" width="7" height="7" rx="1.5" />
+      <rect x="3" y="14" width="7" height="7" rx="1.5" />
+      <path d="M14 14h3v3h-3zM20 14v.01M14 20v.01M17.5 20.5h3.5V17" />
+    </Icon>
+  );
+}
+
 export function SparkleIcon(props: IconProps) {
   return (
     <Icon {...props}>

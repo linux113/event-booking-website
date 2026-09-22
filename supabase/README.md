@@ -26,7 +26,7 @@ supabase/
 | `event_features` | Production inclusions (anchor, DJ, drone…) | ✅ rows of a published event |
 | `bookings` | One booking = one pass category on one night | ❌ staff only |
 | `payment_events` | One row per Razorpay webhook delivery (the duplicate guard) | ❌ staff only |
-| `digital_passes` | Scannable QR passes issued after payment | ❌ staff only |
+| `digital_passes` | One row per purchased pass: readable `pass_id` (`PS-000123`), secret 64-character `qr_token`, state and check-in | ❌ staff only — read through `service_role` functions only |
 | `check_ins` | Gate scan log (one row per pass, ever) | ❌ staff only |
 | `gallery` | Photo/video metadata (files in Storage) | ✅ published only |
 | `admin_users` | Auth users allow-listed as staff | ❌ admins only |
@@ -68,6 +68,20 @@ second one. The customer-facing reference comes from `generate_booking_id()`
 | `PB005` | Head count contradicts the pass composition | the required head count |
 | `PB006` | Night not found / belongs to another event | — |
 
+Passes are **not** readable by `anon` at all — not even a customer's own. Reading one
+means proving you have its secret:
+
+- **`get_booking_passes(p_public_token uuid)`** returns the passes of one booking, for the
+  confirmation page. The token is the booking's random uuid, handed out in the
+  confirmation link.
+- **`get_pass_by_token(p_qr_token text)`** returns one pass from the 64-character token
+  inside its QR code, for the ticket page and the gate view.
+
+Both return the pass, its night and the event, and **no** mobile number or email address,
+so a ticket is safe to show at a gate or screenshot into a group chat. Both are
+`service_role` only: a leaked anon key cannot enumerate passes, guess a token from a
+sequential pass id, or read the check-in log.
+
 Everything else public (events, nights, features, highlights, gallery) is a plain RLS
 read on tables that hold no personal data.
 
@@ -103,6 +117,28 @@ page; `booking_id` (`DND…`) stays the human-quoted reference. `payment_events.
 unique, and `payment_events` has RLS enabled with no policies and no grants to `anon` or
 `authenticated`, so the table is invisible to the browser.
 
+### Digital passes
+
+A pass is issued by the same transaction that confirms the payment, and by nothing else:
+
+- `confirm_booking_payment()` inserts one row per purchased pass, numbered `1..quantity`,
+  in the same transaction that sets `payment_status = 'paid'`. A booking is therefore
+  confirmed with all of its passes or with none of them.
+- The unique index on `(booking_id, pass_number)` means a booking can never hold two
+  "pass 1"s, and the insert is written as `on conflict (booking_id, pass_number) do
+  nothing` — a replayed confirmation or a retried webhook adds no pass. A duplicate
+  callback is also caught earlier, by the `payment_status = 'paid'` re-read.
+- `pass_id` (`PS-000123`) is the number printed on the pass. It is a sequence value, so it
+  is treated as a label, never as a credential.
+- `qr_token` is 64 hex characters of `gen_random_uuid()` output, unique across the table,
+  and is what the QR code contains (as `<site>/verify/<token>`). Tokens never appear in a
+  rendered page: only inside the links and the QR itself.
+- `refund_booking_payment()` cancels every pass of the booking in the same statement that
+  marks the booking refunded, so a refunded pass cannot be scanned.
+- `digital_passes.checked_in` / `checked_in_at` are constrained to move together, and
+  `check_ins.digital_pass_id` is unique: one entry per pass, ever. The gate view in this
+  step only *reads* that state; writing it is the authenticated admin step.
+
 ### Integrity rules worth knowing
 
 - **Prices cannot be tampered with.** `bookings.subtotal` and `number_of_people`
@@ -121,6 +157,8 @@ unique, and `payment_events` has RLS enabled with no policies and no grants to `
   availability function uses.
 - **No digital pass is issued before payment.** Passes are created after a verified
   payment, so nothing in the booking flow can produce a scannable pass.
+- **One pass per slot, per booking.** `(booking_id, pass_number)` is unique, so passes
+  are numbered exactly `1..quantity` however many times a confirmation is replayed.
 - **A confirmed payment cannot be lost.** If the night fills up while the customer is
   paying, the booking is still confirmed and an organiser note is recorded —
   `capacity exceeded when payment was confirmed — needs organiser review` — instead of
@@ -157,7 +195,7 @@ Supabase **SQL editor**.
 | ---- | -------------- |
 | `anon` | Read published events, their nights, their pass categories (active or not), features, highlights and published gallery rows, plus per-night availability counts through `get_event_night_availability()`. Nothing else — no read or write access to bookings, passes, check-ins or admin users. |
 | `authenticated` | Same public reads. Gains admin powers only when present in `admin_users` with an active role (`is_admin()` for owner/admin/manager, `is_staff()` to also include scanners). |
-| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
+| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, the pass reads (`get_booking_passes`, `get_pass_by_token`), and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
 
 There is deliberately **no INSERT policy on `bookings`**: bookings are created by
 server code after recalculating the amount from `pass_categories`, so the browser

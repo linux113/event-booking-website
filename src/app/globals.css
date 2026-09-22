@@ -99,3 +99,53 @@
     scroll-behavior: auto;
   }
 }
+
+/*
+ * Printing a pass.
+ *
+ * People print passes — for grandparents, for a group arriving in separate cars,
+ * for a phone that might die. A pass therefore has to survive being put on paper:
+ * in print the site chrome, the hero copy and the buttons step aside, the page
+ * turns white (printing the dark background would empty a cartridge and the ticket
+ * would land on the reverse sheet), and the ticket itself keeps its colours.
+ *
+ * Only `.pass-ticket` and whatever is inside it print; everything else is either
+ * matched here or marked `.no-print` by the page.
+ */
+@media print {
+  html {
+    color-scheme: light;
+  }
+
+  body {
+    background: #ffffff !important;
+    color: #191233 !important;
+  }
+
+  body > header,
+  body > footer,
+  a[href="#main"],
+  .no-print {
+    display: none !important;
+  }
+
+  main {
+    display: block !important;
+    padding: 0 !important;
+  }
+
+  .pass-ticket {
+    border: 1px solid #ded7f0 !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+  }
+
+  .pass-ticket * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  @page {
+    margin: 12mm;
+  }
+}

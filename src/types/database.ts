@@ -342,6 +342,7 @@ export interface Database {
           qr_token: string;
           qr_code_url: string | null;
           valid_date: string;
+          pass_number: number;
           status: DigitalPassStatus;
           checked_in: boolean;
           checked_in_at: string | null;
@@ -354,6 +355,7 @@ export interface Database {
           qr_token?: string;
           qr_code_url?: string | null;
           valid_date: string;
+          pass_number: number;
           status?: DigitalPassStatus;
           checked_in?: boolean;
           checked_in_at?: string | null;
@@ -366,6 +368,7 @@ export interface Database {
           qr_token?: string;
           qr_code_url?: string | null;
           valid_date?: string;
+          pass_number?: number;
           status?: DigitalPassStatus;
           checked_in?: boolean;
           checked_in_at?: string | null;
@@ -585,6 +588,50 @@ export interface Database {
           pass_composition: string | null;
           passes_issued: number;
           created_at: string;
+        }[];
+      };
+      get_booking_passes: {
+        Args: { p_public_token: string };
+        Returns: {
+          pass_id: string;
+          qr_token: string;
+          pass_status: string;
+          checked_in: boolean;
+          checked_in_at: string | null;
+          valid_date: string;
+          issued_at: string;
+          pass_number: number;
+          pass_total: number;
+        }[];
+      };
+      get_pass_by_token: {
+        Args: { p_qr_token: string };
+        Returns: {
+          pass_id: string;
+          qr_token: string;
+          pass_status: string;
+          checked_in: boolean;
+          checked_in_at: string | null;
+          valid_date: string;
+          issued_at: string;
+          pass_number: number;
+          pass_total: number;
+          booking_reference: string;
+          booking_status: string;
+          payment_status: string;
+          customer_name: string;
+          quantity: number;
+          total_amount: number;
+          currency: string;
+          event_name: string;
+          event_date: string;
+          start_time: string | null;
+          end_time: string | null;
+          venue_name: string;
+          venue_address: string | null;
+          city: string;
+          pass_name: string;
+          pass_composition: string | null;
         }[];
       };
       create_pending_booking: {

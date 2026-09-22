@@ -41,7 +41,19 @@ type ButtonAsButtonProps = ButtonBaseProps & {
 
 export type ButtonProps = ButtonAsLinkProps | ButtonAsButtonProps;
 
-function buttonClasses({ variant = "primary", size = "md", className }: ButtonBaseProps) {
+/**
+ * The shared button classes.
+ *
+ * Exported for the few places that need button styling on an element that is
+ * neither a `next/link` nor a `<button>` — a download, for instance, has to be a
+ * plain `<a download>` so the browser saves the file instead of the router
+ * navigating to it.
+ */
+export function buttonClasses({
+  variant = "primary",
+  size = "md",
+  className,
+}: Omit<ButtonBaseProps, "children"> = {}) {
   return cn(baseStyles, variantStyles[variant], sizeStyles[size], className);
 }
 
@@ -54,7 +66,7 @@ export function ButtonLink({
   ...linkProps
 }: ButtonAsLinkProps) {
   return (
-    <Link className={buttonClasses({ variant, size, className, children })} {...linkProps}>
+    <Link className={buttonClasses({ variant, size, className })} {...linkProps}>
       {children}
     </Link>
   );
@@ -71,7 +83,7 @@ export function ButtonElement({
 }: ButtonAsButtonProps) {
   return (
     <button
-      className={buttonClasses({ variant, size, className, children })}
+      className={buttonClasses({ variant, size, className })}
       type={type ?? "button"}
       {...buttonProps}
     >

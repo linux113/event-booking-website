@@ -1,13 +1,21 @@
+import { PassList } from "@/components/pass/pass-list";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { WhatsAppButton } from "@/components/layout/whatsapp-button";
 import { CalendarIcon, CheckIcon, ClockIcon, UsersIcon } from "@/components/icons";
 import { cn } from "@/lib/utils";
-import { formatEventDate, formatInr, formatTimeRange } from "@/lib/format";
+import { formatEventDate, formatInr, formatTimeRange, formatTimestamp } from "@/lib/format";
 import type { BookingStatusView } from "@/types/booking";
+import type { DigitalPassSummary } from "@/types/pass";
 
 type BookingConfirmationProps = {
   booking: BookingStatusView;
+  /**
+   * The passes issued for this booking, when the caller has them. Each row links to
+   * its own pass page (and to its download), so the confirmation is also the way
+   * back to the QR codes; the panel itself never creates one.
+   */
+  passes?: DigitalPassSummary[];
   className?: string;
 };
 
@@ -23,7 +31,7 @@ type BookingConfirmationProps = {
  * It never claims a payment that is not recorded: "payment successful" only
  * appears for a booking the server has marked paid.
  */
-export function BookingConfirmation({ booking, className }: BookingConfirmationProps) {
+export function BookingConfirmation({ booking, passes = [], className }: BookingConfirmationProps) {
   const timeRange = formatTimeRange(booking.startTime, booking.endTime);
   const isPaid = booking.status === "confirmed" && booking.paymentStatus === "paid";
   const isRefunded = booking.status === "refunded" || booking.paymentStatus === "refunded";
@@ -88,6 +96,15 @@ export function BookingConfirmation({ booking, className }: BookingConfirmationP
           </p>
         ) : null}
       </div>
+
+      {passes.length > 0 ? (
+        <div className="flex flex-col gap-3">
+          <h3 className="text-sm font-semibold tracking-tight">
+            {passes.length === 1 ? "Your digital pass" : `Your ${passes.length} digital passes`}
+          </h3>
+          <PassList passes={passes} />
+        </div>
+      ) : null}
 
       <dl className="border-border bg-surface/50 divide-border/60 grid divide-y rounded-2xl border sm:grid-cols-2 sm:divide-y-0">
         <Row
@@ -173,26 +190,10 @@ export function BookingConfirmation({ booking, className }: BookingConfirmationP
 
       <p className="text-muted/80 flex items-center gap-2 text-xs">
         <UsersIcon className="size-3.5" />
-        Booking {booking.reference} · created {formatCreatedAt(booking.createdAt)}
+        Booking {booking.reference} · created {formatTimestamp(booking.createdAt)}
       </p>
     </div>
   );
-}
-
-/** Locale-independent "12 Oct 2026, 6:04 pm" from the stored timestamp. */
-function formatCreatedAt(value: string): string {
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  const hours24 = date.getUTCHours();
-  const hours12 = hours24 % 12 === 0 ? 12 : hours24 % 12;
-  const minutes = String(date.getUTCMinutes()).padStart(2, "0");
-
-  return `${String(date.getUTCDate()).padStart(2, "0")} ${months[date.getUTCMonth()]} ${date.getUTCFullYear()}, ${hours12}:${minutes} ${hours24 < 12 ? "am" : "pm"} UTC`;
 }
 
 function Row({ label, value, wide, strong }: { label: string; value: string; wide?: boolean; strong?: boolean }) {

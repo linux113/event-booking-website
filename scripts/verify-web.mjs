@@ -116,6 +116,27 @@ function contextAround(source, needle, span = 70) {
   return source.slice(Math.max(0, index - span), index + span).replace(/\s+/g, " ").trim();
 }
 
+/** Every `.css` file under a directory, recursively (Next nests them per route). */
+function readCss(dir) {
+  const files = [];
+
+  function walk(current) {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, entry.name);
+
+      if (entry.isDirectory()) {
+        walk(path);
+      } else if (entry.name.endsWith(".css")) {
+        files.push(readFileSync(path, "utf8"));
+      }
+    }
+  }
+
+  walk(dir);
+
+  return files.join("\n");
+}
+
 /** Every `.js` file under a directory, recursively (client chunks nest per route). */
 function readChunks(dir) {
   const files = [];
@@ -1326,13 +1347,398 @@ async function main() {
   check("a payment belonging to another order is refused", crossedVerify.status === 400, `status ${crossedVerify.status}`);
   check("no booking was confirmed by the crossed payment", (await bookingRow(amountBooking.booking.reference)).payment_status === "unpaid");
 
-  // ---- 9. the key secret never reaches the browser ------------------------
+  // ---------------------------------------------------------------------------
+  section("Digital passes: pass ids, QR tokens, ticket pages, gate view");
+  // ---------------------------------------------------------------------------
+  // Everything below is read-only from the app's side. A pass is created by the
+  // database when a payment is verified — never by a page being opened — so the
+  // reloads in this section must all report the same pass ids.
+  const passLinks = await import("../src/lib/pass/links.ts");
+  const passStatus = await import("../src/lib/pass/status.ts");
+
+  const paidPasses = await dbQuery(
+    `select dp.pass_id, dp.qr_token, dp.pass_number, dp.status, dp.valid_date
+     from public.digital_passes dp
+     join public.bookings b on b.id = dp.booking_id
+     where b.customer_mobile = $1
+     order by dp.pass_number`,
+    [MOBILE_PAID],
+  );
+  const [passEvent] = await dbQuery(`select name from public.events where id = $1`, [EVENT_ID]);
+
+  check("the paid booking owns one pass per purchased pass", paidPasses.length === 2, `${paidPasses.length}`);
+  check(
+    "every pass has a sequential, human-readable pass id",
+    paidPasses.every((row) => /^PS-\d{6}$/.test(row.pass_id)),
+    paidPasses.map((row) => row.pass_id).join(", "),
+  );
+  check(
+    "every QR token is 64 random hex characters",
+    paidPasses.every((row) => /^[0-9a-f]{64}$/.test(row.qr_token)),
+    paidPasses.map((row) => row.qr_token.slice(0, 10)).join(", "),
+  );
+  check("the two passes have different tokens", paidPasses[0].qr_token !== paidPasses[1].qr_token);
+
+  const [tokenTally] = await dbQuery(
+    `select count(*)::int as n, count(distinct qr_token)::int as unique_tokens from public.digital_passes`,
+  );
+  check(
+    "no two passes in the database share a QR token",
+    tokenTally.n === tokenTally.unique_tokens,
+    `${tokenTally.n} passes, ${tokenTally.unique_tokens} tokens`,
+  );
+
+  // The QR code's payload: an absolute verification URL and nothing else.
+  const verifyUrl = passLinks.buildVerifyUrl(paidPasses[0].qr_token);
+  check(
+    "the QR encodes the verification URL for that pass",
+    /^https?:\/\//.test(verifyUrl) && verifyUrl.endsWith(`/verify/${paidPasses[0].qr_token}`),
+    verifyUrl,
+  );
+  check(
+    "the QR payload contains no personal information",
+    !/Payal|payal@example\.com|9800000201|@/.test(verifyUrl.replace(/^https?:\/\//, "")),
+    verifyUrl,
+  );
+  check(
+    "a token that is not 64 hex characters is rejected before any lookup",
+    passLinks.isQrToken("not-a-token") === false &&
+      passLinks.isQrToken(paidPasses[0].qr_token) === true &&
+      passLinks.isQrToken("F".repeat(64)) === false,
+  );
+
+  // The pass's own state machine, independent of any page.
+  check(
+    "an unused pass for tonight is VALID",
+    passStatus.toPassDisplayStatus(
+      { status: "active", checkedIn: false, validDate: "2099-01-01" },
+      "2026-10-11",
+    ) === "valid",
+  );
+  check(
+    "a scanned pass reads as CHECKED IN",
+    passStatus.toPassDisplayStatus(
+      { status: "used", checkedIn: true, validDate: "2099-01-01" },
+      "2026-10-11",
+    ) === "checked-in",
+  );
+  check(
+    "a cancelled pass stays cancelled even if it was never used",
+    passStatus.toPassDisplayStatus(
+      { status: "cancelled", checkedIn: false, validDate: "2099-01-01" },
+      "2026-10-11",
+    ) === "cancelled",
+  );
+  check(
+    "a pass for a night that has passed reads as EXPIRED",
+    passStatus.toPassDisplayStatus(
+      { status: "active", checkedIn: false, validDate: "2026-10-11" },
+      "2026-10-20",
+    ) === "expired",
+  );
+
+  // ---- the confirmation page the customer lands on ------------------------
+  const successHtml = await fetchPage(`/booking/success?token=${order.booking.publicToken}`);
+  const successPage = visibleText(successHtml);
+  check(
+    "the success page reports the verified payment",
+    successPage.includes("Payment successful"),
+    contextAround(successPage, "Payment successful"),
+  );
+  check(
+    "the success page shows the booking id",
+    successPage.includes("Booking ID") && successPage.includes(order.booking.reference),
+    contextAround(successPage, "Booking ID"),
+  );
+  check(
+    "the success page shows the event date from the database",
+    successPage.includes("Event date") && successPage.includes(nightLabel),
+    contextAround(successPage, "Event date"),
+  );
+  check(
+    "the success page shows the pass category",
+    successPage.includes("Pass category") && successPage.includes(couplePass.name),
+    contextAround(successPage, "Pass category"),
+  );
+  check(
+    "the success page shows the amount actually paid",
+    successPage.includes("Amount paid") && successPage.includes("998"),
+    contextAround(successPage, "Amount paid"),
+  );
+  check(
+    "the success page lists every issued pass id",
+    paidPasses.every((row) => successPage.includes(row.pass_id)),
+    paidPasses.map((row) => row.pass_id).join(", "),
+  );
+  check(
+    "every pass on the success page links to its own digital pass",
+    paidPasses.every((row) => stripScripts(successHtml).includes(`/pass/${row.pass_id}?t=${row.qr_token}`)),
+  );
+  check("the success page is not indexable", /noindex/.test(successHtml));
+  check(
+    "the success page never prints the customer's contact details",
+    !successPage.includes("9800000201") && !successPage.includes("payal@example.com"),
+  );
+
+  // An unpaid booking must not be congratulated, and must have nothing to show.
+  const unpaidSuccess = visibleText(await fetchPage(`/booking/success?token=${amountBooking.booking.publicToken}`));
+  check(
+    "an unpaid booking's confirmation page does not claim success",
+    !unpaidSuccess.includes("Payment successful"),
+    contextAround(unpaidSuccess, "payment"),
+  );
+  check(
+    "it says no verified payment has arrived",
+    unpaidSuccess.includes("no verified payment has reached us yet"),
+    contextAround(unpaidSuccess, "verified payment"),
+  );
+  check(
+    "it links to no pass",
+    !/\/pass\/PS-\d+/.test(unpaidSuccess),
+  );
+  check("it still shows the booking reference", unpaidSuccess.includes(amountBooking.booking.reference));
+
+  // ---- the pass itself ----------------------------------------------------
+  const passHtml = await fetchPage(`/pass/${paidPasses[0].pass_id}?t=${paidPasses[0].qr_token}`);
+  const passPage = visibleText(passHtml);
+  check(
+    "the pass page opens from its own link",
+    passPage.includes(paidPasses[0].pass_id) && passPage.includes("Payal Mehta"),
+    contextAround(passPage, paidPasses[0].pass_id),
+  );
+  check(
+    "the pass page is tied to its booking and event",
+    passPage.includes(order.booking.reference) && passPage.includes(passEvent.name),
+    contextAround(passPage, order.booking.reference),
+  );
+  check("the pass page shows the night from the database", passPage.includes(nightLabel), contextAround(passPage, "2026"));
+  check("the pass page shows the pass category", passPage.includes(couplePass.name));
+  check(
+    "the pass page shows the number of the pass within the booking",
+    passPage.includes("Pass 1 of 2"),
+    contextAround(passPage, "Pass 1 of 2"),
+  );
+  const secondPassPage = visibleText(
+    await fetchPage(`/pass/${paidPasses[1].pass_id}?t=${paidPasses[1].qr_token}`),
+  );
+  check(
+    "the other pass shows its own number and not this one's",
+    secondPassPage.includes("Pass 2 of 2") && !secondPassPage.includes("Pass 1 of 2"),
+    contextAround(secondPassPage, "Pass 2 of 2"),
+  );
+  check("a paid, unused pass renders as VALID", passPage.includes("VALID"), contextAround(passPage, "VALID"));
+  check(
+    "the QR code is drawn inline in the page",
+    /shape-rendering="crispEdges"/.test(passHtml) && /aria-label="QR code that verifies pass/.test(passHtml),
+  );
+  check(
+    "the pass page offers print and download",
+    passPage.includes("Print pass") && passPage.includes("Download pass"),
+  );
+  check(
+    "the QR token is never rendered as visible text",
+    !passPage.includes(paidPasses[0].qr_token),
+  );
+  check(
+    "the pass page never prints the customer's contact details",
+    !passPage.includes("9800000201") && !passPage.includes("payal@example.com"),
+  );
+  check("the pass page is not indexable", /noindex/.test(passHtml));
+
+  const incompletePass = visibleText(await fetchPage(`/pass/${paidPasses[0].pass_id}`));
+  check(
+    "a pass link without its code explains what is missing",
+    incompletePass.includes("This pass link is incomplete"),
+    contextAround(incompletePass, "incomplete"),
+  );
+
+  // ---- downloading the pass ----------------------------------------------
+  const downloadResponse = await fetch(
+    api(`/pass/${paidPasses[0].pass_id}/download?t=${paidPasses[0].qr_token}`),
+  );
+  const downloadedTicket = await downloadResponse.text();
+  check(
+    "the pass downloads as a vector ticket",
+    downloadResponse.status === 200 &&
+      (downloadResponse.headers.get("content-type") ?? "").includes("image/svg+xml"),
+    `${downloadResponse.status} ${downloadResponse.headers.get("content-type")}`,
+  );
+  check(
+    "the download is named after the pass",
+    /attachment; filename="pass-PS-\d+\.svg"/.test(downloadResponse.headers.get("content-disposition") ?? ""),
+    downloadResponse.headers.get("content-disposition") ?? "",
+  );
+  check(
+    "the downloaded ticket carries the pass, the guest and the QR code",
+    downloadedTicket.includes("SCAN AT THE GATE") &&
+      downloadedTicket.includes(paidPasses[0].pass_id) &&
+      downloadedTicket.includes("Payal Mehta") &&
+      /<path d="M/.test(downloadedTicket),
+  );
+  check(
+    "the downloaded ticket carries no contact details",
+    !downloadedTicket.includes("9800000201") && !downloadedTicket.includes("payal@example.com"),
+  );
+
+  const pngResponse = await fetch(
+    api(`/pass/${paidPasses[0].pass_id}/download?t=${paidPasses[0].qr_token}&format=png`),
+  );
+  const pngBytes = new Uint8Array(await pngResponse.arrayBuffer());
+  check(
+    "just the QR code downloads as a PNG",
+    pngResponse.status === 200 && pngResponse.headers.get("content-type") === "image/png",
+    `${pngResponse.status} ${pngResponse.headers.get("content-type")}`,
+  );
+  check(
+    "the PNG really is a PNG",
+    pngBytes[0] === 0x89 && pngBytes[1] === 0x50 && pngBytes[2] === 0x4e && pngBytes[3] === 0x47,
+    `first bytes ${Array.from(pngBytes.slice(0, 4)).join(",")}`,
+  );
+  check("a downloaded pass is never cached", pngResponse.headers.get("cache-control") === "no-store");
+
+  const missingDownload = await fetch(api(`/pass/PS-999999/download?t=${"a".repeat(64)}`));
+  check("downloading an unknown token is a 404", missingDownload.status === 404, `${missingDownload.status}`);
+
+  // ---- the gate view the QR code opens ------------------------------------
+  const verifyHtml = await fetchPage(`/verify/${paidPasses[0].qr_token}`);
+  const verifyPage = visibleText(verifyHtml);
+  check(
+    "the QR target confirms a valid pass",
+    verifyPage.includes("Valid pass") && verifyPage.includes(paidPasses[0].pass_id),
+    contextAround(verifyPage, "Valid pass"),
+  );
+  check(
+    "the gate view names the guest and the night",
+    verifyPage.includes("Payal Mehta") && verifyPage.includes(nightLabel),
+    contextAround(verifyPage, "Payal Mehta"),
+  );
+  check(
+    "the gate view tells staff what to do",
+    verifyPage.includes("Admit Payal Mehta"),
+    contextAround(verifyPage, "Admit"),
+  );
+  check(
+    "the gate view never exposes contact details",
+    !verifyPage.includes("9800000201") && !verifyPage.includes("payal@example.com"),
+  );
+
+  const unknownVerify = visibleText(await fetchPage(`/verify/${"a".repeat(64)}`));
+  check(
+    "an unknown code is refused at the gate",
+    unknownVerify.includes("Not a valid pass") && !unknownVerify.includes("Valid pass"),
+    contextAround(unknownVerify, "Not a valid pass"),
+  );
+  const malformedVerify = visibleText(await fetchPage("/verify/not-a-token"));
+  check(
+    "a malformed code is refused without a database lookup",
+    malformedVerify.includes("Not a valid pass"),
+    contextAround(malformedVerify, "Not a valid pass"),
+  );
+
+  // ---- a scan and a refund must show up immediately -----------------------
+  await dbQuery(
+    `update public.digital_passes
+     set checked_in = true, checked_in_at = now(), status = 'used'
+     where qr_token = $1`,
+    [paidPasses[0].qr_token],
+  );
+
+  const scannedVerify = visibleText(await fetchPage(`/verify/${paidPasses[0].qr_token}`));
+  check(
+    "a second scan reports the pass as already used",
+    scannedVerify.includes("Already checked in") && !scannedVerify.includes("Admit Payal"),
+    contextAround(scannedVerify, "Already checked in"),
+  );
+  const scannedPass = visibleText(await fetchPage(`/pass/${paidPasses[0].pass_id}?t=${paidPasses[0].qr_token}`));
+  check(
+    "the customer's own pass shows that it has been scanned",
+    scannedPass.includes("CHECKED IN") && scannedPass.includes("already been scanned"),
+    contextAround(scannedPass, "CHECKED IN"),
+  );
+  check(
+    "the second pass is untouched",
+    (await dbQuery(`select status from public.digital_passes where qr_token = $1`, [paidPasses[1].qr_token]))[0]
+      .status === "active",
+  );
+
+  await dbQuery(
+    `update public.digital_passes
+     set checked_in = false, checked_in_at = null, status = 'active'
+     where qr_token = $1`,
+    [paidPasses[0].qr_token],
+  );
+
+  const webhookPasses = await dbQuery(
+    `select dp.pass_id, dp.qr_token
+     from public.digital_passes dp
+     join public.bookings b on b.id = dp.booking_id
+     where b.customer_mobile = $1
+     order by dp.pass_number`,
+    [MOBILE_WEBHOOK],
+  );
+  check("the webhook-only booking also holds its passes", webhookPasses.length === 2, `${webhookPasses.length}`);
+
+  const [refundOutcome] = await dbQuery(`select public.refund_booking_payment($1) as outcome`, [webhookPayment.id]);
+  check("the refund is recorded", refundOutcome.outcome === "refunded", refundOutcome.outcome ?? "");
+  const refundedPass = visibleText(await fetchPage(`/pass/${webhookPasses[0].pass_id}?t=${webhookPasses[0].qr_token}`));
+  check(
+    "a refunded booking's pass reads as CANCELLED",
+    refundedPass.includes("CANCELLED") && refundedPass.includes("no longer valid"),
+    contextAround(refundedPass, "CANCELLED"),
+  );
+  const refundedGate = visibleText(await fetchPage(`/verify/${webhookPasses[0].qr_token}`));
+  check(
+    "the gate refuses a refunded pass",
+    refundedGate.includes("Cancelled pass") && refundedGate.includes("Do not admit"),
+    contextAround(refundedGate, "Cancelled pass"),
+  );
+
+  // ---- reloading must never mint another pass -----------------------------
+  const passesBeforeReload = await passesFor(MOBILE_PAID);
+  const bookingsBeforeReload = await bookingRows(MOBILE_PAID);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await fetchPage(`/booking/success?token=${order.booking.publicToken}`);
+    await fetchPage(`/pass/${paidPasses[1].pass_id}?t=${paidPasses[1].qr_token}`);
+    await fetchPage(`/verify/${paidPasses[1].qr_token}`);
+  }
+
+  const passesAfterReload = await dbQuery(
+    `select dp.pass_id from public.digital_passes dp
+     join public.bookings b on b.id = dp.booking_id
+     where b.customer_mobile = $1
+     order by dp.pass_number`,
+    [MOBILE_PAID],
+  );
+  check(
+    "reloading the confirmation and pass pages issues no extra pass",
+    passesAfterReload.length === passesBeforeReload,
+    `${passesAfterReload.length} passes after 3 reloads`,
+  );
+  check(
+    "the same pass ids come back after every reload",
+    JSON.stringify(passesAfterReload.map((row) => row.pass_id)) ===
+      JSON.stringify(paidPasses.map((row) => row.pass_id)),
+    passesAfterReload.map((row) => row.pass_id).join(", "),
+  );
+  check("reloading creates no second booking", (await bookingRows(MOBILE_PAID)) === bookingsBeforeReload);
+
+  // The PDF-free print path: the built stylesheet has to keep the ticket and drop
+  // the site chrome, or a printed pass arrives with a header, a footer and no QR.
+  const builtCss = readCss(join(REPO_ROOT, DIST_DIR, "static"));
+  check(
+    "the built stylesheet prints the ticket and hides the site chrome",
+    builtCss.includes("@media print") && builtCss.includes(".pass-ticket"),
+    `print rules ${builtCss.includes("@media print") ? "present" : "missing"}`,
+  );
+
+  // ---- 10. the key secret never reaches the browser -----------------------
   const clientChunks = readChunks(join(REPO_ROOT, DIST_DIR, "static", "chunks")).join("\n");
   check("the client bundles contain no key secret", !clientChunks.includes(RAZORPAY_KEY_SECRET));
   check("the client bundles contain no webhook secret", !clientChunks.includes(RAZORPAY_WEBHOOK_SECRET));
   check("checkout is loaded on demand from Razorpay", clientChunks.includes("checkout.razorpay.com"));
 
-  // ---- 10. live keys are refused outright ---------------------------------
+  // ---- 11. live keys are refused outright ---------------------------------
   // `NEXT_PUBLIC_*` values are inlined when the app is built, so switching to live
   // keys means a new build — which is exactly what a deployment would do. The whole
   // point of this section is that even then the server refuses to take money.

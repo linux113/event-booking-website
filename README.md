@@ -39,6 +39,10 @@ renders an explicit empty or error state rather than invented content.
 | `/passes` | Every pass category with its database price, inclusions, pass policy notes, per-night availability |
 | `/book` | Four-step checkout: night, pass, details, review. Creates a `pending` / `unpaid` booking and opens Razorpay Checkout for the amount the server calculated |
 | `/book/status` | Server-rendered confirmation and live booking status, reached with the random token in the customer's confirmation link (noindex, no personal details) |
+| `/booking/success` | Where the browser lands after a verified payment: booking id, event date, pass category, every issued pass id and a button into each digital pass (noindex, read-only) |
+| `/pass/[passId]` | The digital pass itself — mobile-first, ticket-shaped, printable and downloadable. Needs the pass's own 64-character token in `?t=…` (noindex) |
+| `/pass/[passId]/download` | The pass as a standalone SVG ticket, or just the QR code as a PNG (`?format=png`). Token-guarded and never cached |
+| `/verify/[token]` | What the QR code opens — the gate view: `VALID`, `ALREADY CHECKED IN`, `CANCELLED`, `EXPIRED` or `NOT A VALID PASS`. Read-only |
 | `/gallery` | Published photos and videos from the `gallery` table, grouped by album |
 | `/contact` | Contact channels derived from the event row (WhatsApp, phone, email, map), venue block, support hours, FAQ |
 | `/events` | Published events from the database, each with its nights and passes |
@@ -145,6 +149,51 @@ Payments are still **test mode**: the flow is exercised end to end by
 speaks the same two endpoints and signs with the same HMACs, because real test keys are
 yours to create. Swapping in your `rzp_test_…` keys needs no code change.
 
+## Digital passes and QR codes
+
+A pass is the scannable half of a booking. It is created by the same call that confirms
+the payment — never by a page being opened:
+
+1. **Passes are issued by the database.** `confirm_booking_payment()` inserts one row per
+   purchased pass into `digital_passes`, numbered `1..quantity`. A unique index on
+   `(booking_id, pass_number)` means a booking can never end up with two "pass 1"s, and
+   the insert is guarded by `on conflict do nothing`, so a replayed confirmation or a
+   retried webhook adds nothing.
+2. **Two identifiers, one of them secret.** `pass_id` (`PS-000123`) is the readable number
+   printed on the pass and quoted at the gate — it is not a secret. `qr_token` is 64
+   random hex characters and *is* the secret; it is unique across every pass.
+3. **The QR contains nothing but a link.** It encodes
+   `<NEXT_PUBLIC_SITE_URL>/verify/<qr_token>` and nothing else — no name, no mobile
+   number, no email, no booking reference. A scanned code (or a photo of one) therefore
+   reveals nothing that is not already printed on the ticket, and one guest's screenshot
+   can never be turned into another guest's pass.
+4. **The QR is generated on the server**, from the pass's own row, when the page renders
+   (`src/lib/pass/qr.ts`, the `qrcode` package). No third-party QR service, no image
+   bucket, and no stale copy that can outlive the pass it points at.
+5. **The ticket** at `/pass/<pass id>?t=<qr token>` is drawn like a paper ticket, in a
+   light palette that survives being printed on white paper. The path segment is a label;
+   the token is the credential, and the page re-reads the pass from the database on every
+   request, so a scanned, cancelled or out-of-date pass is never shown as valid.
+6. **Download and print.** "Download pass" saves the whole ticket as a self-contained SVG
+   (vector: sharp at A6, no fonts or network needed), "Save just the QR" saves the code as
+   a 1024 px PNG, and the print stylesheet in `globals.css` hides the site chrome so
+   printing produces the ticket and nothing else.
+7. **The gate view is read-only.** `/verify/<token>` reports the state, names the guest and
+   the night and says what to do — but it cannot mark a pass as used. Burning a pass is an
+   authenticated organiser action (the admin dashboard step); an unauthenticated check-in
+   button would let anyone exhaust a stranger's pass.
+8. **Refreshing cannot mint a pass.** The success page, the ticket page and the gate view
+   only ever read. `npm run verify:web` loads all three three times over and asserts the
+   pass ids, the pass count and the booking count are unchanged.
+
+| Pass state | Shown as | Where it comes from |
+| ---------- | -------- | ------------------- |
+| Paid, unused, night still to come | `VALID` | `status = 'active'`, `checked_in = false` |
+| Scanned at the gate | `CHECKED IN` | `checked_in = true` (the database sets `status = 'used'`) |
+| Booking refunded | `CANCELLED` | `status = 'cancelled'` — the refund path cancels every pass |
+| Night already over | `EXPIRED` | derived from `valid_date` (no cron job required) |
+| Unknown or malformed token | `NOT A VALID PASS` | the token matched no row |
+
 ## Where the data comes from
 
 Every public page reads live data through `src/lib/services`. There is no demo data
@@ -161,6 +210,7 @@ Supabase directly.
 | "What to expect" highlights | `event_highlights` |
 | Gallery images and videos | `gallery` (published rows; `alt_text`/`caption` supply the copy) |
 | A booking's own status (confirmation page) | `bookings` through `get_booking_status(public_token)` — statuses, amount and issued pass count only, never customer details |
+| A booking's passes and their QR codes | `digital_passes` through `get_booking_passes(public_token)` (booking page) and `get_pass_by_token(qr_token)` (ticket and gate view) — pass id, state, night and event, never a mobile number or an email address |
 
 Availability is never computed in the browser: `get_event_night_availability()` is a
 `SECURITY DEFINER` function returning counts per night, so a visitor can see that a
@@ -298,7 +348,7 @@ production. `src/config/env.ts` is the only module that reads `process.env`.
 
 | Variable                        | Scope          | Used now? | Purpose                                  |
 | ------------------------------- | -------------- | --------- | ---------------------------------------- |
-| `NEXT_PUBLIC_SITE_URL`          | client + server | yes       | Canonical/OG URLs, absolute links        |
+| `NEXT_PUBLIC_SITE_URL`          | client + server | yes       | Canonical/OG URLs, absolute links, and the base of the URL inside every pass QR code (set it before printing passes) |
 | `NEXT_PUBLIC_SUPABASE_URL`      | client + server | yes       | Supabase project URL (public reads)      |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | client + server | yes       | Supabase anon key (RLS-protected)        |
 | `SUPABASE_SERVICE_ROLE_KEY`     | **server only** | yes — booking creation | Bypasses RLS. Guarded by `server-only` — a client import fails the build |

@@ -312,8 +312,23 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
    * The confirmation is a URL, not client state: navigating to it means a refresh
    * (or a later visit from the same link) shows the same server-rendered page.
    */
-  function goToStatus(token: string) {
+  /**
+   * Where a customer goes once the payment is verified: the confirmation page,
+   * which lists the issued passes and links each one to its QR code. It reads the
+   * same database rows the status page does, so reloading it (or opening it on
+   * another device) is idempotent — passes are issued by the database when the
+   * payment is confirmed, never by a page being opened.
+   */
+  function goToSuccess(token: string) {
     // Typed routes want a literal; the token is the only variable part.
+    router.push(`/booking/success?token=${encodeURIComponent(token)}` as Route);
+  }
+
+  /**
+   * The live status page, used while a payment is still unverified (including the
+   * no-gateway path, where the booking is simply held for the organiser).
+   */
+  function goToStatus(token: string) {
     router.push(`/book/status?token=${encodeURIComponent(token)}` as Route);
   }
 
@@ -465,12 +480,12 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
       const payload = (await response.json()) as PaymentVerifyApiResponse;
 
       if (payload.ok) {
-        goToStatus(payload.payment.booking.publicToken);
+        goToSuccess(payload.payment.booking.publicToken);
         return;
       }
 
       if (await isAlreadyConfirmed(currentOrder.booking.publicToken)) {
-        goToStatus(currentOrder.booking.publicToken);
+        goToSuccess(currentOrder.booking.publicToken);
         return;
       }
 
@@ -480,7 +495,7 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
       console.error("Payment verification request failed", error);
 
       if (await isAlreadyConfirmed(currentOrder.booking.publicToken)) {
-        goToStatus(currentOrder.booking.publicToken);
+        goToSuccess(currentOrder.booking.publicToken);
         return;
       }
 

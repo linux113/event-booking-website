@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Container, Section } from "@/components/ui/container";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
+import { getBookingPasses } from "@/lib/services/passes";
 import { getBookingStatusByToken } from "@/lib/services/payments";
 
 export const metadata: Metadata = {
@@ -56,7 +57,7 @@ export default async function BookingStatusPage({ searchParams }: BookingStatusP
     );
   }
 
-  const result = await getBookingStatusByToken(token);
+  const [result, passesResult] = await Promise.all([getBookingStatusByToken(token), getBookingPasses(token)]);
 
   if (!result.ok) {
     if (result.error.kind === "server-error" || result.error.kind === "not-configured") {
@@ -93,6 +94,9 @@ export default async function BookingStatusPage({ searchParams }: BookingStatusP
   }
 
   const booking = result.booking;
+  // Passes are a second read, and only ever a read: a booking that has none (unpaid,
+  // or refunded before issue) simply shows no pass buttons.
+  const passes = passesResult.ok ? passesResult.data : [];
 
   return (
     <>
@@ -104,7 +108,7 @@ export default async function BookingStatusPage({ searchParams }: BookingStatusP
 
       <Section className="pt-0">
         <Container className="max-w-3xl">
-          <BookingConfirmation booking={booking} />
+          <BookingConfirmation booking={booking} passes={passes} />
         </Container>
       </Section>
     </>
