@@ -103,3 +103,54 @@ export function getRazorpayKeySecret(): string {
 export function getRazorpayWebhookSecret(): string {
   return requireEnv("RAZORPAY_WEBHOOK_SECRET", process.env.RAZORPAY_WEBHOOK_SECRET);
 }
+
+/**
+ * Base URL of the Razorpay API.
+ *
+ * Not part of `.env.example`: nothing in production sets this. It exists so
+ * `npm run verify:web` can point the server at scripts/test/razorpay-stub.mjs and
+ * exercise the payment flow without a Razorpay account. Production keeps the
+ * default, https://api.razorpay.com.
+ */
+export function getRazorpayApiBaseUrl(): string {
+  const configured = process.env.RAZORPAY_API_BASE_URL?.trim();
+
+  return (configured || "https://api.razorpay.com").replace(/\/+$/, "");
+}
+
+/** True when a key id and key secret are both present, i.e. checkout can open. */
+export function isRazorpayConfigured(): boolean {
+  return Boolean(
+    process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID?.trim() && process.env.RAZORPAY_KEY_SECRET?.trim(),
+  );
+}
+
+/**
+ * Live payments stay disabled until they are switched on deliberately.
+ *
+ * Razorpay test keys start with `rzp_test_` and live keys with `rzp_live_`; the
+ * server refuses to create orders with a live key unless this flag is set, so a
+ * live credential can never be used by accident.
+ */
+export function isLiveRazorpayAllowed(): boolean {
+  return process.env.RAZORPAY_ALLOW_LIVE?.trim().toLowerCase() === "true";
+}
+
+/**
+ * Which mode the public key id belongs to, from its prefix (`rzp_test_` /
+ * `rzp_live_`). Lets the UI be honest about test mode instead of hard-coding it —
+ * swapping in live keys changes the copy by itself.
+ */
+export function getPublicPaymentMode(): "test" | "live" | null {
+  const keyId = process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID?.trim().toLowerCase() ?? "";
+
+  if (keyId.startsWith("rzp_test_")) {
+    return "test";
+  }
+
+  if (keyId.startsWith("rzp_live_")) {
+    return "live";
+  }
+
+  return null;
+}

@@ -182,6 +182,35 @@ export interface Database {
         Relationships: [];
       };
 
+      payment_events: {
+        Row: {
+          id: string;
+          event_id: string;
+          event_type: string;
+          razorpay_order_id: string | null;
+          razorpay_payment_id: string | null;
+          amount_paise: number | null;
+          outcome: string;
+          received_at: string;
+          processed_at: string | null;
+        };
+        Insert: {
+          id?: string;
+          event_id: string;
+          event_type: string;
+          razorpay_order_id?: string | null;
+          razorpay_payment_id?: string | null;
+          amount_paise?: number | null;
+          outcome?: string;
+          received_at?: string;
+          processed_at?: string | null;
+        };
+        Update: {
+          outcome?: string;
+          processed_at?: string | null;
+        };
+        Relationships: [];
+      };
       pass_categories: {
         Row: {
           id: string;
@@ -249,6 +278,7 @@ export interface Database {
           razorpay_order_id: string | null;
           razorpay_payment_id: string | null;
           idempotency_key: string | null;
+          public_token: string;
           notes: string | null;
           created_at: string;
           updated_at: string;
@@ -489,6 +519,74 @@ export interface Database {
         Args: Record<string, never>;
         Returns: string;
       };
+      attach_razorpay_order: {
+        Args: { p_booking_id: string; p_razorpay_order_id: string };
+        Returns: { booking_uuid: string; razorpay_order_id: string; attached: boolean }[];
+      };
+      confirm_booking_payment: {
+        Args: { p_razorpay_order_id: string; p_razorpay_payment_id: string; p_amount_paise?: number | null };
+        Returns: {
+          booking_uuid: string;
+          booking_reference: string;
+          public_token: string;
+          booking_status: string;
+          payment_status: string;
+          quantity: number;
+          number_of_people: number;
+          subtotal: number;
+          total_amount: number;
+          event_id: string;
+          event_date: string;
+          start_time: string | null;
+          end_time: string | null;
+          pass_name: string;
+          pass_composition: string | null;
+          currency: string;
+          passes_issued: number;
+          already_confirmed: boolean;
+          capacity_note: string | null;
+        }[];
+      };
+      fail_booking_payment: {
+        Args: { p_razorpay_order_id: string; p_razorpay_payment_id?: string | null };
+        Returns: string;
+      };
+      refund_booking_payment: {
+        Args: { p_razorpay_payment_id: string };
+        Returns: string;
+      };
+      apply_razorpay_event: {
+        Args: {
+          p_event_id: string;
+          p_event_type: string;
+          p_razorpay_order_id?: string | null;
+          p_razorpay_payment_id?: string | null;
+          p_amount_paise?: number | null;
+        };
+        Returns: { duplicate: boolean; outcome: string; booking_reference: string | null; passes_issued: number | null }[];
+      };
+      get_booking_status: {
+        Args: { p_public_token: string };
+        Returns: {
+          booking_reference: string;
+          booking_status: string;
+          payment_status: string;
+          quantity: number;
+          number_of_people: number;
+          total_amount: number;
+          currency: string;
+          event_name: string;
+          event_date: string;
+          start_time: string | null;
+          end_time: string | null;
+          venue_name: string;
+          city: string;
+          pass_name: string;
+          pass_composition: string | null;
+          passes_issued: number;
+          created_at: string;
+        }[];
+      };
       create_pending_booking: {
         Args: {
           p_event_id: string;
@@ -504,6 +602,7 @@ export interface Database {
         Returns: {
           booking_uuid: string;
           booking_reference: string;
+          public_token: string;
           booking_status: string;
           payment_status: string;
           quantity: number;
@@ -519,6 +618,7 @@ export interface Database {
           pass_name: string;
           pass_composition: string | null;
           currency: string;
+          razorpay_order_id: string | null;
           created_at: string;
           was_existing: boolean;
         }[];

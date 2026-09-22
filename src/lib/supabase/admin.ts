@@ -14,7 +14,8 @@ import type { Database } from "@/types/database";
  * privileged and validate input before using it.
  *
  * Legitimate uses:
- *   - creating a booking + its pass after the payment signature is verified
+ *   - creating a pending booking (create_pending_booking) and its Razorpay order
+ *   - confirming a server-verified payment and issuing its passes
  *   - Razorpay webhook handlers
  *   - scheduled maintenance jobs
  *

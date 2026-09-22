@@ -136,6 +136,7 @@ async function main() {
     "events",
     "gallery",
     "pass_categories",
+    "payment_events",
   ];
   const tables = (await q(`select tablename from pg_tables where schemaname = 'public';`)).map(
     (row) => row.tablename,
@@ -151,7 +152,12 @@ async function main() {
       "id", "booking_id", "customer_name", "customer_mobile", "customer_email",
       "event_date_id", "pass_category_id", "quantity", "number_of_people",
       "subtotal", "total_amount", "booking_status", "payment_status",
-      "razorpay_order_id", "razorpay_payment_id", "created_at", "updated_at",
+      "razorpay_order_id", "razorpay_payment_id", "idempotency_key", "public_token",
+      "created_at", "updated_at",
+    ],
+    payment_events: [
+      "id", "event_id", "event_type", "razorpay_order_id", "razorpay_payment_id",
+      "amount_paise", "outcome", "received_at", "processed_at",
     ],
     digital_passes: [
       "id", "booking_id", "pass_id", "qr_token", "qr_code_url", "valid_date",
@@ -799,6 +805,362 @@ async function main() {
   );
 
   await run(`update public.event_dates set capacity = 1500 where id = '${NIGHT_FULL}';`);
+
+  // ---------------------------------------------------------------------------
+  section("Payments: order attachment, server verification, webhook idempotency");
+  // ---------------------------------------------------------------------------
+  const ORDER_1 = "order_TEST000000000001";
+  const ORDER_2 = "order_TEST000000000002";
+  const ORDER_3 = "order_TEST000000000003";
+  const PAYMENT_1 = "pay_TEST000000000001";
+  const PAYMENT_2 = "pay_TEST000000000002";
+  const PAYMENT_3 = "pay_TEST000000000003";
+
+  /** Calls a payment function with named arguments. */
+  async function rpc(name, args) {
+    const names = Object.keys(args);
+    const placeholders = names.map((key, index) => `${key} => $${index + 1}`).join(", ");
+    return q(`select * from public.${name}(${placeholders})`, Object.values(args));
+  }
+
+  /** Runs a payment call expected to fail and returns the Postgres error. */
+  async function rpcError(name, args) {
+    try {
+      await rpc(name, args);
+      return null;
+    } catch (error) {
+      return error;
+    }
+  }
+
+  const paymentFunctions = [
+    "public.attach_razorpay_order(uuid, text)",
+    "public.confirm_booking_payment(text, text, integer)",
+    "public.fail_booking_payment(text, text)",
+    "public.refund_booking_payment(text)",
+    "public.apply_razorpay_event(text, text, text, text, integer)",
+    "public.get_booking_status(uuid)",
+  ];
+
+  for (const fn of paymentFunctions) {
+    const [grants] = await q(`
+      select has_function_privilege('anon', '${fn}', 'execute') as anon_can,
+             has_function_privilege('authenticated', '${fn}', 'execute') as authenticated_can,
+             has_function_privilege('service_role', '${fn}', 'execute') as service_can;
+    `);
+    check(
+      `${fn.split("(")[0].replace("public.", "")} is service_role only`,
+      grants.anon_can === false && grants.authenticated_can === false && grants.service_can === true,
+      JSON.stringify(grants),
+    );
+  }
+
+  const [paymentFnMeta] = await q(`
+    select p.prosecdef as is_definer,
+           coalesce(array_to_string(p.proconfig, ','), '') as config
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = 'confirm_booking_payment';
+  `);
+  check("payment confirmation is SECURITY DEFINER", paymentFnMeta?.is_definer === true);
+  check(
+    "payment confirmation pins search_path",
+    (paymentFnMeta?.config ?? "").includes("search_path=public"),
+    paymentFnMeta?.config ?? "",
+  );
+
+  const tokenIndex = await q(`
+    select indexdef from pg_indexes
+    where schemaname = 'public' and tablename = 'bookings' and indexname = 'bookings_public_token_idx';
+  `);
+  check(
+    "public tokens are unique at the database level",
+    tokenIndex.length === 1 && /unique/i.test(tokenIndex[0].indexdef),
+    tokenIndex[0]?.indexdef ?? "missing",
+  );
+
+  const eventsRls = await (async () => {
+    await run("set role anon;");
+    try {
+      const rows = await q("select count(*)::int as n from public.payment_events;");
+      return { rows: rows[0].n, error: null };
+    } catch (error) {
+      return { rows: null, error: error.message };
+    } finally {
+      await run("reset role;");
+    }
+  })();
+  check(
+    "anon cannot read payment_events",
+    eventsRls.error !== null || eventsRls.rows === 0,
+    JSON.stringify(eventsRls),
+  );
+
+  // ---- order attachment ------------------------------------------------------
+  const payA = await createBooking({ p_customer_mobile: "+919800000101", p_idempotency_key: "pay-key-1" });
+  check("a new booking gets a public token", /^[0-9a-f-]{36}$/.test(payA.public_token), payA.public_token);
+
+  const attached = (await rpc("attach_razorpay_order", {
+    p_booking_id: payA.booking_uuid,
+    p_razorpay_order_id: ORDER_1,
+  }))[0];
+  check("the order id is stored on the pending booking", attached.razorpay_order_id === ORDER_1 && attached.attached === true);
+  check(
+    "the booking row keeps the order id",
+    (await q(`select razorpay_order_id from public.bookings where id = '${payA.booking_uuid}';`))[0]
+      .razorpay_order_id === ORDER_1,
+  );
+
+  const attachedAgain = (await rpc("attach_razorpay_order", {
+    p_booking_id: payA.booking_uuid,
+    p_razorpay_order_id: ORDER_2,
+  }))[0];
+  check(
+    "attaching twice reuses the first order (no second order for one booking)",
+    attachedAgain.razorpay_order_id === ORDER_1 && attachedAgain.attached === false,
+    JSON.stringify(attachedAgain),
+  );
+
+  const attachUnknown = await rpcError("attach_razorpay_order", {
+    p_booking_id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    p_razorpay_order_id: ORDER_3,
+  });
+  check("attaching an order to an unknown booking fails", attachUnknown?.code === "PC004", attachUnknown?.code ?? "no error");
+
+  // ---- confirmation ---------------------------------------------------------
+  const unknownOrder = await rpcError("confirm_booking_payment", {
+    p_razorpay_order_id: "order_TEST999999999999",
+    p_razorpay_payment_id: PAYMENT_1,
+    p_amount_paise: 99800,
+  });
+  check("an unknown order cannot be confirmed", unknownOrder?.code === "PC001", unknownOrder?.code ?? "no error");
+
+  const wrongAmount = await rpcError("confirm_booking_payment", {
+    p_razorpay_order_id: ORDER_1,
+    p_razorpay_payment_id: PAYMENT_1,
+    p_amount_paise: 100,
+  });
+  check("a payment below the booking amount is rejected", wrongAmount?.code === "PC002", wrongAmount?.code ?? "no error");
+
+  const noPaymentId = await rpcError("confirm_booking_payment", {
+    p_razorpay_order_id: ORDER_1,
+    p_razorpay_payment_id: null,
+    p_amount_paise: 99800,
+  });
+  check("a confirmation without a payment id is rejected", noPaymentId?.code === "PC005", noPaymentId?.code ?? "no error");
+
+  const confirmed = (await rpc("confirm_booking_payment", {
+    p_razorpay_order_id: ORDER_1,
+    p_razorpay_payment_id: PAYMENT_1,
+    p_amount_paise: 99800,
+  }))[0];
+  check("a verified payment marks the booking paid", confirmed.payment_status === "paid", confirmed.payment_status);
+  check("a verified payment confirms the booking", confirmed.booking_status === "confirmed", confirmed.booking_status);
+  check("confirmation is not flagged as a replay", confirmed.already_confirmed === false);
+  check("one digital pass per purchased pass is issued", confirmed.passes_issued === 2, `${confirmed.passes_issued}`);
+
+  const paidRow = (
+    await q(`select payment_status, booking_status, razorpay_payment_id from public.bookings where id = '${payA.booking_uuid}';`)
+  )[0];
+  check(
+    "the booking row stores paid + confirmed + the payment id",
+    paidRow.payment_status === "paid" && paidRow.booking_status === "confirmed" && paidRow.razorpay_payment_id === PAYMENT_1,
+    JSON.stringify(paidRow),
+  );
+
+  const passRows = await q(
+    `select status, valid_date from public.digital_passes where booking_id = '${payA.booking_uuid}';`,
+  );
+  check("exactly two passes exist for a quantity-2 booking", passRows.length === 2, `${passRows.length} passes`);
+  check(
+    "each pass is active and valid on the booked night",
+    passRows.every((row) => row.status === "active" && new Date(row.valid_date).toISOString().slice(0, 10) === "2026-10-14"),
+    JSON.stringify(passRows),
+  );
+
+  const replayConfirm = (await rpc("confirm_booking_payment", {
+    p_razorpay_order_id: ORDER_1,
+    p_razorpay_payment_id: PAYMENT_1,
+    p_amount_paise: 99800,
+  }))[0];
+  check("a repeated confirmation is reported as already confirmed", replayConfirm.already_confirmed === true);
+  check("the replay issues no extra passes", replayConfirm.passes_issued === 2, `${replayConfirm.passes_issued}`);
+  check(
+    "the pass count did not grow on replay",
+    (await q(`select count(*)::int as n from public.digital_passes where booking_id = '${payA.booking_uuid}';`))[0].n === 2,
+  );
+
+  const payB = await createBooking({ p_customer_mobile: "+919800000102", p_idempotency_key: "pay-key-2" });
+  await rpc("attach_razorpay_order", { p_booking_id: payB.booking_uuid, p_razorpay_order_id: ORDER_2 });
+  const reusedPayment = await rpcError("confirm_booking_payment", {
+    p_razorpay_order_id: ORDER_2,
+    p_razorpay_payment_id: PAYMENT_1,
+    p_amount_paise: 99800,
+  });
+  check("one payment cannot confirm a second booking", reusedPayment?.code === "PC003", reusedPayment?.code ?? "no error");
+
+  const confirmedB = (await rpc("confirm_booking_payment", {
+    p_razorpay_order_id: ORDER_2,
+    p_razorpay_payment_id: PAYMENT_2,
+    p_amount_paise: 99800,
+  }))[0];
+  check("the second booking confirms with its own payment", confirmedB.payment_status === "paid");
+
+  // Capacity can still run out between checkout and payment: that must never
+  // silently drop a paid booking.
+  const payC = await createBooking({ p_customer_mobile: "+919800000103", p_idempotency_key: "pay-key-3" });
+  await rpc("attach_razorpay_order", { p_booking_id: payC.booking_uuid, p_razorpay_order_id: ORDER_3 });
+  await run(`update public.event_dates set capacity = 1 where id = '${NIGHT_FREE}';`);
+  const overflow = (await rpc("confirm_booking_payment", {
+    p_razorpay_order_id: ORDER_3,
+    p_razorpay_payment_id: PAYMENT_3,
+    p_amount_paise: 99800,
+  }))[0];
+  check("a paid booking is still confirmed when the night filled up", overflow.booking_status === "confirmed");
+  check(
+    "the overflow is recorded for the organiser instead of dropping the booking",
+    typeof overflow.capacity_note === "string" && /capacity exceeded/.test(overflow.capacity_note),
+    overflow.capacity_note ?? "",
+  );
+  await run(`update public.event_dates set capacity = 1500 where id = '${NIGHT_FREE}';`);
+
+  // ---- failure and refund ---------------------------------------------------
+  const payD = await createBooking({ p_customer_mobile: "+919800000104", p_idempotency_key: "pay-key-4" });
+  await rpc("attach_razorpay_order", { p_booking_id: payD.booking_uuid, p_razorpay_order_id: "order_TEST000000000004" });
+  const failedOutcome = (await rpc("fail_booking_payment", {
+    p_razorpay_order_id: "order_TEST000000000004",
+    p_razorpay_payment_id: "pay_TEST000000000004",
+  }))[0].fail_booking_payment;
+  check("a failed payment is recorded", failedOutcome === "failed", failedOutcome);
+  check(
+    "the booking stays pending but is marked failed",
+    (await q(`select booking_status, payment_status from public.bookings where id = '${payD.booking_uuid}';`))[0]
+      .payment_status === "failed",
+  );
+  const failPaid = (await rpc("fail_booking_payment", {
+    p_razorpay_order_id: ORDER_1,
+    p_razorpay_payment_id: "pay_TEST000000000099",
+  }))[0].fail_booking_payment;
+  check("a late failure never downgrades a paid booking", failPaid === "already_paid", failPaid);
+
+  const refunded = (await rpc("refund_booking_payment", { p_razorpay_payment_id: PAYMENT_2 }))[0].refund_booking_payment;
+  check("a refund marks the booking refunded", refunded === "refunded", refunded);
+  check(
+    "refunded bookings and their passes are updated together",
+    (await q(`select booking_status, payment_status from public.bookings where id = '${payB.booking_uuid}';`))[0]
+      .booking_status === "refunded" &&
+      (await q(`select count(*)::int as n from public.digital_passes where booking_id = '${payB.booking_uuid}' and status = 'cancelled';`))[0]
+        .n === 2,
+  );
+  const refundAgain = (await rpc("refund_booking_payment", { p_razorpay_payment_id: PAYMENT_2 }))[0]
+    .refund_booking_payment;
+  check("a repeated refund is idempotent", refundAgain === "already_refunded", refundAgain);
+
+  // ---- webhook dispatcher ---------------------------------------------------
+  const payE = await createBooking({ p_customer_mobile: "+919800000105", p_idempotency_key: "pay-key-5" });
+  const ORDER_5 = "order_TEST000000000005";
+  const PAYMENT_5 = "pay_TEST000000000005";
+  await rpc("attach_razorpay_order", { p_booking_id: payE.booking_uuid, p_razorpay_order_id: ORDER_5 });
+
+  const ignoredOrderPaid = (await rpc("apply_razorpay_event", {
+    p_event_id: "evt_order_paid_no_payment",
+    p_event_type: "order.paid",
+    p_razorpay_order_id: ORDER_5,
+    p_razorpay_payment_id: null,
+    p_amount_paise: 99800,
+  }))[0];
+  check(
+    "an order.paid delivery without a payment id is recorded and left alone",
+    ignoredOrderPaid.duplicate === false && ignoredOrderPaid.outcome === "ignored",
+    JSON.stringify(ignoredOrderPaid),
+  );
+
+  const captured = (await rpc("apply_razorpay_event", {
+    p_event_id: "evt_captured_1",
+    p_event_type: "payment.captured",
+    p_razorpay_order_id: ORDER_5,
+    p_razorpay_payment_id: PAYMENT_5,
+    p_amount_paise: 99800,
+  }))[0];
+  check("payment.captured confirms the booking", captured.outcome === "confirmed", captured.outcome);
+  check("the webhook reports the booking reference", captured.booking_reference === payE.booking_reference);
+  check("the webhook reports the passes it issued", captured.passes_issued === 2, `${captured.passes_issued}`);
+
+  const duplicateDelivery = (await rpc("apply_razorpay_event", {
+    p_event_id: "evt_captured_1",
+    p_event_type: "payment.captured",
+    p_razorpay_order_id: ORDER_5,
+    p_razorpay_payment_id: PAYMENT_5,
+    p_amount_paise: 99800,
+  }))[0];
+  check("a retried delivery is recognised as a duplicate", duplicateDelivery.duplicate === true && duplicateDelivery.outcome === "duplicate");
+  check(
+    "the duplicate delivery did not issue more passes",
+    (await q(`select count(*)::int as n from public.digital_passes where booking_id = '${payE.booking_uuid}';`))[0].n === 2,
+  );
+  check(
+    "the booking was confirmed exactly once (one payment id)",
+    (await q(`select count(*)::int as n from public.bookings where razorpay_payment_id = '${PAYMENT_5}';`))[0].n === 1,
+  );
+
+  const foreignOrder = (await rpc("apply_razorpay_event", {
+    p_event_id: "evt_unknown_order",
+    p_event_type: "payment.captured",
+    p_razorpay_order_id: "order_TEST_NOT_OURS",
+    p_razorpay_payment_id: "pay_TEST000000000099",
+    p_amount_paise: 100,
+  }))[0];
+  check("an event for an order we do not know is ignored", foreignOrder.outcome === "ignored", foreignOrder.outcome);
+
+  const payF = await createBooking({ p_customer_mobile: "+919800000106", p_idempotency_key: "pay-key-6" });
+  const ORDER_6 = "order_TEST000000000006";
+  await rpc("attach_razorpay_order", { p_booking_id: payF.booking_uuid, p_razorpay_order_id: ORDER_6 });
+  const failedEvent = (await rpc("apply_razorpay_event", {
+    p_event_id: "evt_failed_1",
+    p_event_type: "payment.failed",
+    p_razorpay_order_id: ORDER_6,
+    p_razorpay_payment_id: "pay_TEST000000000006",
+    p_amount_paise: 99800,
+  }))[0];
+  check("payment.failed marks the pending booking failed", failedEvent.outcome === "failed", failedEvent.outcome);
+
+  const refundEvent = (await rpc("apply_razorpay_event", {
+    p_event_id: "evt_refund_1",
+    p_event_type: "refund.processed",
+    p_razorpay_order_id: ORDER_5,
+    p_razorpay_payment_id: PAYMENT_5,
+    p_amount_paise: 99800,
+  }))[0];
+  check("refund.processed refunds the booking", refundEvent.outcome === "refunded", refundEvent.outcome);
+  check(
+    "refunded passes are cancelled",
+    (await q(`select count(*)::int as n from public.digital_passes where booking_id = '${payE.booking_uuid}' and status = 'cancelled';`))[0].n === 2,
+  );
+
+  const eventRows = await q(`select event_id, event_type, outcome, processed_at from public.payment_events order by received_at;`);
+  check("every unique delivery is recorded exactly once", eventRows.length === 5, `${eventRows.length} rows`);
+  check(
+    "a retried delivery is not recorded twice",
+    (await q(`select count(*)::int as n from public.payment_events where event_id = 'evt_captured_1';`))[0].n === 1,
+  );
+  check(
+    "each delivery records the ids it carried",
+    (await q(`select razorpay_order_id, razorpay_payment_id from public.payment_events where event_id = 'evt_captured_1';`))[0]
+      .razorpay_payment_id === PAYMENT_5,
+  );
+  check("every recorded delivery has an outcome and a timestamp", eventRows.every((row) => row.outcome && row.processed_at !== null));
+  check(
+    "deliveries are unique by event id",
+    new Set(eventRows.map((row) => row.event_id)).size === eventRows.length,
+  );
+
+  // ---- customer-facing status lookup ----------------------------------------
+  const status = (await rpc("get_booking_status", { p_public_token: payA.public_token }))[0];
+  check("the customer can look their booking up by token", status.booking_reference === payA.booking_reference);
+  check("the status view reports the pass count", status.passes_issued === 2, `${status.passes_issued}`);
+  check("the status view carries no personal details", !("customer_mobile" in status) && !("customer_email" in status));
+  check("the status view names the event and night", status.event_name === "Garba Nights Navratri Utsav" && Boolean(status.event_date));
+  const unknownToken = await rpc("get_booking_status", { p_public_token: "ffffffff-ffff-4fff-8fff-ffffffffffff" });
+  check("an unknown token returns nothing", unknownToken.length === 0);
 
   // ---------------------------------------------------------------------------
   section("Result");

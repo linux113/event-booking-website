@@ -8,22 +8,30 @@ import { Button } from "@/components/ui/button";
 import { Container, Section } from "@/components/ui/container";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
+import { getPublicPaymentMode } from "@/config/env";
+import { isPaymentGatewayUsable } from "@/lib/payments/razorpay";
 import { formatDateRange, formatTimeRange } from "@/lib/format";
 import { getFeaturedEventBundle } from "@/lib/services/events";
 
 export const metadata: Metadata = {
   title: "Book Now",
   description:
-    "Reserve passes for the Navratri and Dandiya festival in four steps: choose your night, choose your pass, add your details and review. The booking is created as pending — no payment is collected yet.",
+    "Reserve passes for the Navratri and Dandiya festival in four steps: choose your night, choose your pass, add your details and pay securely with Razorpay.",
 };
 
 // Availability must be current on every request.
 export const dynamic = "force-dynamic";
 
 const AFTER_CONFIRMING = [
-  "A booking reference like DND202600001 is created and shown on screen.",
-  "The booking is stored as pending with payment not yet made — nothing is charged on this site.",
-  "The organiser confirms your booking on WhatsApp, and your QR pass is issued once payment is received.",
+  "A booking reference like DND202600001 is created against your details.",
+  "Razorpay Checkout opens for the amount our server calculated — card and UPI details stay inside Razorpay's window.",
+  "We verify the payment on our server and only then confirm the booking and issue your passes.",
+] as const;
+
+const AFTER_CONFIRMING_WITHOUT_PAYMENTS = [
+  "A booking reference like DND202600001 is created against your details.",
+  "The booking is held as pending and unpaid — nothing is charged on this site.",
+  "The organiser completes the payment with you directly and issues your pass afterwards.",
 ] as const;
 
 const WHAT_YOU_NEED = [
@@ -67,6 +75,11 @@ export default async function BookPage() {
   }
 
   const { event, nights, passes } = bundle;
+  // Online payment only becomes available once the server holds usable Razorpay
+  // keys (a live key with live mode off does not count), and the key prefix decides
+  // whether the site tells customers it is running in test mode.
+  const paymentsReady = isPaymentGatewayUsable();
+  const paymentMode = getPublicPaymentMode();
   const firstNight = nights[0];
   const timeRange = firstNight ? formatTimeRange(firstNight.startTime, firstNight.endTime) : null;
 
@@ -75,7 +88,7 @@ export default async function BookPage() {
       <PageHero
         eyebrow="Book now"
         title="Reserve your pass"
-        description="Four steps: night, pass, your details, review. Availability and prices are read from the database, and your total is calculated on the server when you confirm."
+        description="Four steps: night, pass, your details, review. Availability and prices are read from the database, and the amount you pay is calculated on the server before Checkout opens."
       >
         <div className="flex flex-col gap-3 sm:flex-row">
           <Button href="#checkout" size="lg" className="w-full sm:w-auto">
@@ -96,14 +109,33 @@ export default async function BookPage() {
           <div className="border-marigold/40 bg-marigold/8 flex flex-col gap-3 rounded-2xl border p-6">
             <h2 className="flex items-center gap-2.5 text-lg font-semibold tracking-tight">
               <SparkleIcon className="text-marigold size-5" />
-              No payment is taken here yet
+              {paymentsReady ? "Pay securely with Razorpay" : "Payment is handled by the organiser"}
             </h2>
             <p className="text-muted text-sm/7">
-              Confirming creates a real booking with a reference number, stored as{" "}
-              <strong className="font-semibold">pending</strong> and{" "}
-              <strong className="font-semibold">not paid</strong>. Online payment (Razorpay) arrives in
-              the next step — until then nothing is charged, and no card or UPI details are collected on
-              this website.
+              {paymentsReady ? (
+                <>
+                  Confirming creates a real booking with a reference number and opens Razorpay Checkout for the
+                  amount our server calculated. Your card or UPI details are entered in Razorpay&apos;s window,
+                  never on this website, and the booking becomes{" "}
+                  <strong className="font-semibold">confirmed</strong> only after the payment is verified on our
+                  server. Until then it stays <strong className="font-semibold">pending</strong> and{" "}
+                  <strong className="font-semibold">unpaid</strong>.
+                  {paymentMode === "test" ? (
+                    <>
+                      {" "}
+                      This deployment is running on <strong className="font-semibold">Razorpay test keys</strong>,
+                      so no real money moves.
+                    </>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  Online payment is not connected on this deployment yet: no Razorpay keys are configured, so
+                  confirming only holds the booking as <strong className="font-semibold">pending</strong> and{" "}
+                  <strong className="font-semibold">unpaid</strong>. Nothing is charged and no card or UPI
+                  details are collected — the organiser takes payment directly.
+                </>
+              )}
             </p>
             <div className="flex flex-wrap gap-3 pt-1">
               <WhatsAppButton
@@ -122,7 +154,13 @@ export default async function BookPage() {
 
       <Section className="pt-0" id="checkout">
         <Container className="grid gap-6 lg:grid-cols-[1fr_0.8fr]">
-          <BookingWizard event={event} nights={nights} passes={passes} />
+          <BookingWizard
+            event={event}
+            nights={nights}
+            passes={passes}
+            paymentsReady={paymentsReady}
+            paymentMode={paymentMode}
+          />
 
           <div className="flex flex-col gap-6">
             <div className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-6">
@@ -165,13 +203,13 @@ export default async function BookPage() {
             <div className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-6">
               <h2 className="text-lg font-semibold tracking-tight">After you confirm</h2>
               <ol className="text-muted flex list-decimal flex-col gap-2.5 pl-5 text-sm/6">
-                {AFTER_CONFIRMING.map((item) => (
+                {(paymentsReady ? AFTER_CONFIRMING : AFTER_CONFIRMING_WITHOUT_PAYMENTS).map((item) => (
                   <li key={item}>{item}</li>
                 ))}
               </ol>
               <p className="text-muted/80 border-border/70 border-t pt-4 text-xs">
-                Refunds, transfers and cancellations follow the organiser&apos;s policy, which will be
-                published here alongside the checkout.
+                Refunds, transfers and cancellations follow the organiser&apos;s policy. Message the organiser
+                with your booking reference before the night you booked.
               </p>
             </div>
           </div>

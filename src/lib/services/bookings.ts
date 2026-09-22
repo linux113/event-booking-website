@@ -3,7 +3,12 @@ import "server-only";
 import { validateBookingRequest } from "@/lib/booking/validation";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { isSupabaseConfigured } from "@/config/env";
-import type { BookingApiError, BookingFieldErrors, CreatedBooking } from "@/types/booking";
+import type {
+  BookingApiError,
+  BookingFieldErrors,
+  BookingRequestInput,
+  CreatedBooking,
+} from "@/types/booking";
 
 /**
  * Booking creation — server side only.
@@ -22,7 +27,7 @@ import type { BookingApiError, BookingFieldErrors, CreatedBooking } from "@/type
  */
 
 export type CreateBookingResult =
-  | { ok: true; booking: CreatedBooking }
+  | { ok: true; booking: CreatedBooking; input: BookingRequestInput }
   | { ok: false; error: BookingApiError };
 
 const NOT_CONFIGURED: BookingApiError = {
@@ -102,7 +107,7 @@ export async function createPendingBooking(payload: unknown): Promise<CreateBook
         return { ok: false, error: SERVER_ERROR };
       }
 
-      return { ok: true, booking: mapBooking(row) };
+      return { ok: true, booking: mapBooking(row), input };
     }
 
     // Two requests raced with the same idempotency key: the second one hits the
@@ -181,6 +186,7 @@ function parseDetail(details: string | null | undefined): number | null {
 type BookingRow = {
   booking_uuid: string;
   booking_reference: string;
+  public_token: string;
   booking_status: string;
   payment_status: string;
   quantity: number;
@@ -196,6 +202,7 @@ type BookingRow = {
   pass_name: string;
   pass_composition: string | null;
   currency: string;
+  razorpay_order_id: string | null;
   created_at: string;
   was_existing: boolean;
 };
@@ -219,6 +226,8 @@ function mapBooking(row: BookingRow): CreatedBooking {
     passName: row.pass_name,
     passComposition: row.pass_composition,
     currency: row.currency,
+    publicToken: row.public_token,
+    razorpayOrderId: row.razorpay_order_id,
     createdAt: row.created_at,
     reusedExisting: row.was_existing,
   };

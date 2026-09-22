@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { createVerificationDb } from "./test/pglite.mjs";
+import { startRazorpayStub } from "./test/razorpay-stub.mjs";
 import { startShim } from "./test/postgrest-shim.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -42,6 +43,19 @@ function fakeKey(role) {
 }
 
 const SERVICE_ROLE_KEY = fakeKey("service_role");
+
+/**
+ * Throwaway Razorpay credentials for this verification run only.
+ *
+ * They are not real and cannot be: `rzp_test_` is the prefix Razorpay gives test
+ * keys, and the secrets are harness-local strings that exist so the server can be
+ * pointed at the stub gateway and so callbacks can be signed with the same HMAC
+ * the real gateway uses. No real credential is ever invented or committed.
+ */
+const RAZORPAY_KEY_ID = "rzp_test_ArenaVerifyHarness1";
+const RAZORPAY_KEY_SECRET = "harness-razorpay-key-secret-not-a-real-credential";
+const RAZORPAY_WEBHOOK_SECRET = "harness-razorpay-webhook-secret-not-a-real-credential";
+const RAZORPAY_LIVE_KEY_ID = "rzp_live_ArenaVerifyHarness1";
 
 const GREEN = "\u001b[32m";
 const RED = "\u001b[31m";
@@ -133,6 +147,8 @@ const FAMILY_PASS = "c0000000-0000-4000-8000-000000000005";
 const db = createVerificationDb();
 let shim;
 let server;
+let serverLog = "";
+let stub;
 
 async function dbRun(sql) {
   await db.exec(sql);
@@ -188,6 +204,75 @@ async function waitForServer(url, timeoutMs = 90_000) {
   }
 
   return false;
+}
+
+/** Builds the app exactly the way a deployment would, with the given env. */
+async function runBuild(env) {
+  const build = spawn("npm", ["run", "build"], { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  let log = "";
+
+  build.stdout.on("data", (chunk) => {
+    log += chunk.toString();
+  });
+  build.stderr.on("data", (chunk) => {
+    log += chunk.toString();
+  });
+
+  const exitCode = await new Promise((resolve) => build.on("exit", resolve));
+
+  return { exitCode, log };
+}
+
+/** How the built site is started: same code path every time, two envs in this run. */
+async function startWebServer(env) {
+  if (await isPortInUse(WEB_PORT)) {
+    throw new Error(`port ${WEB_PORT} is already serving something — stop that server first`);
+  }
+
+  // `detached` gives the server its own process group: `next start` ignores
+  // SIGTERM and would otherwise survive as an orphan holding the port.
+  server = spawn(
+    "npm",
+    ["run", "start", "--", "--hostname", "127.0.0.1", "--port", String(WEB_PORT)],
+    { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"], detached: true },
+  );
+
+  serverLog = "";
+  server.stdout.on("data", (chunk) => {
+    serverLog += chunk.toString();
+  });
+  server.stderr.on("data", (chunk) => {
+    serverLog += chunk.toString();
+  });
+
+  const ready = await waitForServer(`http://127.0.0.1:${WEB_PORT}/`);
+
+  if (!ready) {
+    console.error(serverLog.slice(-2000));
+    throw new Error("Next.js server did not start");
+  }
+
+  console.log(`  ${GREEN}✓${RESET} the built site is serving on 127.0.0.1:${WEB_PORT}`);
+}
+
+async function stopWebServer() {
+  if (!server?.pid) {
+    return;
+  }
+
+  try {
+    process.kill(-server.pid, "SIGKILL");
+  } catch {
+    server.kill("SIGKILL");
+  }
+
+  server = undefined;
+
+  const deadline = Date.now() + 10_000;
+
+  while (Date.now() < deadline && (await isPortInUse(WEB_PORT))) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
 }
 
 async function main() {
@@ -405,6 +490,16 @@ async function main() {
   // ---------------------------------------------------------------------------
   // Build and serve into an isolated output directory: that renders exactly what
   // production renders, and leaves any running dev server (and its .next) alone.
+  // The payment paths are proved against a local stub of the Razorpay API: this
+  // sandbox has no Razorpay account and real test keys cannot be invented. The
+  // stub enforces the same Basic auth the gateway does, and every callback and
+  // webhook below is signed with the same HMAC formulas Razorpay uses.
+  stub = await startRazorpayStub({
+    keyId: RAZORPAY_KEY_ID,
+    keySecret: RAZORPAY_KEY_SECRET,
+    webhookSecret: RAZORPAY_WEBHOOK_SECRET,
+  });
+
   const serverEnv = {
     ...process.env,
     NEXT_DIST_DIR: DIST_DIR,
@@ -412,46 +507,20 @@ async function main() {
     NEXT_PUBLIC_SUPABASE_ANON_KEY: "test-anon-key",
     NEXT_PUBLIC_SITE_URL: `http://127.0.0.1:${WEB_PORT}`,
     SUPABASE_SERVICE_ROLE_KEY: SERVICE_ROLE_KEY,
+    NEXT_PUBLIC_RAZORPAY_KEY_ID: RAZORPAY_KEY_ID,
+    RAZORPAY_KEY_SECRET: RAZORPAY_KEY_SECRET,
+    RAZORPAY_WEBHOOK_SECRET: RAZORPAY_WEBHOOK_SECRET,
+    RAZORPAY_API_BASE_URL: stub.url,
   };
 
-  const build = spawn("npm", ["run", "build"], { cwd: REPO_ROOT, env: serverEnv, stdio: ["ignore", "pipe", "pipe"] });
-  let buildLog = "";
-  build.stdout.on("data", (chunk) => {
-    buildLog += chunk.toString();
-  });
-  build.stderr.on("data", (chunk) => {
-    buildLog += chunk.toString();
-  });
-
-  const buildExit = await new Promise((resolve) => build.on("exit", resolve));
-  check("production build succeeds with the database configured", buildExit === 0, buildExit === 0 ? "" : buildLog.slice(-500));
-
-  if (await isPortInUse(WEB_PORT)) {
-    throw new Error(`port ${WEB_PORT} is already serving something — stop that server first`);
-  }
-
-  // `detached` gives the server its own process group: `next start` ignores
-  // SIGTERM and would otherwise survive as an orphan holding the port.
-  server = spawn(
-    "npm",
-    ["run", "start", "--", "--hostname", "127.0.0.1", "--port", String(WEB_PORT)],
-    { cwd: REPO_ROOT, env: serverEnv, stdio: ["ignore", "pipe", "pipe"], detached: true },
+  const build = await runBuild(serverEnv);
+  check(
+    "production build succeeds with the database configured",
+    build.exitCode === 0,
+    build.exitCode === 0 ? "" : build.log.slice(-500),
   );
 
-  let serverLog = "";
-  server.stdout.on("data", (chunk) => {
-    serverLog += chunk.toString();
-  });
-  server.stderr.on("data", (chunk) => {
-    serverLog += chunk.toString();
-  });
-
-  const ready = await waitForServer(`http://127.0.0.1:${WEB_PORT}/`);
-
-  if (!ready) {
-    console.error(serverLog.slice(-2000));
-    throw new Error("Next.js server did not start");
-  }
+  await startWebServer(serverEnv);
 
   const pages = { home: "/", passes: "/passes", book: "/book", gallery: "/gallery" };
   const raw = {};
@@ -519,8 +588,14 @@ async function main() {
   );
   check("book page shows remaining capacity", book.includes("places left"));
   check(
-    "book page says no payment is taken yet",
-    book.includes("No payment is taken here yet") && book.includes("not paid"),
+    "book page explains the payment step",
+    book.includes("Pay securely with Razorpay") && book.includes("verified on our server"),
+    contextAround(book, "Pay securely"),
+  );
+  check(
+    "book page is honest about test mode",
+    book.includes("Razorpay test keys"),
+    contextAround(book, "test keys"),
   );
   check(
     "book page renders the four-step stepper",
@@ -546,10 +621,17 @@ async function main() {
 
   check(
     "the checkout flow ships to the browser",
-    ["Confirm booking", "Creating your booking", "Review and confirm", "Choose your night"].every((text) =>
+    ["Confirm booking", "Verifying the payment", "Review and confirm", "Choose your night"].every((text) =>
       chunkSources.includes(text),
     ),
     "the wizard's own copy must be in a client chunk",
+  );
+  check(
+    "the browser only talks to our own payment endpoints",
+    chunkSources.includes("/api/payment/create-order") &&
+      chunkSources.includes("/api/payment/verify") &&
+      chunkSources.includes("/api/payment/status"),
+    "the wizard must call the server, never the gateway directly",
   );
 
   // ---------------------------------------------------------------------------
@@ -777,6 +859,518 @@ async function main() {
   check("bookings cannot be read back through the API", getBookings.status === 405, `${getBookings.status}`);
 
   // ---------------------------------------------------------------------------
+  section("Payments: Razorpay order, server-side verification, webhook, duplicates");
+  // ---------------------------------------------------------------------------
+  const format = await import("../src/lib/format.ts");
+  const api = (path) => `http://127.0.0.1:${WEB_PORT}${path}`;
+
+  const MOBILE_PAID = "+919800000201";
+  const MOBILE_FAILED = "+919800000202";
+  const MOBILE_WEBHOOK = "+919800000203";
+  const MOBILE_AMOUNT = "+919800000204";
+  const nightLabel = format.formatEventDate(freeNightRow.event_date);
+
+  async function readJson(response) {
+    try {
+      return await response.json();
+    } catch {
+      return null;
+    }
+  }
+
+  async function postJson(path, body) {
+    const response = await fetch(api(path), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+    return { status: response.status, payload: await readJson(response) };
+  }
+
+  async function getJson(path) {
+    const response = await fetch(api(path));
+    return { status: response.status, payload: await readJson(response) };
+  }
+
+  /** What the browser is allowed to send to create-order: identifiers, no amount. */
+  function paymentRequest(overrides = {}) {
+    return {
+      eventId: EVENT_ID,
+      eventDateId: FREE_NIGHT,
+      passCategoryId: COUPLE_PASS,
+      customerName: "Payal Mehta",
+      customerMobile: MOBILE_PAID,
+      customerEmail: "payal@example.com",
+      quantity: 2,
+      numberOfPeople: 2 * couplePass.number_of_people,
+      idempotencyKey: "pay-attempt-1",
+      ...overrides,
+    };
+  }
+
+  const bookingRows = async (mobile) =>
+    Number(
+      (await dbQuery(`select count(*)::int as n from public.bookings where customer_mobile = $1`, [mobile]))[0].n,
+    );
+
+  const passesFor = async (mobile) =>
+    Number(
+      (
+        await dbQuery(
+          `select count(*)::int as n from public.digital_passes dp
+           join public.bookings b on b.id = dp.booking_id where b.customer_mobile = $1`,
+          [mobile],
+        )
+      )[0].n,
+    );
+
+  const activePassesFor = async (mobile) =>
+    Number(
+      (
+        await dbQuery(
+          `select count(*)::int as n from public.digital_passes dp
+           join public.bookings b on b.id = dp.booking_id
+           where b.customer_mobile = $1 and dp.status = 'active'`,
+          [mobile],
+        )
+      )[0].n,
+    );
+
+  const bookingRow = async (reference) =>
+    (await dbQuery(
+      `select booking_status, payment_status, razorpay_order_id, razorpay_payment_id
+       from public.bookings where booking_id = $1`,
+      [reference],
+    ))[0];
+
+  /** A webhook body shaped like Razorpay's, plus the id used for deduplication. */
+  function webhookDelivery(eventType, { orderId, paymentId, amount, eventId }) {
+    const payload = {
+      entity: "event",
+      account_id: "acc_TEST000000000001",
+      event: eventType,
+      contains: [String(eventType).split(".")[0]],
+      payload: {},
+      created_at: Math.floor(Date.now() / 1000),
+    };
+
+    if (eventType === "order.paid") {
+      payload.payload.order = { entity: { id: orderId, amount, amount_paid: amount, status: "paid" } };
+    } else if (eventType === "refund.processed") {
+      payload.payload.refund = {
+        entity: { id: "rfnd_TEST000000000001", payment_id: paymentId, amount, status: "processed" },
+      };
+    } else {
+      payload.payload.payment = {
+        entity: {
+          id: paymentId,
+          order_id: orderId,
+          amount,
+          status: eventType === "payment.failed" ? "failed" : "captured",
+        },
+      };
+    }
+
+    return { raw: JSON.stringify(payload), eventId };
+  }
+
+  async function postWebhook(eventType, options) {
+    const { raw, eventId } = webhookDelivery(eventType, options);
+    const signature = "signature" in options ? options.signature : stub.webhookSignature(raw);
+
+    const response = await fetch(api("/api/payment/webhook"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-razorpay-signature": signature,
+        "x-razorpay-event-id": eventId,
+      },
+      body: raw,
+    });
+
+    return { status: response.status, payload: await readJson(response) };
+  }
+
+  // ---- 1. the order the customer is charged for ----------------------------
+  const ordersBefore = stub.orderRequests().length;
+  const payOrder = await postJson("/api/payment/create-order", paymentRequest());
+  const order = payOrder.payload?.order;
+
+  check(
+    "create-order returns a usable order",
+    payOrder.status === 201 && payOrder.payload?.ok === true && typeof order?.orderId === "string",
+    `status ${payOrder.status} ${JSON.stringify(payOrder.payload)?.slice(0, 200)}`,
+  );
+  check("the browser receives the public key id", order?.keyId === RAZORPAY_KEY_ID, order?.keyId ?? "");
+  check(
+    "no secret is ever sent to the browser",
+    !JSON.stringify(payOrder.payload).includes(RAZORPAY_KEY_SECRET) &&
+      !JSON.stringify(payOrder.payload).includes(RAZORPAY_WEBHOOK_SECRET),
+  );
+  check("the amount is the database price in paise", order?.amountPaise === 99800, `${order?.amountPaise}`);
+  check("the currency comes from the event", order?.currency === "INR", order?.currency ?? "");
+  check(
+    "the booking behind the order is pending and unpaid",
+    order?.booking?.status === "pending" && order?.booking?.paymentStatus === "unpaid",
+    JSON.stringify(order?.booking ?? {}).slice(0, 160),
+  );
+  check("the booking carries a public status token", /^[0-9a-f]{8}-/.test(order?.booking?.publicToken ?? ""));
+
+  const orderRequest = stub.orderBodies().at(-1);
+  check(
+    "the server authenticated to the gateway with the key id and secret",
+    stub.orderRequests().at(-1).authorization ===
+      `Basic ${Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`, "utf8").toString("base64")}`,
+  );
+  check("the gateway was asked for the database amount", orderRequest?.amount === 99800, `${orderRequest?.amount}`);
+  check(
+    "the order notes carry the booking reference",
+    orderRequest?.notes?.booking_reference === order?.booking?.reference,
+    JSON.stringify(orderRequest?.notes ?? {}),
+  );
+  check("exactly one order was created", stub.orderRequests().length === ordersBefore + 1);
+  check("the order id looks like a Razorpay order", /^order_/.test(order?.orderId ?? ""), order?.orderId ?? "");
+
+  const pendingRow = await bookingRow(order.booking.reference);
+  check("the pending booking stores the order id", pendingRow.razorpay_order_id === order.orderId);
+  check("no payment id is stored before verification", pendingRow.razorpay_payment_id === null);
+  check("one booking exists for this attempt", (await bookingRows(MOBILE_PAID)) === 1);
+  check("no pass is issued before payment", (await passesFor(MOBILE_PAID)) === 0);
+
+  // Pressing pay twice must not create a second booking or a second order.
+  const retried = await postJson("/api/payment/create-order", paymentRequest());
+  check("a repeated create-order reuses the same booking", retried.payload?.order?.booking?.reference === order.booking.reference);
+  check("a repeated create-order reuses the same order", retried.payload?.order?.orderId === order.orderId);
+  check("no second order was created at the gateway", stub.orderRequests().length === ordersBefore + 1);
+  check("still exactly one booking after the retry", (await bookingRows(MOBILE_PAID)) === 1);
+
+  // Validation and availability still gate order creation.
+  const invalid = await postJson("/api/payment/create-order", paymentRequest({ customerMobile: "12345", idempotencyKey: "pay-attempt-bad" }));
+  check(
+    "an invalid payload is refused before the gateway is called",
+    invalid.status === 400 && Boolean(invalid.payload?.error?.fieldErrors?.customerMobile),
+    `status ${invalid.status}`,
+  );
+  check("the gateway saw nothing for the invalid payload", stub.orderRequests().length === ordersBefore + 1);
+
+  const soldOut = await postJson("/api/payment/create-order", paymentRequest({ eventDateId: NIGHT_1, idempotencyKey: "pay-attempt-full" }));
+  check("a fully booked night is refused before any order exists", soldOut.status === 409, `status ${soldOut.status}`);
+  check("the refusal explains the remaining places", /place/i.test(soldOut.payload?.error?.message ?? ""), soldOut.payload?.error?.message ?? "");
+  check("no order was created for the refused night", stub.orderRequests().length === ordersBefore + 1);
+
+  // ---- 2. a successful payment, verified on the server ---------------------
+  const payment = stub.createPayment({ orderId: order.orderId });
+  const signature = stub.checkoutSignature({ orderId: order.orderId, paymentId: payment.id });
+  const verified = await postJson("/api/payment/verify", {
+    razorpay_order_id: order.orderId,
+    razorpay_payment_id: payment.id,
+    razorpay_signature: signature,
+  });
+
+  check(
+    "a signed payment confirms the booking",
+    verified.status === 200 && verified.payload?.ok === true,
+    `status ${verified.status} ${JSON.stringify(verified.payload)?.slice(0, 200)}`,
+  );
+  check(
+    "the verified booking is paid and confirmed",
+    verified.payload?.payment?.booking?.status === "confirmed" &&
+      verified.payload?.payment?.booking?.paymentStatus === "paid",
+    JSON.stringify(verified.payload?.payment?.booking ?? {}).slice(0, 160),
+  );
+  check("exactly one pass per purchased pass is issued", verified.payload?.payment?.booking?.passesIssued === 2, `${verified.payload?.payment?.booking?.passesIssued}`);
+  check("the first confirmation is not a replay", verified.payload?.payment?.alreadyConfirmed === false);
+
+  const paidRow = await bookingRow(order.booking.reference);
+  check("the stored row is paid and confirmed", paidRow.payment_status === "paid" && paidRow.booking_status === "confirmed", JSON.stringify(paidRow));
+  check("the payment id is stored on the booking", paidRow.razorpay_payment_id === payment.id);
+  check("the booking has exactly its passes", (await passesFor(MOBILE_PAID)) === 2, `${await passesFor(MOBILE_PAID)}`);
+  check("all of its passes are active", (await activePassesFor(MOBILE_PAID)) === 2);
+
+  // ---- 3. refresh after payment: the status page and the JSON endpoint -----
+  const statusJson = await getJson(`/api/payment/status?token=${order.booking.publicToken}`);
+  check("the status endpoint answers for the token", statusJson.status === 200 && statusJson.payload?.ok === true);
+  check("the status endpoint reports confirmed + paid", statusJson.payload?.booking?.status === "confirmed" && statusJson.payload?.booking?.paymentStatus === "paid");
+  check("the status endpoint reports the passes", statusJson.payload?.booking?.passesIssued === 2);
+  check("the status payload is not cached", statusJson.payload?.booking?.reference === order.booking.reference);
+  check(
+    "the status payload exposes no personal details",
+    !JSON.stringify(statusJson.payload).includes("Payal") &&
+      !JSON.stringify(statusJson.payload).includes("payal@example.com") &&
+      !JSON.stringify(statusJson.payload).includes("9800000201"),
+  );
+  const badToken = await getJson("/api/payment/status?token=not-a-token");
+  check("a malformed token is refused", badToken.status === 400, `status ${badToken.status}`);
+  const unknownToken = await getJson("/api/payment/status?token=ffffffff-ffff-4fff-8fff-ffffffffffff");
+  check("an unknown token is not found", unknownToken.status === 404, `status ${unknownToken.status}`);
+
+  const statusPageHtml = await fetchPage(`/book/status?token=${order.booking.publicToken}`);
+  const statusPage = visibleText(statusPageHtml);
+  check(
+    "the status page survives a refresh with the confirmed state",
+    statusPage.includes("Payment successful") && statusPage.includes(order.booking.reference),
+    contextAround(statusPage, "Payment successful"),
+  );
+  check("the status page shows the amount paid", statusPage.includes("Amount paid") && statusPage.includes("998"), contextAround(statusPage, "Amount paid"));
+  check("the status page shows the night from the database", statusPage.includes(nightLabel), contextAround(statusPage, "Night"));
+  check("the status page shows the pass from the database", statusPage.includes(couplePass.name), contextAround(statusPage, couplePass.name));
+  check("the status page lists the issued passes", statusPage.includes("2 entry passes are issued"));
+  check(
+    "the status page never prints the customer's details",
+    !statusPage.includes("Payal") && !statusPage.includes("payal@example.com") && !statusPage.includes("9800000201"),
+  );
+  check("the status page is not indexable", /noindex/.test(statusPageHtml));
+
+  // ---- 4. duplicate callbacks: one booking, one set of passes --------------
+  const payReplay = await postJson("/api/payment/verify", {
+    razorpay_order_id: order.orderId,
+    razorpay_payment_id: payment.id,
+    razorpay_signature: signature,
+  });
+  check("a repeated verify is accepted as a replay", payReplay.status === 200 && payReplay.payload?.payment?.alreadyConfirmed === true, `status ${payReplay.status}`);
+  check("the replay issues no extra passes", payReplay.payload?.payment?.booking?.passesIssued === 2);
+  check("the database still holds exactly two passes", (await passesFor(MOBILE_PAID)) === 2);
+  check("still exactly one booking after the duplicate callback", (await bookingRows(MOBILE_PAID)) === 1);
+
+  const capturedEvent = { orderId: order.orderId, paymentId: payment.id, amount: 99800, eventId: "evt_web_captured_1" };
+  const capturedHook = await postWebhook("payment.captured", capturedEvent);
+  check("the webhook accepts a correctly signed delivery", capturedHook.status === 200 && capturedHook.payload?.ok === true, `status ${capturedHook.status}`);
+  check("a captured event for a paid booking is reported as confirmed already", ["already_confirmed", "confirmed"].includes(capturedHook.payload?.outcome), capturedHook.payload?.outcome ?? "");
+  check("the webhook did not create a second set of passes", (await passesFor(MOBILE_PAID)) === 2);
+
+  const duplicatedHook = await postWebhook("payment.captured", capturedEvent);
+  check("a retried delivery is reported as a duplicate", duplicatedHook.payload?.duplicate === true && duplicatedHook.payload?.outcome === "duplicate", JSON.stringify(duplicatedHook.payload));
+  check("the duplicate delivery changed nothing", (await passesFor(MOBILE_PAID)) === 2 && (await bookingRows(MOBILE_PAID)) === 1);
+
+  const orderPaidHook = await postWebhook("order.paid", {
+    orderId: order.orderId,
+    paymentId: null,
+    amount: 99800,
+    eventId: "evt_web_order_paid_1",
+  });
+  check(
+    "an order.paid delivery for a paid booking stays idempotent",
+    orderPaidHook.status === 200 && orderPaidHook.payload?.outcome === "already_confirmed",
+    JSON.stringify(orderPaidHook.payload),
+  );
+  check("the idempotent delivery issued no second set of passes", (await passesFor(MOBILE_PAID)) === 2);
+
+  const forgedHook = await postWebhook("payment.captured", {
+    orderId: order.orderId,
+    paymentId: payment.id,
+    amount: 99800,
+    eventId: "evt_web_forged_1",
+    signature: "0".repeat(64),
+  });
+  check("a webhook with a bad signature is rejected", forgedHook.status === 400, `status ${forgedHook.status}`);
+  check("the rejected webhook changed nothing", (await passesFor(MOBILE_PAID)) === 2);
+
+  // ---- 5. the webhook confirms a payment the browser never reported --------
+  const webhookOrder = await postJson(
+    "/api/payment/create-order",
+    paymentRequest({ customerMobile: MOBILE_WEBHOOK, idempotencyKey: "pay-attempt-webhook" }),
+  );
+  const webhookBooking = webhookOrder.payload?.order;
+  const webhookPayment = stub.createPayment({ orderId: webhookBooking.orderId });
+
+  const capturedForWebhook = await postWebhook("payment.captured", {
+    orderId: webhookBooking.orderId,
+    paymentId: webhookPayment.id,
+    amount: 99800,
+    eventId: "evt_web_captured_2",
+  });
+  check("a captured webhook confirms a booking on its own", capturedForWebhook.payload?.outcome === "confirmed", JSON.stringify(capturedForWebhook.payload));
+  const webhookRow = await bookingRow(webhookBooking.booking.reference);
+  check("the webhook-only booking is paid and confirmed in the database", webhookRow.payment_status === "paid" && webhookRow.booking_status === "confirmed", JSON.stringify(webhookRow));
+  check("the webhook-only booking got its passes", (await passesFor(MOBILE_WEBHOOK)) === 2);
+
+  // ---- 6. a failed payment leaves the booking untouched -------------------
+  const failedOrder = await postJson(
+    "/api/payment/create-order",
+    paymentRequest({ customerMobile: MOBILE_FAILED, idempotencyKey: "pay-attempt-failed" }),
+  );
+  const failedBooking = failedOrder.payload?.order;
+  const failedPayment = stub.createPayment({ orderId: failedBooking.orderId, status: "failed" });
+  const failedVerify = await postJson("/api/payment/verify", {
+    razorpay_order_id: failedBooking.orderId,
+    razorpay_payment_id: failedPayment.id,
+    razorpay_signature: stub.checkoutSignature({ orderId: failedBooking.orderId, paymentId: failedPayment.id }),
+  });
+  check("a signed but unsuccessful payment does not confirm the booking", failedVerify.status === 409, `status ${failedVerify.status} ${JSON.stringify(failedVerify.payload)?.slice(0, 160)}`);
+  const stillPending = await bookingRow(failedBooking.booking.reference);
+  check("the failed payment left the booking pending and unpaid", stillPending.payment_status === "unpaid" && stillPending.booking_status === "pending", JSON.stringify(stillPending));
+  check("no passes were issued for the failed payment", (await passesFor(MOBILE_FAILED)) === 0);
+
+  const failedHook = await postWebhook("payment.failed", {
+    orderId: failedBooking.orderId,
+    paymentId: failedPayment.id,
+    amount: 99800,
+    eventId: "evt_web_failed_1",
+  });
+  check("a payment.failed webhook is recorded as failed", failedHook.payload?.outcome === "failed", JSON.stringify(failedHook.payload));
+  check(
+    "the failed booking is not confirmed",
+    (await bookingRow(failedBooking.booking.reference)).booking_status === "pending",
+  );
+
+  // A delivery that carries no payment id (order.paid on its own) must not guess:
+  // the paired payment.captured event does the confirming.
+  const orderPaidWithoutPayment = await postWebhook("order.paid", {
+    orderId: failedBooking.orderId,
+    paymentId: null,
+    amount: 99800,
+    eventId: "evt_web_order_paid_2",
+  });
+  check(
+    "an order.paid delivery without a payment id is left alone",
+    orderPaidWithoutPayment.status === 200 && orderPaidWithoutPayment.payload?.outcome === "ignored",
+    JSON.stringify(orderPaidWithoutPayment.payload),
+  );
+  check(
+    "the booking is still not confirmed after that delivery",
+    (await bookingRow(failedBooking.booking.reference)).booking_status === "pending" &&
+      (await passesFor(MOBILE_FAILED)) === 0,
+  );
+
+  const failedPage = visibleText(await fetchPage(`/book/status?token=${failedBooking.booking.publicToken}`));
+  check(
+    "the status page tells the customer the payment did not go through",
+    failedPage.includes("That payment did not go through"),
+    contextAround(failedPage, "did not go through"),
+  );
+  check("the failed status page never claims a payment", !failedPage.includes("Payment successful"));
+  check("the failed status page issues no passes claim", !failedPage.includes("entry passes are issued"));
+
+  const ordersBeforeReuse = stub.orderRequests().length;
+  const reuseAttempt = await postJson(
+    "/api/payment/create-order",
+    paymentRequest({ customerMobile: MOBILE_FAILED, idempotencyKey: "pay-attempt-failed" }),
+  );
+  check("when the customer pays again the same booking is reused", reuseAttempt.payload?.order?.orderId === failedBooking.orderId);
+  check("paying again did not create a second order", stub.orderRequests().length === ordersBeforeReuse, `${stub.orderRequests().length} order requests`);
+
+  // ---- 7. a browser cannot fake a payment ---------------------------------
+  const beforeForgery = await passesFor(MOBILE_FAILED);
+  const forgedVerify = await postJson("/api/payment/verify", {
+    razorpay_order_id: failedBooking.orderId,
+    razorpay_payment_id: "pay_TEST000000000999",
+    razorpay_signature: "f".repeat(64),
+  });
+  check("a forged signature is refused", forgedVerify.status === 400, `status ${forgedVerify.status}`);
+  const fakeSuccess = await postJson("/api/payment/verify", {
+    razorpay_order_id: failedBooking.orderId,
+    razorpay_payment_id: "pay_TEST000000000999",
+    razorpay_signature: "f".repeat(64),
+    booking_status: "confirmed",
+    payment_status: "paid",
+    amount_paise: 1,
+  });
+  check("extra fields claiming success are ignored", fakeSuccess.status === 400 && (await passesFor(MOBILE_FAILED)) === beforeForgery);
+  const noSignature = await postJson("/api/payment/verify", {
+    razorpay_order_id: failedBooking.orderId,
+    razorpay_payment_id: "pay_TEST000000000999",
+  });
+  check("a verify request without a signature is refused", noSignature.status === 400, `status ${noSignature.status}`);
+  const unsignedWebhook = await postWebhook("payment.captured", {
+    orderId: failedBooking.orderId,
+    paymentId: "pay_TEST000000000999",
+    amount: 99800,
+    eventId: "evt_web_unsigned_1",
+    signature: "",
+  });
+  check("a webhook without a signature is refused", unsignedWebhook.status === 400, `status ${unsignedWebhook.status}`);
+  check(
+    "nothing a browser sent could confirm the booking",
+    (await bookingRow(failedBooking.booking.reference)).payment_status !== "paid",
+  );
+
+  // ---- 8. the amount is checked against the database ----------------------
+  const amountOrder = await postJson(
+    "/api/payment/create-order",
+    paymentRequest({ customerMobile: MOBILE_AMOUNT, idempotencyKey: "pay-attempt-amount" }),
+  );
+  const amountBooking = amountOrder.payload?.order;
+  const underpayment = stub.createPayment({ orderId: amountBooking.orderId, amount: 100 });
+  const underpaidVerify = await postJson("/api/payment/verify", {
+    razorpay_order_id: amountBooking.orderId,
+    razorpay_payment_id: underpayment.id,
+    razorpay_signature: stub.checkoutSignature({ orderId: amountBooking.orderId, paymentId: underpayment.id }),
+  });
+  check("a payment below the booking amount is refused", underpaidVerify.status === 400, `status ${underpaidVerify.status} ${JSON.stringify(underpaidVerify.payload)?.slice(0, 160)}`);
+  check("the underpaid booking stays unpaid", (await bookingRow(amountBooking.booking.reference)).payment_status === "unpaid");
+
+  const unpaidPage = visibleText(await fetchPage(`/book/status?token=${amountBooking.booking.publicToken}`));
+  check(
+    "an unpaid booking's status page says payment is not completed",
+    unpaidPage.includes("Booking held — payment not completed"),
+    contextAround(unpaidPage, "Booking held"),
+  );
+  check("the unpaid status page offers to complete the payment", unpaidPage.includes("Complete payment"));
+  check("the unpaid status page shows the amount due", unpaidPage.includes("Amount due"));
+  check("the underpaid booking got no passes", (await passesFor(MOBILE_AMOUNT)) === 0);
+
+  const foreignVerify = await postJson("/api/payment/verify", {
+    razorpay_order_id: amountBooking.orderId,
+    razorpay_payment_id: payment.id,
+    razorpay_signature: stub.checkoutSignature({ orderId: amountBooking.orderId, paymentId: payment.id }),
+  });
+  check("a payment already used by another booking is refused", foreignVerify.status === 400, `status ${foreignVerify.status}`);
+
+  const crossedPayment = stub.createPayment({ orderId: order.orderId });
+  const crossedVerify = await postJson("/api/payment/verify", {
+    razorpay_order_id: amountBooking.orderId,
+    razorpay_payment_id: crossedPayment.id,
+    razorpay_signature: stub.checkoutSignature({ orderId: amountBooking.orderId, paymentId: crossedPayment.id }),
+  });
+  check("a payment belonging to another order is refused", crossedVerify.status === 400, `status ${crossedVerify.status}`);
+  check("no booking was confirmed by the crossed payment", (await bookingRow(amountBooking.booking.reference)).payment_status === "unpaid");
+
+  // ---- 9. the key secret never reaches the browser ------------------------
+  const clientChunks = readChunks(join(REPO_ROOT, DIST_DIR, "static", "chunks")).join("\n");
+  check("the client bundles contain no key secret", !clientChunks.includes(RAZORPAY_KEY_SECRET));
+  check("the client bundles contain no webhook secret", !clientChunks.includes(RAZORPAY_WEBHOOK_SECRET));
+  check("checkout is loaded on demand from Razorpay", clientChunks.includes("checkout.razorpay.com"));
+
+  // ---- 10. live keys are refused outright ---------------------------------
+  // `NEXT_PUBLIC_*` values are inlined when the app is built, so switching to live
+  // keys means a new build — which is exactly what a deployment would do. The whole
+  // point of this section is that even then the server refuses to take money.
+  await stopWebServer();
+  rmSync(join(REPO_ROOT, DIST_DIR), { recursive: true, force: true });
+
+  const liveEnv = { ...serverEnv, NEXT_PUBLIC_RAZORPAY_KEY_ID: RAZORPAY_LIVE_KEY_ID };
+  const liveBuild = await runBuild(liveEnv);
+  check("a build carrying live keys still builds", liveBuild.exitCode === 0, liveBuild.log.slice(-300));
+
+  await startWebServer(liveEnv);
+
+  const livePage = visibleText(await fetchPage("/book"));
+  check(
+    "a live-key deployment tells customers payment is handled by the organiser",
+    livePage.includes("Payment is handled by the organiser"),
+    contextAround(livePage, "Payment is handled"),
+  );
+  check(
+    "the live-key deployment does not promise a checkout",
+    !livePage.includes("Pay securely with Razorpay"),
+  );
+
+  const ordersBeforeLive = stub.orderRequests().length;
+  const liveAttempt = await postJson(
+    "/api/payment/create-order",
+    paymentRequest({ customerMobile: "+919800000299", idempotencyKey: "pay-attempt-live" }),
+  );
+  check("a live key is refused while live mode is off", liveAttempt.status === 503, `status ${liveAttempt.status} ${JSON.stringify(liveAttempt.payload)?.slice(0, 160)}`);
+  check(
+    "the refusal says live payments are disabled",
+    /live/i.test(liveAttempt.payload?.error?.message ?? ""),
+    liveAttempt.payload?.error?.message ?? "",
+  );
+  check("no order was created with the live key", stub.orderRequests().length === ordersBeforeLive);
+  check("no booking was written for the refused live attempt", (await bookingRows("+919800000299")) === 0);
+
+  // ---------------------------------------------------------------------------
   section("Result");
   // ---------------------------------------------------------------------------
   console.log(`\n  ${passed} passed, ${failures.length} failed\n`);
@@ -793,12 +1387,10 @@ async function main() {
 }
 
 async function cleanup() {
-  if (server?.pid) {
-    try {
-      process.kill(-server.pid, "SIGKILL");
-    } catch {
-      server.kill("SIGKILL");
-    }
+  await stopWebServer();
+
+  if (stub) {
+    await stub.close();
   }
 
   // Tidy up the isolated build output.

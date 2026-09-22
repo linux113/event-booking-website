@@ -10,7 +10,8 @@ supabase/
 │   ├── 20260922090100_rls_policies.sql           # Row Level Security + role helper functions
 │   ├── 20260922090200_public_data_api.sql        # per-night availability RPC, highlights, features
 │   ├── 20260922090300_pass_catalogue_visibility.sql  # disabled passes stay visible to the site
-│   └── 20260922090400_booking_flow.sql           # DND reference, idempotency key, atomic booking RPC
+│   ├── 20260922090400_booking_flow.sql           # DND reference, idempotency key, atomic booking RPC
+│   └── 20260922090500_payments.sql               # public token, payment events, confirm/refund, webhook
 └── seed.sql                                      # event, 9 nights, 5 passes, features, highlights
 ```
 
@@ -24,6 +25,7 @@ supabase/
 | `event_highlights` | "What to expect" bullets per event | ✅ rows of a published event |
 | `event_features` | Production inclusions (anchor, DJ, drone…) | ✅ rows of a published event |
 | `bookings` | One booking = one pass category on one night | ❌ staff only |
+| `payment_events` | One row per Razorpay webhook delivery (the duplicate guard) | ❌ staff only |
 | `digital_passes` | Scannable QR passes issued after payment | ❌ staff only |
 | `check_ins` | Gate scan log (one row per pass, ever) | ❌ staff only |
 | `gallery` | Photo/video metadata (files in Storage) | ✅ published only |
@@ -69,6 +71,38 @@ second one. The customer-facing reference comes from `generate_booking_id()`
 Everything else public (events, nights, features, highlights, gallery) is a plain RLS
 read on tables that hold no personal data.
 
+### Payments
+
+Money is only ever moved by server code, and only the database decides that a booking is
+paid. Five functions back that, all `SECURITY DEFINER` and all `service_role`-only:
+
+| Function | What it does |
+| -------- | ------------ |
+| `attach_razorpay_order(booking, order_id)` | Stores the Razorpay order id on the pending booking once (a replay returns the stored one). `PC004` when the booking does not exist. |
+| `confirm_booking_payment(order_id, payment_id, amount_paise)` | The only way `payment_status` becomes `paid`: checks the amount against `total_amount × 100` (`PC002`) and that the payment is not already used by another booking (`PC003`), then sets `paid` + `confirmed` and inserts **exactly `quantity`** `digital_passes` rows. Idempotent: a replay returns `already_confirmed` and writes nothing. |
+| `fail_booking_payment(order_id, payment_id)` | Marks a still-unpaid booking `failed`. A paid booking is never downgraded (`already_paid`). |
+| `refund_booking_payment(payment_id)` | Marks the booking refunded and cancels its passes; idempotent (`already_refunded`). |
+| `apply_razorpay_event(event_id, type, order, payment, amount)` | The webhook dispatcher. Claims the delivery by its unique `event_id` in `payment_events`, then routes `payment.captured` / `order.paid` (confirm), `payment.failed` (fail) and `refund.processed` / `payment.refunded` (refund). Outcomes: `confirmed`, `already_confirmed`, `failed`, `refunded`, `ignored`, `duplicate`. |
+
+| SQLSTATE | Meaning |
+| -------- | ------- |
+| `PC001` | No booking carries that order id |
+| `PC002` | The amount paid does not match `total_amount × 100` |
+| `PC003` | That payment id is already stored on another booking |
+| `PC004` | Unknown booking when attaching an order |
+| `PC005` | A confirmation arrived without a payment id (an `order.paid` delivery on its own is recorded and ignored) |
+
+`get_booking_status(p_public_token uuid)` is the one payment-related function a customer
+indirectly reaches: it returns a single booking by the random `bookings.public_token`
+handed out with the order, and deliberately contains no name, mobile or email. The
+parameter is a `uuid` and the token is never in a URL that also carries
+`bookings.booking_id`.
+
+`bookings.public_token` (uuid, unique) exists so a customer can refresh their confirmation
+page; `booking_id` (`DND…`) stays the human-quoted reference. `payment_events.event_id` is
+unique, and `payment_events` has RLS enabled with no policies and no grants to `anon` or
+`authenticated`, so the table is invisible to the browser.
+
 ### Integrity rules worth knowing
 
 - **Prices cannot be tampered with.** `bookings.subtotal` and `number_of_people`
@@ -87,6 +121,13 @@ read on tables that hold no personal data.
   availability function uses.
 - **No digital pass is issued before payment.** Passes are created after a verified
   payment, so nothing in the booking flow can produce a scannable pass.
+- **A confirmed payment cannot be lost.** If the night fills up while the customer is
+  paying, the booking is still confirmed and an organiser note is recorded —
+  `capacity exceeded when payment was confirmed — needs organiser review` — instead of
+  dropping a booking that has already been paid for.
+- **Webhook deliveries are exactly-once.** `payment_events.event_id` is unique, and the
+  claim happens in the same transaction as the side effect, so a retried delivery is
+  recorded and reported as `duplicate` without touching the booking again.
 
 ## Applying the schema
 
@@ -116,7 +157,7 @@ Supabase **SQL editor**.
 | ---- | -------------- |
 | `anon` | Read published events, their nights, their pass categories (active or not), features, highlights and published gallery rows, plus per-night availability counts through `get_event_night_availability()`. Nothing else — no read or write access to bookings, passes, check-ins or admin users. |
 | `authenticated` | Same public reads. Gains admin powers only when present in `admin_users` with an active role (`is_admin()` for owner/admin/manager, `is_staff()` to also include scanners). |
-| `service_role` | Bypasses RLS. Server-only: booking creation (through `create_pending_booking`) and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
+| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
 
 There is deliberately **no INSERT policy on `bookings`**: bookings are created by
 server code after recalculating the amount from `pass_categories`, so the browser

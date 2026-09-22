@@ -1,7 +1,8 @@
-import { NextResponse } from "next/server";
+import type { NextResponse } from "next/server";
 
+import { noStoreJson, statusForBookingError } from "@/lib/booking/http";
 import { createPendingBooking } from "@/lib/services/bookings";
-import type { BookingApiError, BookingApiResponse } from "@/types/booking";
+import type { BookingApiResponse } from "@/types/booking";
 
 /**
  * Booking creation endpoint.
@@ -21,13 +22,6 @@ export const dynamic = "force-dynamic";
 
 /** A booking payload is a few hundred bytes; anything bigger is not a booking. */
 const MAX_BODY_BYTES = 4_096;
-
-const STATUS_BY_KIND: Record<BookingApiError["kind"], number> = {
-  "invalid-input": 400,
-  unavailable: 409,
-  "not-configured": 503,
-  "server-error": 500,
-};
 
 export async function POST(request: Request): Promise<NextResponse<BookingApiResponse>> {
   const raw = await request.text();
@@ -62,12 +56,9 @@ export async function POST(request: Request): Promise<NextResponse<BookingApiRes
     return json({ ok: true, booking: result.booking }, 201);
   }
 
-  return json({ ok: false, error: result.error }, STATUS_BY_KIND[result.error.kind]);
+  return json({ ok: false, error: result.error }, statusForBookingError(result.error.kind));
 }
 
 function json(body: BookingApiResponse, status: number): NextResponse<BookingApiResponse> {
-  return NextResponse.json(body, {
-    status,
-    headers: { "cache-control": "no-store" },
-  });
+  return noStoreJson(body, status);
 }
