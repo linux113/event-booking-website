@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens for the Navratri / Dandiya theme.
+ * Everything is exposed as a Tailwind v4 theme token, so utilities such as
+ * `bg-background`, `text-muted`, `border-border` stay consistent app-wide.
+ * Swap the hex values here to re-skin the whole site.
+ */
+@theme {
+  --color-background: #0e0a1f;
+  --color-foreground: #f7f5ff;
+  --color-surface: #171030;
+  --color-surface-raised: #221743;
+  --color-border: #35285f;
+  --color-muted: #b9b2d6;
+
+  /* Festive accents: marigold, rani pink and peacock teal. */
+  --color-marigold: #f7b731;
+  --color-marigold-soft: #ffcd63;
+  --color-marigold-foreground: #1a1206;
+  --color-rani: #e5399b;
+  --color-rani-soft: #ff7cc3;
+  --color-peacock: #22c3a6;
+  --color-night: #120722;
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Visible, on-brand focus ring for keyboard users. */
+  :focus-visible {
+    outline: 2px solid var(--color-marigold);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background-color: var(--color-rani);
+    color: #fff;
+  }
+}
