@@ -114,6 +114,25 @@ handed out with the order, and deliberately contains no name, mobile or email. T
 parameter is a `uuid` and the token is never in a URL that also carries
 `bookings.booking_id`.
 
+### Only the gateway may move a payment status
+
+`bookings.payment_status` is not an ordinary column: the trigger
+`bookings_guard_payment_status` refuses any `UPDATE` that changes it unless
+`current_setting('app.payment_proof', true) = 'razorpay-verified'`. The three functions
+that legitimately move it — `confirm_booking_payment`, `fail_booking_payment`,
+`refund_booking_payment` — each set that value transaction-locally as their first
+statement, and everything else fails with:
+
+| SQLSTATE | Meaning |
+| -------- | ------- |
+| `PB007` | `payment_status may only change through a verified Razorpay event` — with the hint to re-deliver the gateway's own event (Razorpay → Webhooks → resend) instead of writing the status by hand |
+
+The practical consequence is that there is no manual "mark as paid" path to build a
+button for, and none to add by accident either: a booking whose payment the gateway
+captured but the site missed is repaired by re-delivering the signature-verified event,
+which is the only thing the column is willing to listen to. An ad-hoc `update` in the
+SQL editor is refused in the same way a script would be.
+
 `bookings.public_token` (uuid, unique) exists so a customer can refresh their confirmation
 page; `booking_id` (`DND…`) stays the human-quoted reference. `payment_events.event_id` is
 unique, and `payment_events` has RLS enabled with no policies and no grants to `anon` or
@@ -221,7 +240,8 @@ filters rows by pulling a table into Node:
 
 | Function | What it does |
 | -------- | ------------ |
-| `admin_lookup_bookings(p_query, p_include_contact, p_limit)` | Finds bookings by reference, mobile number (however it was typed) or guest name. **The contact columns — mobile, email, amount, Razorpay order id — come back `null` when `p_include_contact` is false**, which is the limited view a `staff` role gets. The withholding happens in the query, not in the UI |
+| `admin_search_bookings(p_query, p_event_date_from, p_event_date_to, p_pass_category_id, p_payment_status, p_booking_status, p_check_in_status, p_include_contact, p_limit, p_offset)` | The `/admin/bookings` list: the search box, the five filters, the ordering (`created_at desc`), the page slice and `total_count` — the size of the *whole* result set, not of the page. A term matches the booking reference, guest name, email, pass ID, Razorpay payment ID or order ID; its digits match the mobile column only when the term is a number (no letters, at least four digits), and LIKE wildcards are escaped, so `%` finds nothing rather than everything. A filter value outside the schema's vocabulary **narrows nothing** instead of returning an empty list that reads as "no such booking". `p_limit` clamps to 1–100, `p_offset` to ≥ 0. **Contact, amount and gateway columns come back `null` when `p_include_contact` is false**, which is the limited view a `staff` role gets — the withholding happens in the query, not in the UI |
+| `admin_booking_detail(p_lookup, p_include_contact)` | One booking in full, found by booking reference, pass ID (case-insensitive), Razorpay payment ID or order ID: the event, venue and night, the pass, the money, plus `passes`, `check_ins` (with the staff member's name) and `payment_events` as JSON. Amounts, contact details and gateway IDs are `null` without `p_include_contact`, and `payment_events` is withheld too. **`qr_token` is never returned** — the credential that admits a guest does not belong on a screen |
 | `admin_dashboard_stats(p_today, p_tz, p_include_revenue)` | One row of 28 live counts: bookings by status and payment state, today's bookings, total/today's/refunded revenue, check-ins, passes issued/active/used, people on paid bookings, capacity total/taken/available over the scheduled nights still to come, tonight's own capacity figures, nights, gallery state and staff accounts |
 | `admin_booking_series(p_today, p_days, p_tz, p_include_revenue)` | One row per day over the last `p_days` (1–90, default 14), **including the days with nothing in them** — a chart with gaps in it tells a different story than the data does. Per day: bookings, confirmed bookings, and paid revenue |
 | `admin_pass_breakdown(p_include_revenue)` | Every pass category — including the ones nobody bought — with its bookings, paid bookings, passes issued, people and takings, ordered biggest first |
@@ -275,6 +295,11 @@ All five are revoked from `PUBLIC`, `anon` and `authenticated` and granted only 
 - **Webhook deliveries are exactly-once.** `payment_events.event_id` is unique, and the
   claim happens in the same transaction as the side effect, so a retried delivery is
   recorded and reported as `duplicate` without touching the booking again.
+- **A payment status cannot be typed in.** The `bookings_guard_payment_status` trigger
+  (`PB007`) refuses any change to `bookings.payment_status` that is not made by one of the
+  three payment functions inside a transaction they have marked as
+  `app.payment_proof = 'razorpay-verified'` — see
+  [Only the gateway may move a payment status](#only-the-gateway-may-move-a-payment-status).
 
 ## Applying the schema
 
@@ -304,7 +329,7 @@ Supabase **SQL editor**.
 | ---- | -------------- |
 | `anon` | Read published events, their nights, their pass categories (active or not), features, highlights and published gallery rows, plus per-night availability counts through `get_event_night_availability()`. Nothing else — no read or write access to bookings, passes, check-ins or admin users. |
 | `authenticated` | Same public reads. Gains admin powers only when present in `admin_users` with an active role: `is_admin()` for the management roles (super admin, admin), `is_staff()` to include gate staff, `is_super_admin()` for the bare `admin_users` access. |
-| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, the pass reads (`get_booking_passes`, `get_pass_by_token`), the gate functions (`scan_pass`, `check_in_pass`), the admin lookups (`admin_lookup_bookings`, `admin_dashboard_stats`) and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
+| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, the pass reads (`get_booking_passes`, `get_pass_by_token`), the gate functions (`scan_pass`, `check_in_pass`), the admin reads (`admin_search_bookings`, `admin_booking_detail`, `admin_dashboard_stats`, `admin_booking_series`, `admin_pass_breakdown`, `admin_recent_bookings`) and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
 
 There is deliberately **no INSERT policy on `bookings`**: bookings are created by
 server code after recalculating the amount from `pass_categories`, so the browser

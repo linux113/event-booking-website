@@ -99,7 +99,20 @@ export function createAuthStub({ accounts = [], log = false } = {}) {
     };
   }
 
+  /**
+   * A session id, fresh for every sign-in.
+   *
+   * GoTrue issues a new session on every sign-in, and that is what makes revoking one
+   * harmless to the others: signing a gate phone out must not end the shift manager's
+   * session, and signing in again must produce a session that works. A per-user id
+   * would model neither — the second sign-in would inherit the first one's death.
+   */
+  let sessionCounter = 0;
+
   function sessionFor(account) {
+    sessionCounter += 1;
+    const sessionId = `stub-session-${account.id}-${sessionCounter}`;
+
     return {
       access_token: token({
         sub: account.id,
@@ -107,7 +120,7 @@ export function createAuthStub({ accounts = [], log = false } = {}) {
         role: "authenticated",
         aud: "authenticated",
         type: "access",
-        session_id: `stub-session-${account.id}`,
+        session_id: sessionId,
         iat: now(),
         exp: now() + ACCESS_TOKEN_SECONDS,
       }),
@@ -117,7 +130,7 @@ export function createAuthStub({ accounts = [], log = false } = {}) {
       refresh_token: token({
         sub: account.id,
         type: "refresh",
-        session_id: `stub-session-${account.id}`,
+        session_id: sessionId,
         iat: now(),
         exp: now() + REFRESH_TOKEN_SECONDS,
       }),

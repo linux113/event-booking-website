@@ -19,7 +19,8 @@ fits within free tiers for development and small-scale launch.
 | 7 | QR verification and entry — staff sign-in, mobile camera scanner, server-side check-in | ✅ done |
 | 8 | Admin authentication — staff sign-in, three roles, protected routes, logout, booking lookup | ✅ done |
 | 9 | Admin dashboard — eight live statistics, charts, recent bookings, loading skeletons and error states | ✅ done |
-| 10 | Operations screens — publish events, capacity and dates, gallery, payments and passes | ⏳ next |
+| 10 | Booking management — searchable, filterable list, one booking in full, CSV export, payment statuses that only the gateway can move | ✅ done |
+| 11 | Operations screens — publish events, capacity and dates, gallery, payments and passes | ⏳ next |
 | 11 | Hardening — rate limiting, analytics, perf budget | ⏳ |
 
 Step 3 is two halves of one job — the Supabase schema/RLS layer, then replacing every
@@ -51,7 +52,9 @@ signature — never by the browser saying so.
 | `/admin/login` | Staff sign-in: Supabase Auth email + password, then the `admin_users` allow-list. A valid account that is not staff is signed back out with an explanation |
 | `/admin` | The dashboard: eight statistics (bookings, revenue, check-ins, capacity), bookings and revenue by date, the pass-category distribution, the newest bookings, plus exactly the sections the signed-in role may open |
 | `/admin/scanner` | The gate: camera QR scanner, the verdict for the pass that was scanned, and the CHECK IN button that burns it. Every role; the page itself never writes |
-| `/admin/bookings` | Booking lookup by reference, mobile number or guest name. One page, two views: an admin sees contact details and amounts, a staff member sees the guest and the pass |
+| `/admin/bookings` | Booking management: one search box (reference, name, mobile, email, pass ID, Razorpay payment or order ID), five filters (night range, pass, payment status, booking status, check-in status), paged results and a CSV export of whatever the filters select. One page, two views: an admin sees contact details, amounts and gateway IDs, a staff member sees the guest, the night, the pass and the check-in state |
+| `/admin/bookings/[reference]` | One booking in full: guest and contact details, night, pass, amounts, every issued pass, every gate entry with the staff member who made it, and the Razorpay events received for its order. No control anywhere on the page can change a payment status |
+| `/admin/bookings/export` | The current filters as a CSV file. Contact, amount and gateway columns are omitted entirely for a role without `bookings:view_contact` |
 | `/admin/settings` | The event, venue and deployment values the public site reads. Admin and super admin |
 | `/admin/staff` | Who may sign in and with which role, plus how to add somebody. Super admin only |
 | `/gallery` | Published photos and videos from the `gallery` table, grouped by album |
@@ -247,9 +250,11 @@ that render HTML, the staff APIs answer with plain JSON, and `npm run verify:web
 asserts that no rendered admin page contains the key or a `service_role` claim.
 
 **The staff view is a different answer, not the same answer with fields hidden.** A
-staff member's booking lookup calls `admin_lookup_bookings(p_include_contact => false)`,
-so the mobile number, the email address, the amount and the gateway order id are never
-returned to the process at all — there is nothing to remember to hide.
+staff member's booking list calls `admin_search_bookings(p_include_contact => false)`,
+so the mobile number, the email address, the amount and the gateway IDs are never
+returned to the process at all — there is nothing to remember to hide. The CSV export
+follows the same rule in a stronger form: its *header row* omits those columns, so the
+file is not full of empty columns hinting at what a staff member may not have.
 
 **Signing out** is a `POST` to `/api/staff/logout` (a form, so it works with
 JavaScript disabled), which ends the Supabase session — revoking the refresh token,
@@ -304,6 +309,60 @@ page; `error.tsx` catches anything the page's own error branch misses and offers
 retry that keeps the session; and a failure is never rendered as a zero. The dashboard
 holds no cached summary and no placeholder figures — if the database is unreachable, the
 page says so.
+
+## Booking management (`/admin/bookings`)
+
+The screen for the question a guest asks on the phone: *"I booked for Friday, can you
+find me?"* Everything about it — the search, the filters, the paging, the count and the
+CSV export — is one database function, `admin_search_bookings()`, so the list on screen,
+the next page and the downloaded file are the same rows by construction rather than by
+three implementations agreeing.
+
+**One search box, six things it can be.** A booking reference (`DND202600001`), a guest's
+name, a mobile number typed however the caller remembered it (`+91 98123 45678`), an
+email address, a pass ID (`PS-000123`), or a Razorpay payment/order ID from a receipt.
+The digits of a search are matched against the mobile column only when the term actually
+*is* a number — otherwise a search for "Suite 101" would answer with everybody whose
+phone number contains `101`. LIKE's own wildcards are escaped, so a search for `%` finds
+nothing rather than the whole event.
+
+**Five filters, one meaning each.** Night range (from/to), pass category, payment status,
+booking status, and check-in status — `nobody in yet`, `part of the group in`,
+`everyone in`. A filter value the schema does not recognise is dropped rather than
+forwarded: an empty list that looks like "no such booking" is a worse answer than
+ignoring a typo. Filters compose (`paid` + `part of the group in` + one night), the
+result set is counted in SQL (`Showing 26–50 of 5,012`), and the paging links carry the
+filters with them, so any search is a URL an operator can bookmark or hand to a
+colleague.
+
+**The export is the filters, as a file.** `/admin/bookings/export` takes the same URL
+parameters, reads the same function, and answers with `text/csv` and a
+`Content-Disposition` filename dated for the day it was made. Cells that begin with
+`=`, `+`, `-` or `@` are prefixed with an apostrophe, because a guest named `=1+1`
+should be a guest and not a spreadsheet formula. A download is capped at 5,000 rows —
+the file's `x-export-truncated` header says whether it was — and the screen says so
+before the click. For a role without `bookings:view_contact`, the contact, amount and
+Razorpay columns are absent from the header row itself: not blank columns, no columns.
+
+**One booking in full** is a page, not a modal: `/admin/bookings/[reference]` is a URL
+that can be sent, reloaded and returned to, and it resolves the four identifiers a
+support thread might contain (reference, pass ID, payment ID, order ID —
+`admin_booking_detail()`). It shows the guest, the night and pass, the amounts, every
+issued pass with its own state, every gate entry with the gate and the staff member who
+made it, and the Razorpay events received for that order. It never shows `qr_token`, and
+the harness asserts that: the credential that admits a guest is not a screen's business.
+
+**A payment status cannot be typed in.** Step 10 added the trigger
+`bookings_guard_payment_status`: any `UPDATE` that changes `bookings.payment_status`
+without proof that a verified gateway event is behind it raises `PB007`. The three
+functions that legitimately move the column — `confirm_booking_payment`,
+`fail_booking_payment`, `refund_booking_payment` — mark their own transaction with
+`app.payment_proof = 'razorpay-verified'` as their first statement. There is therefore no
+manual "mark as paid" path to build a button for, in the UI or in the SQL editor: a
+payment the gateway captured but the site missed is fixed by re-delivering Razorpay's
+own event (Dashboard → Webhooks → resend), which lands in the same signature-verified
+path as the original. The detail page shows that evidence instead — event type, outcome,
+amount, when it was received and when it was processed.
 
 ## Gate check-in (`/admin/scanner`)
 
@@ -374,7 +433,9 @@ Supabase directly.
 | A booking's passes and their QR codes | `digital_passes` through `get_booking_passes(public_token)` (booking page) and `get_pass_by_token(qr_token)` (ticket and gate view) — pass id, state, night and event, never a mobile number or an email address |
 | The gate verdict for a scanned token | `scan_pass()` — one transaction, `service_role` only, and the caller must present a staff user id |
 | A check-in record | `check_in_pass()` — the same verdict plus a compare-and-swap on the pass row and one `check_ins` row |
-| An admin booking lookup | `admin_lookup_bookings()` — the search runs in Postgres, and the contact columns come back null for a role without `bookings:view_contact` |
+| The booking list, its search, its filters and its paging | `admin_search_bookings()` — searching, filtering, ordering, the page slice and the count of the whole result set all happen in SQL; the contact, amount and gateway columns come back null for a role without `bookings:view_contact` |
+| One booking in full | `admin_booking_detail()` — found by booking reference, pass ID, payment ID or order ID, and returns the passes, the gate entries and the Razorpay events as JSON. It never returns `qr_token`: the credential that admits a guest is not a screen's business |
+| Whether a payment really happened | `payment_events` (received from a signature-verified webhook) plus `bookings.payment_status`, which only the payment functions may change — a trigger refuses any other write |
 | The dashboard numbers | `admin_dashboard_stats()` — counted in the database, for the venue's today |
 | The dashboard's charts | `admin_booking_series()` (a row per day, quiet days included) and `admin_pass_breakdown()` (per pass category) — both aggregated in SQL |
 | The signed-in role, at the edge | `current_staff_role()` — the caller's own role and nothing else, so the request hook can refuse before a page renders |

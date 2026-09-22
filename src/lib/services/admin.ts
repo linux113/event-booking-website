@@ -3,6 +3,17 @@ import "server-only";
 import { isSupabaseConfigured } from "@/config/env";
 import { siteConfig } from "@/config/site";
 import { can, ROLE_LABELS, type StaffRole } from "@/lib/auth/permissions";
+import {
+  BOOKING_PAGE_SIZE,
+  EXPORT_BATCH_SIZE,
+  EXPORT_MAX_ROWS,
+  bookingOffset,
+  normaliseSearchTerm,
+  type BookingDetail,
+  type BookingQuery,
+  type BookingRow,
+  type FilterOption,
+} from "@/lib/admin/bookings";
 import { gateNight } from "@/lib/gate/night";
 import { fail, ok, type Result, type ServiceError } from "@/lib/services/result";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
@@ -14,10 +25,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  *
  * Three rules shape this module:
  *
- *   1. **The database counts and filters, not the app.** `admin_lookup_bookings()`
- *      and `admin_dashboard_stats()` are `service_role`-only functions, so the admin
- *      area never pulls a table into Node to add it up, and an unsupported filter can
- *      never quietly widen a result set.
+ *   1. **The database counts and filters, not the app.** `admin_search_bookings()`,
+ *      `admin_booking_detail()` and `admin_dashboard_stats()` are `service_role`-only
+ *      functions, so the admin area never pulls a table into Node to add it up or to
+ *      filter it, and an unsupported filter can never quietly widen a result set.
  *   2. **A role decides the *shape* of the data, not just the door.** The staff view
  *      is requested with `p_include_contact = false`, so contact details, amounts and
  *      gateway ids are never returned at all. Redaction that happens upstream of the
@@ -155,43 +166,13 @@ export async function getDashboardSnapshot(role: StaffRole): Promise<Result<Dash
 }
 
 // -----------------------------------------------------------------------------
-// Booking lookup
+// Booking management
 // -----------------------------------------------------------------------------
 
-type LookupRow = Database["public"]["Functions"]["admin_lookup_bookings"]["Returns"][number];
+type SearchRow = Database["public"]["Functions"]["admin_search_bookings"]["Returns"][number];
+type DetailRow = Database["public"]["Functions"]["admin_booking_detail"]["Returns"][number];
 
-/**
- * One booking as the admin list renders it.
- *
- * The contact fields and the amount are nullable for a reason: for a staff member
- * they are *absent*, not hidden, and the UI has nothing to accidentally render.
- */
-export interface AdminBookingRow {
-  bookingUuid: string;
-  reference: string;
-  customerName: string;
-  customerMobile: string | null;
-  customerEmail: string | null;
-  eventName: string;
-  eventDate: string;
-  startTime: string | null;
-  endTime: string | null;
-  passName: string;
-  passComposition: string | null;
-  quantity: number;
-  numberOfPeople: number;
-  totalAmount: number | null;
-  currency: string;
-  bookingStatus: string;
-  paymentStatus: string;
-  razorpayOrderId: string | null;
-  createdAt: string;
-  passesIssued: number;
-  passesCheckedIn: number;
-  checkInTimes: string[];
-}
-
-function mapRow(row: LookupRow): AdminBookingRow {
+function mapBookingRow(row: SearchRow): BookingRow {
   return {
     bookingUuid: row.booking_uuid,
     reference: row.booking_id,
@@ -211,40 +192,242 @@ function mapRow(row: LookupRow): AdminBookingRow {
     bookingStatus: row.booking_status,
     paymentStatus: row.payment_status,
     razorpayOrderId: row.razorpay_order_id,
+    razorpayPaymentId: row.razorpay_payment_id,
     createdAt: row.created_at,
     passesIssued: row.passes_issued,
     passesCheckedIn: row.passes_checked_in,
+    passIds: Array.isArray(row.pass_ids) ? row.pass_ids : [],
     checkInTimes: Array.isArray(row.check_in_times) ? row.check_in_times : [],
   };
 }
 
-export interface BookingLookup {
-  /** The trimmed term that was searched for (echoed back to the page). */
-  query: string;
-  /** False for roles without `bookings:view_contact` — the limited view. */
-  includeContact: boolean;
-  rows: AdminBookingRow[];
+/**
+ * `jsonb` arrives as whatever the client deserialised it into, which is a plain object
+ * for `jsonb_agg`. The three arrays are rebuilt field by field rather than trusted, so
+ * a change in the database surfaces as a missing field in TypeScript instead of an
+ * undefined rendered into the page.
+ */
+function mapDetail(row: DetailRow): BookingDetail {
+  const passes = Array.isArray(row.passes) ? row.passes : [];
+  const checkIns = Array.isArray(row.check_ins) ? row.check_ins : [];
+  const events = Array.isArray(row.payment_events) ? row.payment_events : [];
+
+  return {
+    bookingUuid: row.booking_uuid,
+    reference: row.booking_id,
+    customerName: row.customer_name,
+    customerMobile: row.customer_mobile,
+    customerEmail: row.customer_email,
+    eventName: row.event_name,
+    eventSlug: row.event_slug,
+    venueName: row.venue_name,
+    venueAddress: row.venue_address,
+    city: row.city,
+    eventDate: row.event_date,
+    startTime: row.start_time,
+    endTime: row.end_time,
+    passName: row.pass_name,
+    passComposition: row.pass_composition,
+    quantity: row.quantity,
+    numberOfPeople: row.number_of_people,
+    subtotal: row.subtotal,
+    totalAmount: row.total_amount,
+    currency: row.currency,
+    bookingStatus: row.booking_status,
+    paymentStatus: row.payment_status,
+    razorpayOrderId: row.razorpay_order_id,
+    razorpayPaymentId: row.razorpay_payment_id,
+    notes: row.notes,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    passes: passes.map((pass) => ({
+      passId: pass.pass_id,
+      passNumber: pass.pass_number,
+      status: pass.status,
+      checkedIn: pass.checked_in,
+      checkedInAt: pass.checked_in_at,
+      validDate: pass.valid_date,
+    })),
+    checkIns: checkIns.map((entry) => ({
+      passId: entry.pass_id,
+      gate: entry.gate,
+      notes: entry.notes,
+      checkedInAt: entry.checked_in_at,
+      staff: entry.staff,
+    })),
+    paymentEvents: events.map((event) => ({
+      eventId: event.event_id,
+      eventType: event.event_type,
+      outcome: event.outcome,
+      amountPaise: event.amount_paise,
+      receivedAt: event.received_at,
+      processedAt: event.processed_at,
+    })),
+  };
 }
 
-/** The shortest search worth running. A single letter matches half the event. */
-export const MIN_LOOKUP_LENGTH = 3;
+/** One page of the booking list. */
+export interface BookingPage {
+  rows: BookingRow[];
+  /** Bookings matching the filters, not rows on this page. */
+  total: number;
+  page: number;
+  pageSize: number;
+  /** False for roles without `bookings:view_contact` — see `permissions.ts`. */
+  includeContact: boolean;
+}
 
 /**
- * Find bookings by reference, mobile number or guest name.
+ * The filter arguments, exactly as the database function expects them.
  *
- * The `role` decides whether the contact columns exist in the response at all (see
- * `permissions.ts` for why that is a separate capability from opening the page).
+ * `undefined` and `null` are different things here: a filter that is not set is sent
+ * as `null` so the function's `p_x is null` branch skips it, and nothing is ever sent
+ * as an empty string — Postgres would compare `''` against a uuid column and refuse
+ * the call.
  */
-export async function lookupBookings(
-  query: unknown,
-  role: StaffRole,
-  limit = 25,
-): Promise<Result<BookingLookup | null>> {
-  const term = typeof query === "string" ? query.trim().slice(0, 64) : "";
-  const includeContact = can(role, "bookings:view_contact");
+function filterArgs(query: BookingQuery) {
+  return {
+    p_query: query.q || null,
+    p_event_date_from: query.dateFrom,
+    p_event_date_to: query.dateTo,
+    p_pass_category_id: query.passCategoryId,
+    p_payment_status: query.paymentStatus,
+    p_booking_status: query.bookingStatus,
+    p_check_in_status: query.checkInStatus,
+  };
+}
 
-  if (term.length < MIN_LOOKUP_LENGTH) {
-    // Not an error: an empty search box is a page with instructions on it.
+/**
+ * The booking list: search, filters, paging.
+ *
+ * The whole of it happens in Postgres (`admin_search_bookings`) — the search term, the
+ * five filters, the ordering, the page slice and the count of the full result set. Two
+ * consequences worth stating plainly:
+ *
+ *   * this function never sees a booking it was not asked for, because the database
+ *     applies the filters and returns one page;
+ *   * `total` is the size of the *whole* match, so the screen can say "26–50 of 128"
+ *     without the app counting anything.
+ *
+ * The role decides whether contact details, amounts and gateway ids are returned at
+ * all, via `p_include_contact`. There is no path through this function that fetches
+ * them and then hides them.
+ */
+export async function listBookings(query: BookingQuery, role: StaffRole): Promise<Result<BookingPage>> {
+  const client = getAdminClient();
+
+  if (!client.ok) {
+    return { ok: false, error: client.error };
+  }
+
+  const includeContact = can(role, "bookings:view_contact");
+  const { data, error } = await client.client.rpc("admin_search_bookings", {
+    ...filterArgs(query),
+    p_include_contact: includeContact,
+    p_limit: BOOKING_PAGE_SIZE,
+    p_offset: bookingOffset(query.page),
+  });
+
+  if (error) {
+    console.error("[admin] admin_search_bookings failed:", error.message, error.code);
+
+    return fail("query-failed", "We could not search bookings right now.");
+  }
+
+  const rows = Array.isArray(data) ? data : [];
+
+  return ok({
+    // `total_count` is a window count: every row of the result set carries the size of
+    // the whole set, so it is read here and kept out of the screen's row shape.
+    rows: rows.map(mapBookingRow),
+    total: rows[0]?.total_count ?? 0,
+    page: query.page,
+    pageSize: BOOKING_PAGE_SIZE,
+    includeContact,
+  });
+}
+
+/**
+ * Every booking matching the filters, for the CSV export.
+ *
+ * Returns the rows it managed to fetch and whether the cap stopped it early, so the
+ * caller can say "the first 5000 of 12345" instead of pretending the file is complete.
+ */
+export async function collectBookingsForExport(
+  query: BookingQuery,
+  role: StaffRole,
+  maxRows: number = EXPORT_MAX_ROWS,
+): Promise<Result<{ rows: BookingRow[]; includeContact: boolean; truncated: boolean }>> {
+  const client = getAdminClient();
+
+  if (!client.ok) {
+    return { ok: false, error: client.error };
+  }
+
+  const includeContact = can(role, "bookings:view_contact");
+  const rows: BookingRow[] = [];
+  let offset = 0;
+  let total = 0;
+
+  // Sequential on purpose: the loop stops as soon as the match is exhausted, so the
+  // usual export is one call, and the count of pages needed comes from the first answer.
+  for (;;) {
+    const { data, error } = await client.client.rpc("admin_search_bookings", {
+      ...filterArgs(query),
+      p_include_contact: includeContact,
+      p_limit: EXPORT_BATCH_SIZE,
+      p_offset: offset,
+    });
+
+    if (error) {
+      console.error("[admin] booking export failed:", error.message, error.code);
+
+      return fail("query-failed", "We could not build the export right now.");
+    }
+
+    const batch = Array.isArray(data) ? data : [];
+
+    total = batch[0]?.total_count ?? total;
+
+    rows.push(...batch.map(mapBookingRow));
+    offset += batch.length;
+
+    // Two reasons to stop: the match is exhausted (a short batch, or an empty one), or
+    // the caller's ceiling has been reached. `truncated` below is what tells the two
+    // apart — and it is computed from the count, not from which branch was taken.
+    if (batch.length < EXPORT_BATCH_SIZE || rows.length >= maxRows) {
+      break;
+    }
+  }
+
+  return ok({
+    rows: rows.slice(0, maxRows),
+    includeContact,
+    // Incomplete means: the database says there are more bookings than this file has.
+    // A partial export that claimed to be complete would be the one genuinely dangerous
+    // thing an export can do, so the flag comes from the count rather than the loop.
+    truncated: rows.length < total,
+  });
+}
+
+/**
+ * One booking in full, by booking reference, pass id, payment id or order id.
+ *
+ * `null` means no booking carries that identifier — an answer, not an error, and the
+ * page renders it as "nothing here" rather than as a failure.
+ *
+ * The pass list, the gate entries and the Razorpay events come back inside the one
+ * row. The QR token does not come back at all: the credential that admits a guest is
+ * not a screen's business, and this is the function that would otherwise be handing it
+ * out.
+ */
+export async function getBookingDetail(
+  lookup: unknown,
+  role: StaffRole,
+): Promise<Result<BookingDetail | null>> {
+  const term = normaliseSearchTerm(lookup);
+
+  if (!term) {
     return ok(null);
   }
 
@@ -254,23 +437,54 @@ export async function lookupBookings(
     return { ok: false, error: client.error };
   }
 
-  const { data, error } = await client.client.rpc("admin_lookup_bookings", {
-    p_query: term,
-    p_include_contact: includeContact,
-    p_limit: limit,
+  const { data, error } = await client.client.rpc("admin_booking_detail", {
+    p_lookup: term,
+    p_include_contact: can(role, "bookings:view_contact"),
   });
 
   if (error) {
-    console.error("[admin] admin_lookup_bookings failed:", error.message, error.code);
+    console.error("[admin] admin_booking_detail failed:", error.message, error.code);
 
-    return fail("query-failed", "We could not search bookings right now.");
+    return fail("query-failed", "We could not load that booking right now.");
   }
 
-  return ok({
-    query: term,
-    includeContact,
-    rows: (Array.isArray(data) ? data : []).map(mapRow),
-  });
+  const [row] = Array.isArray(data) ? data : [];
+
+  return ok(row ? mapDetail(row) : null);
+}
+
+/** The pass categories the filter bar offers: what an event actually sells. */
+export async function listBookingPassOptions(): Promise<Result<FilterOption[]>> {
+  const client = getAdminClient();
+
+  if (!client.ok) {
+    return { ok: false, error: client.error };
+  }
+
+  const { data, error } = await client.client
+    .from("pass_categories")
+    .select("id, name, price_inr, is_active, sort_order")
+    .order("sort_order", { ascending: true })
+    .order("price_inr", { ascending: true })
+    .limit(50);
+
+  if (error) {
+    console.error("[admin] pass_categories read failed:", error.message, error.code);
+
+    // The filter bar is not the page: without the pass list a manager can still search
+    // and filter by everything else, so this is reported as an empty option list.
+    return ok([]);
+  }
+
+  return ok(
+    (data ?? []).map((row) => ({
+      value: row.id,
+      // A retired pass category still has bookings against it, so it stays in the
+      // filter — labelled, because "Duo (retired)" is a filter, and a category the
+      // operator cannot find is a booking they cannot look up.
+      label: row.is_active ? row.name : `${row.name} (retired)`,
+    })),
+  );
 }
 
 // -----------------------------------------------------------------------------

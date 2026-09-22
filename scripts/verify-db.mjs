@@ -582,6 +582,7 @@ async function main() {
   const EVENT = "e0000000-0000-4000-8000-000000000001";
   const COUPLE = "c0000000-0000-4000-8000-000000000002"; // 499 INR, 2 people, max 10
   const FAMILY = "c0000000-0000-4000-8000-000000000005"; // 1099 INR, 4 people, max 5
+  const TRIO = "c0000000-0000-4000-8000-000000000003"; // 599 INR, 3 people, max 10
   const NIGHT_FREE = "d0000000-0000-4000-8000-000000000004";
   const NIGHT_CANCEL = "d0000000-0000-4000-8000-000000000005";
   const NIGHT_FULL = "d0000000-0000-4000-8000-000000000006";
@@ -1842,19 +1843,19 @@ async function main() {
     `)
   )[0];
   check(
-    "the lookup fixture is a paid booking with the details a lookup returns",
+    "the search fixture is a paid booking with the details a search returns",
     Boolean(lookupBooking?.booking_id && lookupBooking?.customer_mobile),
     JSON.stringify(lookupBooking ?? null),
   );
 
-  const lookupByReference = await rpc("admin_lookup_bookings", { p_query: lookupBooking.booking_id });
+  const lookupByReference = await rpc("admin_search_bookings", { p_query: lookupBooking.booking_id });
   check(
     "a booking is found by its reference",
     lookupByReference.length === 1 && lookupByReference[0].booking_id === lookupBooking.booking_id,
     `${lookupByReference.length} rows`,
   );
   check(
-    "the lookup returns the guest, the night and the pass",
+    "the search returns the guest, the night and the pass",
     lookupByReference[0]?.customer_name === lookupBooking.customer_name &&
       /^\d{4}-\d{2}-\d{2}T?/.test(lookupByReference[0]?.event_date ?? "") &&
       Boolean(lookupByReference[0]?.pass_name),
@@ -1867,12 +1868,12 @@ async function main() {
     `${lookupByReference[0]?.customer_mobile ?? ""} / ${lookupByReference[0]?.total_amount ?? ""}`,
   );
   check(
-    "the lookup counts the booking's passes and how many are in",
+    "the search counts the booking's passes and how many are in",
     lookupByReference[0]?.passes_issued === 2 && Number(lookupByReference[0]?.passes_checked_in) >= 0,
     `${lookupByReference[0]?.passes_issued ?? ""} issued`,
   );
 
-  const lookupLimited = await rpc("admin_lookup_bookings", {
+  const lookupLimited = await rpc("admin_search_bookings", {
     p_query: lookupBooking.booking_id,
     p_include_contact: false,
   });
@@ -1881,7 +1882,8 @@ async function main() {
     lookupLimited[0]?.customer_mobile === null &&
       lookupLimited[0]?.customer_email === null &&
       lookupLimited[0]?.total_amount === null &&
-      lookupLimited[0]?.razorpay_order_id === null,
+      lookupLimited[0]?.razorpay_order_id === null &&
+      lookupLimited[0]?.razorpay_payment_id === null,
     JSON.stringify({
       mobile: lookupLimited[0]?.customer_mobile,
       amount: lookupLimited[0]?.total_amount,
@@ -1894,7 +1896,7 @@ async function main() {
       Boolean(lookupLimited[0]?.pass_name),
   );
 
-  const lookupByName = await rpc("admin_lookup_bookings", {
+  const lookupByName = await rpc("admin_search_bookings", {
     p_query: lookupBooking.customer_name.slice(0, 4),
     p_include_contact: false,
   });
@@ -1905,7 +1907,7 @@ async function main() {
   );
 
   const spacedMobile = `+91 ${lookupBooking.customer_mobile.slice(3)}`;
-  const lookupByMobile = await rpc("admin_lookup_bookings", {
+  const lookupByMobile = await rpc("admin_search_bookings", {
     p_query: spacedMobile,
     p_include_contact: false,
   });
@@ -1915,27 +1917,33 @@ async function main() {
     `${lookupByMobile.length} rows`,
   );
 
-  const lookupEmpty = await rpc("admin_lookup_bookings", { p_query: "" });
-  check("an empty search returns nothing at all", lookupEmpty.length === 0, `${lookupEmpty.length} rows`);
+  // An empty search box is the management list, not an empty answer: the screen has
+  // to open on the bookings, and the row count says how many there are.
+  const lookupEmpty = await rpc("admin_search_bookings", { p_query: "" });
+  check(
+    "an empty search is the list itself, with the size of the result set",
+    lookupEmpty.length > 0 && lookupEmpty[0].total_count >= lookupEmpty.length,
+    `${lookupEmpty.length} rows of ${lookupEmpty[0]?.total_count ?? "?"}`,
+  );
 
-  const lookupPunctuation = await rpc("admin_lookup_bookings", { p_query: "+-() " });
+  const lookupPunctuation = await rpc("admin_search_bookings", { p_query: "+-() " });
   check(
     "a search with no digits and no letters returns nothing, not everything",
     lookupPunctuation.length === 0,
     `${lookupPunctuation.length} rows`,
   );
 
-  const lookupUnknown = await rpc("admin_lookup_bookings", { p_query: "PS-999999" });
+  const lookupUnknown = await rpc("admin_search_bookings", { p_query: "DND999999999" });
   check("an unknown reference returns nothing", lookupUnknown.length === 0, `${lookupUnknown.length} rows`);
 
-  const lookupLimitedRows = await rpc("admin_lookup_bookings", { p_query: "1", p_limit: 1 });
-  check("the lookup honours the caller's row limit", lookupLimitedRows.length <= 1, `${lookupLimitedRows.length} rows`);
+  const lookupLimitedRows = await rpc("admin_search_bookings", { p_query: "1", p_limit: 1 });
+  check("the search honours the caller's page size", lookupLimitedRows.length <= 1, `${lookupLimitedRows.length} rows`);
 
   const lookupGrants = await q(`
     select
-      has_function_privilege('anon', 'public.admin_lookup_bookings(text, boolean, integer)', 'execute') as anon,
-      has_function_privilege('authenticated', 'public.admin_lookup_bookings(text, boolean, integer)', 'execute') as authenticated,
-      has_function_privilege('service_role', 'public.admin_lookup_bookings(text, boolean, integer)', 'execute') as service;
+      has_function_privilege('anon', 'public.admin_search_bookings(text, date, date, uuid, text, text, text, boolean, integer, integer)', 'execute') as anon,
+      has_function_privilege('authenticated', 'public.admin_search_bookings(text, date, date, uuid, text, text, text, boolean, integer, integer)', 'execute') as authenticated,
+      has_function_privilege('service_role', 'public.admin_search_bookings(text, date, date, uuid, text, text, text, boolean, integer, integer)', 'execute') as service;
   `);
   check(
     "only the service role may search bookings",
@@ -1943,9 +1951,21 @@ async function main() {
     JSON.stringify(lookupGrants[0]),
   );
 
-  const anonLookup = await expectError(`set role anon; select * from public.admin_lookup_bookings('x');`);
-  check("an anon session cannot call the lookup", anonLookup !== null, anonLookup ?? "call succeeded");
+  const anonLookup = await expectError(`set role anon; select * from public.admin_search_bookings('x');`);
+  check("an anon session cannot call the search", anonLookup !== null, anonLookup ?? "call succeeded");
   await run("reset role;");
+
+  const retiredLookup = await q(`
+    select count(*)::integer as n
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public' and p.proname = 'admin_lookup_bookings';
+  `);
+  check(
+    "the retired lookup is gone: one search, one set of matching rules",
+    retiredLookup[0].n === 0,
+    `${retiredLookup[0].n} definitions left`,
+  );
 
   const statsGrants = await q(`
     select
@@ -1959,11 +1979,15 @@ async function main() {
     JSON.stringify(statsGrants[0]),
   );
 
-  const [statsToday] = await q(`
-    select ((now() at time zone 'UTC')::date)::text as today,
-           (((now() at time zone 'UTC')::date) - 1)::text as yesterday;
-  `);
+  // The dashboard counts days in the venue's timezone (its `p_tz`), so "today" here has
+  // to be the venue's today as well. Reading it as the server's UTC date would be a
+  // different question entirely — and, between midnight and 5:30 in Jaipur, a different
+  // answer.
   const venueTz = "Asia/Kolkata";
+  const [statsToday] = await q(`
+    select ((now() at time zone '${venueTz}')::date)::text as today,
+           (((now() at time zone '${venueTz}')::date) - 1)::text as yesterday;
+  `);
   const statsForToday = (await rpc("admin_dashboard_stats", { p_today: statsToday.today, p_tz: venueTz }))[0];
   const statsForYesterday = (await rpc("admin_dashboard_stats", {
     p_today: statsToday.yesterday,
@@ -2286,11 +2310,16 @@ async function main() {
     p_razorpay_payment_id: "pay_DASH000000000003",
     p_amount_paise: paidEarly.total_amount * 100,
   });
-  // Half past midnight in Jaipur is the previous evening in UTC. The booking belongs
-  // to the venue's day, and the dashboard has to agree.
+  // Half past midnight in Jaipur is the previous evening in UTC: one instant, two
+  // calendar days. The booking is placed on a quiet day 200 nights back — a day nothing
+  // else in this harness has ever written to — so what follows is a statement about
+  // this instant and not about whatever else happens to have been booked today. (That
+  // distinction matters: between midnight and 5:30 in Jaipur, *every* booking made
+  // "now" straddles the same two days, and a count of the whole table would say more
+  // about the hour the harness ran at than about the timezone handling.)
   await run(`
     update public.bookings
-       set created_at = (('${dashToday}'::date)::timestamp + interval '30 minutes') at time zone '${DASH_TZ}'
+       set created_at = ((('${dashToday}'::date - 200))::timestamp + interval '30 minutes') at time zone '${DASH_TZ}'
      where id = '${paidEarly.booking_uuid}';
   `);
   const [earlyDays] = await q(`
@@ -2306,19 +2335,27 @@ async function main() {
     JSON.stringify(earlyDays),
   );
 
+  // The same rows through two lenses: Jaipur's day and UTC's day. Each is compared
+  // field by field against a hand-written count further down.
   const venueNow = await dashStats();
   const utcNow = (
     await rpc("admin_dashboard_stats", { p_today: utcToday, p_tz: "UTC", p_include_revenue: true })
   )[0];
-  check(
-    "today's bookings are the venue's today, not the server's today",
-    Number(venueNow.bookings_today) !== Number(utcNow.bookings_today),
-    `venue ${venueNow.bookings_today} / utc ${utcNow.bookings_today}`,
-  );
+
+  /** `bookings_today` for one calendar day, counted in one timezone. */
+  const countedOn = async (day, tz) =>
+    Number((await rpc("admin_dashboard_stats", { p_today: day, p_tz: tz, p_include_revenue: true }))[0].bookings_today);
+
   check(
     "the booking made after midnight in Jaipur counts towards the venue's day",
-    Number(venueNow.bookings_today) - Number(utcNow.bookings_today) === 1,
-    `${earlyDays.venue_clock} Jaipur / ${earlyDays.utc_clock} UTC`,
+    (await countedOn(earlyDays.venue_day, DASH_TZ)) >= 1 &&
+      (await countedOn(earlyDays.utc_day, DASH_TZ)) === 0,
+    `${earlyDays.venue_clock} Jaipur on ${earlyDays.venue_day}`,
+  );
+  check(
+    "and the same instant, counted in UTC, belongs to the day before — not to both, and not to neither",
+    (await countedOn(earlyDays.utc_day, "UTC")) >= 1 && (await countedOn(earlyDays.venue_day, "UTC")) === 0,
+    `${earlyDays.utc_clock} UTC on ${earlyDays.utc_day}`,
   );
 
   // ---- the same numbers, counted a second way ---------------------------------
@@ -2761,6 +2798,609 @@ async function main() {
     "a signed-in visitor is not staff either: the aggregates stay closed",
     authedBreakdown !== null,
     authedBreakdown ?? "the call succeeded",
+  );
+  await run("reset role;");
+
+  // ---------------------------------------------------------------------------
+  section("Admin booking management: search, filters, detail and the payment guard");
+  // ---------------------------------------------------------------------------
+  // The management screen is only as good as its search, and a search is only
+  // trustworthy if its negative answers are too: every filter is checked from both
+  // sides — the rows it must return, and the rows it must not.
+  const MANAGE_NIGHT = "d0000000-0000-4000-8000-0000000000e1";
+  const manageDay = (await q(`select (now() at time zone '${DASH_TZ}')::date::text as today;`))[0].today;
+  const manageNightDate = (
+    await q(`select (('${manageDay}'::date + 50))::text as event_date;`)
+  )[0].event_date;
+
+  await run(`
+    insert into public.event_dates (id, event_id, event_date, start_time, capacity, status)
+    values ('${MANAGE_NIGHT}', '${EVENT}', '${manageNightDate}'::date, '19:00', 60, 'scheduled');
+  `);
+
+  /** A booking on the management fixture night, with a known shape. */
+  const manageBooking = async (label, category, quantity, people, idempotency) => {
+    const created = await createBooking({
+      p_event_date_id: MANAGE_NIGHT,
+      p_pass_category_id: category,
+      p_customer_name: `Manage ${label}`,
+      p_customer_mobile: "+919800001001",
+      p_customer_email: `manage.${label.toLowerCase()}@example.com`,
+      p_quantity: quantity,
+      p_number_of_people: people,
+      p_idempotency_key: idempotency,
+    });
+
+    return created;
+  };
+
+  const payFor = async (booking, orderId, paymentId) => {
+    await rpc("attach_razorpay_order", { p_booking_id: booking.booking_uuid, p_razorpay_order_id: orderId });
+    await rpc("confirm_booking_payment", {
+      p_razorpay_order_id: orderId,
+      p_razorpay_payment_id: paymentId,
+      p_amount_paise: booking.total_amount * 100,
+    });
+  };
+
+  const managePaid = await manageBooking("Paid", COUPLE, 1, 2, "manage-1");
+  await payFor(managePaid, "order_MANAGE00000000001", "pay_MANAGE00000000001");
+
+  const manageUnpaid = await manageBooking("Unpaid", FAMILY, 1, 4, "manage-2");
+
+  const manageSplit = await manageBooking("Split", COUPLE, 2, 4, "manage-3");
+  await payFor(manageSplit, "order_MANAGE00000000002", "pay_MANAGE00000000002");
+
+  const manageRefunded = await manageBooking("Refunded", TRIO, 1, 3, "manage-4");
+  await payFor(manageRefunded, "order_MANAGE00000000003", "pay_MANAGE00000000003");
+  await rpc("refund_booking_payment", { p_razorpay_payment_id: "pay_MANAGE00000000003" });
+
+  const manageAll = await manageBooking("Inside", COUPLE, 1, 2, "manage-5");
+  await payFor(manageAll, "order_MANAGE00000000004", "pay_MANAGE00000000004");
+
+  // Two of the fixture bookings hold two passes each; half of one group is inside,
+  // and the other booking is entirely in. Those are the two check-in states that a
+  // door actually asks about.
+  const [splitFirstPass] = await q(
+    `select id from public.digital_passes where booking_id = '${manageSplit.booking_uuid}' order by pass_number limit 1;`,
+  );
+  const [insidePass] = await q(
+    `select id from public.digital_passes where booking_id = '${manageAll.booking_uuid}' limit 1;`,
+  );
+  const [manageStaff] = await q(`
+    select id, coalesce(nullif(btrim(full_name), ''), email) as who
+      from public.admin_users
+     where is_active
+     order by created_at
+     limit 1;
+  `);
+  await run(`
+    insert into public.check_ins (digital_pass_id, event_date_id, checked_in_at, gate, checked_in_by)
+    values ('${splitFirstPass.id}', '${MANAGE_NIGHT}', now(), 'Management Test Gate', '${manageStaff.id}'),
+           ('${insidePass.id}', '${MANAGE_NIGHT}', now(), 'Management Test Gate', '${manageStaff.id}');
+    update public.digital_passes set checked_in = true, checked_in_at = now(), status = 'used'
+     where id in ('${splitFirstPass.id}', '${insidePass.id}');
+  `);
+
+  const search = (overrides = {}) =>
+    rpc("admin_search_bookings", { p_query: null, p_limit: 25, p_offset: 0, ...overrides });
+
+  const onNight = (row) => new Date(row.event_date).toISOString().slice(0, 10) === manageNightDate;
+  const fixtureIds = [managePaid, manageUnpaid, manageSplit, manageRefunded, manageAll].map(
+    (booking) => booking.booking_reference,
+  );
+
+  // ---- the six search fields --------------------------------------------------
+  const byReference = await search({ p_query: managePaid.booking_reference });
+  check(
+    "a booking is found by its reference",
+    byReference.some((row) => row.booking_id === managePaid.booking_reference),
+    byReference.map((row) => row.booking_id).join(" "),
+  );
+
+  const byName = await search({ p_query: "manage paid" });
+  check(
+    "and by the guest's name, whatever the case was typed in",
+    byName.some((row) => row.booking_id === managePaid.booking_reference),
+    `${byName.length} rows`,
+  );
+
+  const byMobile = await search({ p_query: "+91 98000 01001" });
+  check(
+    "and by the mobile number, spaces and all",
+    byMobile.some((row) => row.booking_id === managePaid.booking_reference),
+    `${byMobile.length} rows`,
+  );
+
+  // The digits in a search are a phone number only when the search *is* one. These two
+  // checks are the pair: a name with a number in it must not sweep in every mobile
+  // containing those digits, and a two-digit search must not either.
+  const digitsInsideWords = await rpc("admin_search_bookings", {
+    p_query: "Manage 10",
+    p_include_contact: false,
+  });
+  check(
+    "a name with a number in it does not turn those digits into a phone search",
+    digitsInsideWords.length === 0,
+    `${digitsInsideWords.length} rows`,
+  );
+
+  // "80" is in every fixture mobile number and in no reference, name or email, so an
+  // answer of zero rows proves the digits were not used as a phone search.
+  const shortDigits = await rpc("admin_search_bookings", { p_query: "80", p_include_contact: false });
+  check(
+    "a two-digit search does not match every mobile number containing them",
+    shortDigits.length === 0,
+    `${shortDigits.length} rows`,
+  );
+
+  const longDigits = await rpc("admin_search_bookings", {
+    p_query: "800001001",
+    p_include_contact: true,
+  });
+  check(
+    "while a phone number typed as digits still finds the guest who owns it",
+    longDigits.length === 5 && longDigits.every((row) => row.customer_mobile === "+919800001001"),
+    longDigits.map((row) => row.customer_name).join(", ") || "no rows",
+  );
+
+  const byEmail = await search({ p_query: "Manage.Paid@Example" });
+  check(
+    "and by the email address",
+    byEmail.some((row) => row.booking_id === managePaid.booking_reference),
+    `${byEmail.length} rows`,
+  );
+
+  const byPaymentId = await search({ p_query: "pay_MANAGE00000000001" });
+  check(
+    "and by the Razorpay payment id",
+    byPaymentId.some((row) => row.booking_id === managePaid.booking_reference),
+    `${byPaymentId.length} rows`,
+  );
+
+  const byOrderId = await search({ p_query: "order_MANAGE00000000002" });
+  check(
+    "and by the Razorpay order id, which is what most support threads quote",
+    byOrderId.some((row) => row.booking_id === manageSplit.booking_reference),
+    `${byOrderId.length} rows`,
+  );
+
+  const [managePass] = await q(
+    `select pass_id, booking_id from public.digital_passes where booking_id = '${managePaid.booking_uuid}' limit 1;`,
+  );
+  const byPassId = await search({ p_query: managePass.pass_id });
+  check(
+    "and by a pass id, as printed on the guest's ticket",
+    byPassId.some((row) => row.booking_uuid === managePass.booking_id) && byPassId.length === 1,
+    `${managePass.pass_id}: ${byPassId.length} rows`,
+  );
+
+  // A search term is a term, not a wildcard: "%" would otherwise return the event.
+  const byWildcard = await search({ p_query: "%" });
+  check(
+    "a search for a literal % finds nothing rather than everything",
+    byWildcard.length === 0,
+    `${byWildcard.length} rows`,
+  );
+  const byQuote = await search({ p_query: "'; drop table public.bookings; --" });
+  check(
+    "a search that looks like SQL is just a string that matches nothing",
+    byQuote.length === 0 &&
+      (await q(`select count(*)::int as n from public.bookings;`))[0].n > 0,
+    `${byQuote.length} rows`,
+  );
+
+  // ---- the five filters -------------------------------------------------------
+  const nightRows = await search({ p_event_date_from: manageNightDate, p_event_date_to: manageNightDate });
+  check(
+    "the date filter returns exactly the bookings for that night",
+    nightRows.length === fixtureIds.length && nightRows.every(onNight),
+    `${nightRows.length} rows on ${manageNightDate}`,
+  );
+  check(
+    "and the count it reports is the size of the whole result set",
+    nightRows.every((row) => Number(row.total_count) === fixtureIds.length),
+    `${nightRows[0]?.total_count ?? "?"} reported`,
+  );
+
+  const otherNight = await search({
+    p_event_date_from: manageNightDate,
+    p_event_date_to: (await q(`select (('${manageNightDate}'::date - 1))::text as d;`))[0].d,
+  });
+  check(
+    "a date range that ends before it starts returns nothing rather than everything",
+    otherNight.length === 0,
+    `${otherNight.length} rows`,
+  );
+
+  const coupleOnly = await search({
+    p_event_date_from: manageNightDate,
+    p_event_date_to: manageNightDate,
+    p_pass_category_id: COUPLE,
+  });
+  check(
+    "the pass filter narrows to one pass category",
+    coupleOnly.length === 3 && coupleOnly.every((row) => ["Manage Paid", "Manage Split", "Manage Inside"].includes(row.customer_name)),
+    coupleOnly.map((row) => row.customer_name).join(", "),
+  );
+
+  const paidOnly = await search({
+    p_event_date_from: manageNightDate,
+    p_event_date_to: manageNightDate,
+    p_payment_status: "paid",
+  });
+  check(
+    "the payment filter returns the bookings the gateway confirmed",
+    paidOnly.length === 3 && paidOnly.every((row) => row.payment_status === "paid"),
+    paidOnly.map((row) => `${row.customer_name}:${row.payment_status}`).join(" "),
+  );
+
+  const unpaidOnly = await search({
+    p_event_date_from: manageNightDate,
+    p_event_date_to: manageNightDate,
+    p_payment_status: "unpaid",
+  });
+  check(
+    "and it keeps an unpaid booking out of the paid list",
+    unpaidOnly.length === 1 && unpaidOnly[0].booking_uuid === manageUnpaid.booking_uuid,
+    unpaidOnly.map((row) => row.customer_name).join(", "),
+  );
+
+  const refundedOnly = await search({
+    p_event_date_from: manageNightDate,
+    p_event_date_to: manageNightDate,
+    p_payment_status: "refunded",
+  });
+  check(
+    "a refunded booking is filtered as refunded, not as paid",
+    refundedOnly.length === 1 && refundedOnly[0].booking_uuid === manageRefunded.booking_uuid,
+    refundedOnly.map((row) => `${row.customer_name}:${row.payment_status}`).join(" "),
+  );
+
+  const confirmedOnly = await search({
+    p_event_date_from: manageNightDate,
+    p_event_date_to: manageNightDate,
+    p_booking_status: "confirmed",
+  });
+  check(
+    "the booking-status filter follows the booking's own lifecycle",
+    confirmedOnly.length === 3 && confirmedOnly.every((row) => row.booking_status === "confirmed"),
+    confirmedOnly.map((row) => row.booking_status).join(" "),
+  );
+
+  const unknownStatus = await search({
+    p_event_date_from: manageNightDate,
+    p_event_date_to: manageNightDate,
+    p_payment_status: "partially-refunded",
+    p_booking_status: "nonsense",
+  });
+  check(
+    "a status the schema does not know narrows nothing instead of matching nothing",
+    unknownStatus.length === fixtureIds.length,
+    `${unknownStatus.length} rows for two unknown filters`,
+  );
+
+  const nobodyIn = await search({ p_check_in_status: "none" });
+  check(
+    "the check-in filter finds the bookings nobody has been admitted from",
+    nobodyIn.length > 0 && nobodyIn.every((row) => Number(row.passes_checked_in) === 0),
+    `${nobodyIn.length} rows, all with 0 in`,
+  );
+  check(
+    "and that includes the fixtures, including the one with no passes at all",
+    nobodyIn.some((row) => row.booking_uuid === managePaid.booking_uuid) &&
+      nobodyIn.some((row) => row.booking_uuid === manageUnpaid.booking_uuid),
+  );
+
+  const partlyIn = await search({ p_check_in_status: "some" });
+  check(
+    "the partial check-in filter finds the groups half inside",
+    partlyIn.length > 0 &&
+      partlyIn.every((row) => Number(row.passes_checked_in) > 0 && Number(row.passes_checked_in) < Number(row.passes_issued)) &&
+      partlyIn.some((row) => row.booking_uuid === manageSplit.booking_uuid),
+    `${partlyIn.length} rows, e.g. ${partlyIn[0]?.passes_checked_in}/${partlyIn[0]?.passes_issued}`,
+  );
+
+  const allIn = await search({ p_check_in_status: "all" });
+  check(
+    "the complete check-in filter finds the bookings that are entirely inside",
+    allIn.length > 0 &&
+      allIn.every(
+        (row) => Number(row.passes_issued) > 0 && Number(row.passes_checked_in) === Number(row.passes_issued),
+      ) &&
+      allIn.some((row) => row.booking_uuid === manageAll.booking_uuid),
+    `${allIn.length} rows`,
+  );
+
+  const combined = await search({
+    p_query: "Manage",
+    p_event_date_from: manageNightDate,
+    p_event_date_to: manageNightDate,
+    p_pass_category_id: COUPLE,
+    p_payment_status: "paid",
+    p_booking_status: "confirmed",
+    p_check_in_status: "some",
+  });
+  check(
+    "all six filters compose: the result is the intersection, not the union",
+    combined.length === 1 && combined[0].booking_uuid === manageSplit.booking_uuid,
+    combined.map((row) => row.customer_name).join(", ") || "no rows",
+  );
+
+  // ---- paging -----------------------------------------------------------------
+  const firstPage = await search({ p_query: "Manage", p_limit: 2, p_offset: 0 });
+  const secondPage = await search({ p_query: "Manage", p_limit: 2, p_offset: 2 });
+  check(
+    "paging returns the requested slice and never overlaps the previous one",
+    firstPage.length === 2 &&
+      secondPage.length === 2 &&
+      !firstPage.some((row) => secondPage.some((other) => other.booking_uuid === row.booking_uuid)),
+    `${firstPage.length} + ${secondPage.length}`,
+  );
+  check(
+    "every page reports the same total",
+    firstPage[0].total_count === secondPage[0].total_count &&
+      Number(firstPage[0].total_count) >= fixtureIds.length,
+    `${firstPage[0].total_count} / ${secondPage[0].total_count}`,
+  );
+  check(
+    "the newest booking is on the first page, not wherever the database felt like it",
+    new Date(firstPage[0].created_at).getTime() >= new Date(secondPage[0].created_at).getTime(),
+  );
+
+  const beyond = await search({ p_query: "Manage", p_limit: 2, p_offset: 500 });
+  check(
+    "a page past the end is empty rather than an error",
+    beyond.length === 0,
+    `${beyond.length} rows`,
+  );
+
+  const hugePage = await search({ p_limit: 100000 });
+  check("an enormous page size is clamped to something sane", hugePage.length <= 100, `${hugePage.length} rows`);
+  const zeroPage = await search({ p_limit: 0 });
+  check("a page size of zero still returns one row", zeroPage.length === 1, `${zeroPage.length} rows`);
+  const negativePage = await search({ p_limit: 5, p_offset: -10 });
+  check("a negative offset is treated as the start of the list", negativePage.length === 5, `${negativePage.length} rows`);
+
+  // ---- the staff view of the same screen --------------------------------------
+  const staffView = await search({ p_query: "Manage", p_include_contact: false, p_limit: 25 });
+  check(
+    "the staff view of the list carries no contact details, amounts or gateway ids",
+    staffView.length > 0 &&
+      staffView.every(
+        (row) =>
+          row.customer_mobile === null &&
+          row.customer_email === null &&
+          row.total_amount === null &&
+          row.razorpay_order_id === null &&
+          row.razorpay_payment_id === null,
+      ),
+    JSON.stringify(staffView[0] ?? null),
+  );
+  check(
+    "but it still shows the guest, the night, the pass and the check-in state",
+    staffView.every(
+      (row) => Boolean(row.customer_name) && Boolean(row.pass_name) && Number.isInteger(Number(row.passes_issued)),
+    ),
+    JSON.stringify({ name: staffView[0]?.customer_name, issued: staffView[0]?.passes_issued }),
+  );
+  check(
+    "and it can still be searched by a payment id the guest read out over the phone",
+    (
+      await search({ p_query: "pay_MANAGE00000000001", p_include_contact: false })
+    ).some((row) => row.booking_uuid === managePaid.booking_uuid),
+  );
+
+  // ---- one booking, completely -------------------------------------------------
+  const detailByReference = (await rpc("admin_booking_detail", { p_lookup: manageSplit.booking_reference }))[0];
+  check(
+    "the detail is found by the booking reference",
+    detailByReference?.booking_uuid === manageSplit.booking_uuid,
+    detailByReference?.booking_id ?? "no row",
+  );
+  check(
+    "it carries the whole booking: guest, venue, night, pass and money",
+    detailByReference.customer_name === "Manage Split" &&
+      detailByReference.city === "Jaipur" &&
+      Boolean(detailByReference.venue_name) &&
+      new Date(detailByReference.event_date).toISOString().slice(0, 10) === manageNightDate &&
+      Number(detailByReference.total_amount) === Number(manageSplit.total_amount) &&
+      Number(detailByReference.subtotal) >= Number(detailByReference.total_amount) &&
+      detailByReference.razorpay_payment_id === "pay_MANAGE00000000002" &&
+      detailByReference.razorpay_order_id === "order_MANAGE00000000002",
+    JSON.stringify({
+      city: detailByReference.city,
+      amount: detailByReference.total_amount,
+      payment: detailByReference.razorpay_payment_id,
+    }),
+  );
+  check(
+    "it lists every pass on the booking with its own state",
+    Array.isArray(detailByReference.passes) &&
+      detailByReference.passes.length === 2 &&
+      detailByReference.passes.filter((pass) => pass.checked_in).length === 1,
+    JSON.stringify(detailByReference.passes),
+  );
+  check(
+    "and every gate entry, with the staff member who made it",
+    Array.isArray(detailByReference.check_ins) &&
+      detailByReference.check_ins.length === 1 &&
+      detailByReference.check_ins[0].staff === manageStaff.who &&
+      detailByReference.check_ins[0].gate === "Management Test Gate" &&
+      Boolean(detailByReference.check_ins[0].checked_in_at),
+    JSON.stringify(detailByReference.check_ins),
+  );
+  check(
+    "the pass token is not in the detail: the credential that admits is not a screen's business",
+    !JSON.stringify(detailByReference).includes("qr_token") &&
+      !JSON.stringify(detailByReference).match(/[0-9a-f]{64}/),
+    Object.keys(detailByReference).join(","),
+  );
+
+  const detailByPass = (await rpc("admin_booking_detail", { p_lookup: managePass.pass_id }))[0];
+  check(
+    "the same booking is found by a pass id",
+    detailByPass?.booking_uuid === managePaid.booking_uuid,
+    detailByPass?.booking_id ?? "no row",
+  );
+  const detailByPayment = (await rpc("admin_booking_detail", { p_lookup: "pay_MANAGE00000000003" }))[0];
+  check(
+    "and by the payment id on the Razorpay receipt",
+    detailByPayment?.booking_uuid === manageRefunded.booking_uuid &&
+      detailByPayment.payment_status === "refunded",
+    detailByPayment?.booking_id ?? "no row",
+  );
+  const detailByOrder = (await rpc("admin_booking_detail", { p_lookup: "order_MANAGE00000000003" }))[0];
+  check("and by the order id", detailByOrder?.booking_uuid === manageRefunded.booking_uuid);
+
+  const detailMissing = await rpc("admin_booking_detail", { p_lookup: "DND999999999" });
+  check("an unknown reference returns no detail at all", detailMissing.length === 0, `${detailMissing.length} rows`);
+  const detailEmpty = await rpc("admin_booking_detail", { p_lookup: "" });
+  check("an empty lookup returns no detail either", detailEmpty.length === 0, `${detailEmpty.length} rows`);
+
+  const detailLimited = (await rpc("admin_booking_detail", {
+    p_lookup: manageSplit.booking_reference,
+    p_include_contact: false,
+  }))[0];
+  check(
+    "the staff view of the detail withholds the contact details, the money and the gateway ids",
+    detailLimited.customer_mobile === null &&
+      detailLimited.customer_email === null &&
+      detailLimited.subtotal === null &&
+      detailLimited.total_amount === null &&
+      detailLimited.razorpay_order_id === null &&
+      detailLimited.razorpay_payment_id === null &&
+      detailLimited.payment_events === null,
+    JSON.stringify(detailLimited),
+  );
+  check(
+    "but keeps what a person at the door needs: the guest, the passes and the entries",
+    detailLimited.customer_name === "Manage Split" &&
+      detailLimited.passes.length === 2 &&
+      detailLimited.check_ins.length === 1,
+    `${detailLimited.passes?.length} passes / ${detailLimited.check_ins?.length} entries`,
+  );
+
+  // ---- the payment audit trail -------------------------------------------------
+  const [eventFixture] = await q(`
+    select count(*)::integer as n from public.payment_events where razorpay_order_id = 'order_MANAGE00000000003';
+  `);
+  const webhookOrder = "order_MANAGE00000000004";
+  await rpc("apply_razorpay_event", {
+    p_event_id: "evt_MANAGE_REFUND_1",
+    p_event_type: "refund.processed",
+    p_razorpay_order_id: webhookOrder,
+    p_razorpay_payment_id: "pay_MANAGE00000000004",
+    p_amount_paise: 49900,
+  });
+  const detailWithEvents = (await rpc("admin_booking_detail", { p_lookup: manageAll.booking_reference }))[0];
+  check(
+    "the detail shows what the gateway actually reported for this order",
+    Array.isArray(detailWithEvents.payment_events) &&
+      detailWithEvents.payment_events.some(
+        (event) => event.event_type === "refund.processed" && event.outcome === "refunded",
+      ),
+    JSON.stringify(detailWithEvents.payment_events),
+  );
+  check(
+    "including the refund it applied to a booking that was paid",
+    detailWithEvents.payment_status === "refunded",
+    detailWithEvents.payment_status,
+  );
+  check(
+    "the earlier unpaid fixture has no gateway events at all, which is the honest answer",
+    (await rpc("admin_booking_detail", { p_lookup: manageUnpaid.booking_reference }))[0].payment_events.length === 0 &&
+      eventFixture.n >= 0,
+  );
+
+  // ---- the payment guard -------------------------------------------------------
+  // Everything above went through the gateway functions. Now the thing the guard is
+  // for: a hand-written status change.
+  await run(`select set_config('app.payment_proof', '', true);`);
+  const manualPaid = await expectError(`
+    update public.bookings set payment_status = 'paid' where id = '${manageUnpaid.booking_uuid}';
+  `);
+  check(
+    "a hand-written update cannot mark a booking paid",
+    typeof manualPaid === "string" && /payment_status may only change/.test(manualPaid),
+    manualPaid ?? "the update succeeded",
+  );
+  const manualRefund = await expectError(`
+    update public.bookings set payment_status = 'refunded', booking_status = 'refunded'
+     where id = '${managePaid.booking_uuid}';
+  `);
+  check(
+    "nor silently refund one",
+    typeof manualRefund === "string" && /payment_status may only change/.test(manualRefund),
+    manualRefund ?? "the update succeeded",
+  );
+  check(
+    "the booking is untouched by the refused updates",
+    (await q(`select payment_status from public.bookings where id = '${manageUnpaid.booking_uuid}';`))[0]
+      .payment_status === "unpaid" &&
+      (await q(`select payment_status from public.bookings where id = '${managePaid.booking_uuid}';`))[0]
+        .payment_status === "paid",
+  );
+  check(
+    "the guard only watches the payment status: an ordinary edit still saves",
+    (await (async () => {
+      await run(`update public.bookings set notes = 'Called the guest about a wheelchair.' where id = '${managePaid.booking_uuid}';`);
+      return q(`select notes from public.bookings where id = '${managePaid.booking_uuid}';`);
+    })())[0].notes === "Called the guest about a wheelchair.",
+  );
+  check(
+    "the payment functions can still move it, which is the whole point",
+    (await q(`select payment_status from public.bookings where id = '${manageRefunded.booking_uuid}';`))[0]
+      .payment_status === "refunded",
+  );
+  const guardTrigger = await q(`
+    select t.tgname, p.proname
+      from pg_trigger t
+      join pg_class c on c.oid = t.tgrelid
+      join pg_proc p on p.oid = t.tgfoid
+     where c.relname = 'bookings' and t.tgname = 'bookings_guard_payment_status';
+  `);
+  check(
+    "and the guard is a trigger on the table, not a convention in the app",
+    guardTrigger.length === 1 && guardTrigger[0].proname === "guard_booking_payment_status",
+    JSON.stringify(guardTrigger),
+  );
+
+  // ---- the reads are reads, and they are closed --------------------------------
+  const manageReads = await q(`
+    select p.proname, p.provolatile
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public' and p.proname in ('admin_search_bookings', 'admin_booking_detail')
+     order by p.proname;
+  `);
+  check(
+    "both management reads are declared stable: they cannot write, whatever they are passed",
+    manageReads.length === 2 && manageReads.every((row) => row.provolatile === "s"),
+    JSON.stringify(manageReads),
+  );
+
+  const detailGrants = await q(`
+    select
+      has_function_privilege('anon', 'public.admin_booking_detail(text, boolean)', 'execute') as anon,
+      has_function_privilege('authenticated', 'public.admin_booking_detail(text, boolean)', 'execute') as authenticated,
+      has_function_privilege('service_role', 'public.admin_booking_detail(text, boolean)', 'execute') as service;
+  `);
+  check(
+    "only the service role may read a booking in full",
+    detailGrants[0].anon === false && detailGrants[0].authenticated === false && detailGrants[0].service === true,
+    JSON.stringify(detailGrants[0]),
+  );
+  const anonDetail = await expectError(`set role anon; select * from public.admin_booking_detail('DND202600001');`);
+  check("an anon session cannot read a booking's detail", anonDetail !== null, anonDetail ?? "call succeeded");
+  await run("reset role;");
+  const authedDetail = await expectError(
+    `set role authenticated; select * from public.admin_booking_detail('${managePaid.booking_reference}');`,
+  );
+  check(
+    "nor can a signed-in visitor who is not staff",
+    authedDetail !== null,
+    authedDetail ?? "call succeeded",
   );
   await run("reset role;");
 

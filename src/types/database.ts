@@ -12,6 +12,38 @@
 
 export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];
 
+/**
+ * The three jsonb arrays `admin_booking_detail` returns. They are assembled inside
+ * the database (one booking, one pass list, one gate list, one payment history), so
+ * the row shapes are declared here rather than inferred from a join the app would
+ * have to fan out itself. `qr_token` appears in none of them.
+ */
+export interface AdminBookingPass {
+  pass_id: string;
+  pass_number: number;
+  status: string;
+  checked_in: boolean;
+  checked_in_at: string | null;
+  valid_date: string;
+}
+
+export interface AdminBookingCheckIn {
+  pass_id: string;
+  gate: string | null;
+  notes: string | null;
+  checked_in_at: string;
+  staff: string | null;
+}
+
+export interface AdminBookingPaymentEvent {
+  event_id: string;
+  event_type: string;
+  outcome: string;
+  amount_paise: number | null;
+  received_at: string;
+  processed_at: string | null;
+}
+
 export interface Database {
   public: {
     Tables: {
@@ -694,13 +726,39 @@ export interface Database {
         }[];
       };
       /**
-       * Admin lookups (step 8). `admin_lookup_bookings` is the staff-side search;
-       * the contact columns come back null when `p_include_contact` is false, which
-       * is how the limited (staff) view is assembled without the app ever holding
-       * the data it must not show. Both are `service_role` only.
+       * Admin booking management (step 10). `admin_search_bookings` is the whole
+       * /admin/bookings list: the search box, the five filters, the paging and the
+       * count of the full result set (`total_count` is the size of the result before
+       * paging, so the screen can say "3 of 128"). Column order here must match the
+       * function's `returns table` order exactly — PostgREST binds by position.
+       *
+       * Two things are deliberate and worth knowing before reading the types:
+       *
+       *   * every contact, money and gateway column is nullable, because the function
+       *     returns null for them when `p_include_contact` is false — a caller without
+       *     `bookings:view_contact` is handed nothing it must remember not to show;
+       *   * a filter value the schema does not recognise narrows nothing (it does not
+       *     silently return an empty list that reads as "no such booking"), so the
+       *     args are plain strings and the database does the validating.
+       *
+       * `admin_booking_detail` answers the same lookup for one booking and adds the
+       * pass list, the gate entries and the Razorpay events as jsonb. It never returns
+       * `qr_token`: the credential that admits a guest is not a screen's business.
+       * Both functions are `service_role` only.
        */
-      admin_lookup_bookings: {
-        Args: { p_query: string; p_include_contact?: boolean; p_limit?: number };
+      admin_search_bookings: {
+        Args: {
+          p_query?: string | null;
+          p_event_date_from?: string | null;
+          p_event_date_to?: string | null;
+          p_pass_category_id?: string | null;
+          p_payment_status?: string | null;
+          p_booking_status?: string | null;
+          p_check_in_status?: string | null;
+          p_include_contact?: boolean;
+          p_limit?: number;
+          p_offset?: number;
+        };
         Returns: {
           booking_uuid: string;
           booking_id: string;
@@ -721,10 +779,48 @@ export interface Database {
           booking_status: string;
           payment_status: string;
           razorpay_order_id: string | null;
+          razorpay_payment_id: string | null;
           created_at: string;
           passes_issued: number;
           passes_checked_in: number;
           check_in_times: string[] | null;
+          pass_ids: string[];
+          total_count: number;
+        }[];
+      };
+      admin_booking_detail: {
+        Args: { p_lookup: string; p_include_contact?: boolean };
+        Returns: {
+          booking_uuid: string;
+          booking_id: string;
+          customer_name: string;
+          customer_mobile: string | null;
+          customer_email: string | null;
+          event_name: string;
+          event_slug: string;
+          venue_name: string | null;
+          venue_address: string | null;
+          city: string | null;
+          event_date: string;
+          start_time: string | null;
+          end_time: string | null;
+          pass_name: string;
+          pass_composition: string | null;
+          quantity: number;
+          number_of_people: number;
+          subtotal: number | null;
+          total_amount: number | null;
+          currency: string;
+          booking_status: string;
+          payment_status: string;
+          razorpay_order_id: string | null;
+          razorpay_payment_id: string | null;
+          notes: string | null;
+          created_at: string;
+          updated_at: string;
+          passes: AdminBookingPass[] | null;
+          check_ins: AdminBookingCheckIn[] | null;
+          payment_events: AdminBookingPaymentEvent[] | null;
         }[];
       };
       /**

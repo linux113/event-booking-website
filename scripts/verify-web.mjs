@@ -2370,20 +2370,24 @@ async function main() {
   const staffLookupMiss = await adminHtml("/admin/bookings?q=DND000000000", staffSession2.cookie);
   check(
     "an unknown reference gets an honest empty state",
-    staffLookupMiss.status === 200 && staffLookupMiss.text.includes("No booking found"),
+    staffLookupMiss.status === 200 && staffLookupMiss.text.includes("No bookings match these filters"),
   );
 
+  // A search term no longer has a minimum length. The screen is the booking *list*
+  // with a search box on it, so a short term narrows the list instead of refusing to
+  // run — which is what lets somebody find a guest by the first letters of their name
+  // while a queue is waiting. What a short search can never do is widen what the role
+  // may see: the columns it is allowed are the same ones, and the contact details are
+  // still absent from the response.
   const staffLookupShort = await adminHtml("/admin/bookings?q=Ni", staffSession2.cookie);
   check(
-    "a two-letter search asks for more input instead of returning the whole event",
-    staffLookupShort.status === 200 && staffLookupShort.text.includes("Keep typing"),
+    "a short search narrows the list rather than being refused",
+    staffLookupShort.status === 200 && staffLookupShort.html.includes(lookupReference.booking_id),
   );
-
-  // The short search must not have queried the database at all: a staff member's
-  // query for "Ni" cannot return other guests' bookings.
   check(
-    "and returns none of the event's bookings",
-    !staffLookupShort.html.includes(lookupReference.booking_id),
+    "and it still carries none of the fields the role may not see",
+    !staffLookupShort.html.includes(lookupReference.customer_mobile) &&
+      !staffLookupShort.html.includes("₹"),
   );
 
   // ---- admin --------------------------------------------------------------------
@@ -3025,6 +3029,633 @@ async function main() {
   );
   check("no order was created with the live key", stub.orderRequests().length === ordersBeforeLive);
   check("no booking was written for the refused live attempt", (await bookingRows("+919800000299")) === 0);
+
+  // ---------------------------------------------------------------------------
+  section("Admin booking management: search, filters, detail and CSV export");
+  // ---------------------------------------------------------------------------
+  // The list, the detail view and the export all read the same database function, so
+  // what this section follows is the journey a person actually takes: find a booking by
+  // anything a guest can quote, narrow it down with the filters, open one booking in
+  // full, and take the same rows away as a file.
+  //
+  // Every page is fetched twice — once as an admin, who may see contact details and
+  // money, and once as a staff member, whose response must not contain them even when
+  // the request asks for them. The staff checks look for the *absence* of the values,
+  // not for a padlock drawn over them.
+  const bookingsLib = await import("../src/lib/admin/bookings.ts");
+
+  // The sessions earlier sections signed out with are dead by now — that was the point
+  // of those checks — so this section signs in its own, one per role.
+  const manageAdmin = await signIn("admin@example.com", STAFF_PASSWORD);
+  const manageStaff = await signIn("scanner@example.com", STAFF_PASSWORD);
+  const manageGuest = await signIn("guest@example.com", STAFF_PASSWORD);
+
+  const gateFixture = (
+    await dbQuery(
+      `select booking_id, customer_mobile, customer_email, total_amount, razorpay_order_id,
+              razorpay_payment_id
+         from public.bookings where customer_mobile = $1`,
+      ["+919800000401"],
+    )
+  )[0];
+  const gatePassIds = tonightPasses.map((pass) => pass.pass_id);
+
+  // Two more bookings with states the gate fixtures do not have: one whose group is
+  // half inside, and one that was never paid for.
+  const halfInBooking = await bookingFor({
+    nightId: GATE_TONIGHT,
+    mobile: "+919800000405",
+    name: "Half In Group",
+    key: "manage-partial",
+  });
+  await payBooking(halfInBooking, "manage-partial");
+  const unpaidFixture = await bookingFor({
+    nightId: GATE_TONIGHT,
+    mobile: "+919800000406",
+    name: "Not Paid Yet",
+    key: "manage-unpaid",
+  });
+
+  const halfInPasses = await dbQuery(
+    `select id, pass_id from public.digital_passes where booking_id = $1 order by pass_number`,
+    [halfInBooking.booking_uuid],
+  );
+  await dbQuery(
+    `insert into public.check_ins (digital_pass_id, event_date_id, checked_in_at, gate, checked_in_by)
+     values ($1, $2, now(), 'Gate A', $3)`,
+    [halfInPasses[0].id, GATE_TONIGHT, staffRowId],
+  );
+  await dbQuery(
+    `update public.digital_passes set checked_in = true, checked_in_at = now(), status = 'used' where id = $1`,
+    [halfInPasses[0].id],
+  );
+
+  // A season's worth of bookings, for the two things a small fixture set cannot prove:
+  // that paging walks a result set without gaps or repeats, and that an export larger
+  // than the fetch batch is assembled completely — and flagged when it is not.
+  const BULK_ROWS = 5005;
+  await dbRun(`
+    insert into public.bookings (customer_name, customer_mobile, customer_email, event_date_id,
+                                 pass_category_id, quantity, number_of_people,
+                                 booking_status, payment_status, created_at)
+    select
+      'Bulk Fixture ' || lpad(i::text, 4, '0'),
+      '+9198000' || lpad((6000 + i)::text, 5, '0'),
+      'bulk' || i || '@example.com',
+      '${GATE_TONIGHT}', '${COUPLE_PASS}', 1, ${couplePass.number_of_people},
+      'pending', 'unpaid',
+      now() - (i || ' minutes')::interval
+    from generate_series(1, ${BULK_ROWS}) as i;
+  `);
+  const bulkNewest = (
+    await dbQuery(`select booking_id from public.bookings where customer_name = 'Bulk Fixture 0001'`)
+  )[0].booking_id;
+  const bulkOldest = (
+    await dbQuery(`select booking_id from public.bookings where customer_name = 'Bulk Fixture 5005'`)
+  )[0].booking_id;
+  const otherCategory = (
+    await dbQuery(`select id, name from public.pass_categories where id <> $1 order by price_inr desc limit 1`, [
+      COUPLE_PASS,
+    ])
+  )[0];
+
+  check(
+    "booking management fixtures: a half-admitted group, an unpaid booking and a season of bulk rows",
+    halfInPasses.length === 2 && Boolean(unpaidFixture.booking_uuid) && Boolean(bulkNewest && bulkOldest),
+    `${halfInPasses.length} passes / ${BULK_ROWS} bulk rows`,
+  );
+
+  /** A request for the export: the CSV comes back as a file, headers and all. */
+  const adminFile = async (path, cookie) => {
+    const response = await fetchWith(path, cookie);
+    const body = await response.text();
+
+    return { status: response.status, location: response.headers.get("location"), headers: response.headers, body };
+  };
+
+  const exportPath = (filters) => `/admin/bookings/export?${filters}`;
+  const csvLines = (body) => body.replace(/^\ufeff/, "").split("\r\n");
+
+  // ---- the list ------------------------------------------------------------------
+  const listAdmin = await adminHtml("/admin/bookings", manageAdmin.cookie);
+  check(
+    "the booking list opens for an admin",
+    listAdmin.status === 200 && listAdmin.html.includes(gateFixture.booking_id),
+    `${listAdmin.status}`,
+  );
+  check(
+    "and every column the operations team asked for is on it",
+    [
+      "Booking ID",
+      "Customer",
+      "Mobile",
+      "Email",
+      "Date",
+      "Pass",
+      "Amount",
+      "Payment",
+      "Booking",
+      "Created",
+      "Check-in",
+    ].every((column) => listAdmin.html.includes(`>${column}<`)),
+    ["Booking ID", "Customer", "Mobile", "Email", "Date", "Pass", "Amount", "Payment", "Booking", "Created", "Check-in"]
+      .filter((column) => !listAdmin.html.includes(`>${column}<`))
+      .join(", ") || "all present",
+  );
+  check(
+    "a row carries the guest, the night, the pass, the amount and both statuses",
+    listAdmin.text.includes("Nisha Rao") &&
+      listAdmin.text.includes(gateFixture.customer_mobile) &&
+      listAdmin.text.includes(gateFixture.customer_email) &&
+      listAdmin.text.includes(format.formatInr(Number(gateFixture.total_amount))) &&
+      listAdmin.html.includes(">paid<"),
+    `${listAdmin.text.includes(gateFixture.customer_mobile)} / ${listAdmin.text.includes("Nisha Rao")}`,
+  );
+  check(
+    "and the row links to the booking in full",
+    listAdmin.html.includes(`/admin/bookings/${gateFixture.booking_id}`),
+  );
+  check(
+    "the check-in column separates 'nobody in yet' from 'part of the group in'",
+    listAdmin.text.includes(
+      bookingsLib.checkInSummary({ passesIssued: 2, passesCheckedIn: 2, paymentStatus: "paid" }),
+    ) &&
+      listAdmin.text.includes(
+        bookingsLib.checkInSummary({ passesIssued: 2, passesCheckedIn: 1, paymentStatus: "paid" }),
+      ),
+    "check-in wording",
+  );
+
+  const listStaff = await adminHtml("/admin/bookings", manageStaff.cookie);
+  check(
+    "a staff member opens the same list",
+    listStaff.status === 200 && listStaff.text.includes("Nisha Rao"),
+    `${listStaff.status}`,
+  );
+  check(
+    "with no mobile number, no email address, no amount and no gateway id in the response",
+    !listStaff.html.includes(gateFixture.customer_mobile) &&
+      !listStaff.html.includes(gateFixture.customer_email) &&
+      !listStaff.html.includes(format.formatInr(Number(gateFixture.total_amount))) &&
+      !listStaff.html.includes(gateFixture.razorpay_payment_id) &&
+      !listStaff.html.includes("₹"),
+    `mobile=${listStaff.html.includes(gateFixture.customer_mobile)} amount=${listStaff.html.includes("₹")}`,
+  );
+  check(
+    "the contact columns are not rendered at all for that role",
+    !listStaff.html.includes(">Mobile<") && !listStaff.html.includes(">Email<"),
+  );
+  check(
+    "and the page says which fields are withheld rather than looking broken",
+    listStaff.text.includes("Contact details, amounts and Razorpay IDs are not shown for your role"),
+  );
+
+  const listPeeking = await adminHtml(
+    "/admin/bookings?includeContact=true&contact=1&withContact=true&p_include_contact=true",
+    manageStaff.cookie,
+  );
+  check(
+    "asking the page for contact details does not turn them on: the role decides, not the query string",
+    !listPeeking.html.includes(gateFixture.customer_mobile) && !listPeeking.html.includes("₹"),
+  );
+
+  // ---- search --------------------------------------------------------------------
+  const searches = [
+    ["the booking reference", gateFixture.booking_id],
+    ["the guest's name, however it is capitalised", "nisha rao"],
+    ["the mobile number with spaces in it", "+91 98000 00401"],
+    ["the email address", "gate-tonight@example"],
+    ["the Razorpay payment id from the receipt", gateFixture.razorpay_payment_id],
+    ["the Razorpay order id", gateFixture.razorpay_order_id],
+    ["a pass id as printed on the ticket", gatePassIds[0]],
+  ];
+
+  for (const [what, term] of searches) {
+    const found = await adminHtml(`/admin/bookings?q=${encodeURIComponent(term)}`, manageAdmin.cookie);
+
+    check(
+      `a booking is found by ${what}`,
+      found.status === 200 && found.html.includes(gateFixture.booking_id),
+      `${term} → ${found.status}`,
+    );
+  }
+
+  const searchOnePass = await adminHtml(`/admin/bookings?q=${encodeURIComponent(gatePassIds[0])}`, manageAdmin.cookie);
+  check(
+    "a pass id finds exactly the one booking that holds it",
+    searchOnePass.text.includes(bookingsLib.pageSummary(1, bookingsLib.BOOKING_PAGE_SIZE, 1) ?? "impossible") &&
+      !searchOnePass.html.includes(halfInBooking.booking_reference),
+    bookingsLib.pageSummary(1, bookingsLib.BOOKING_PAGE_SIZE, 1),
+  );
+
+  const staffSearch = await adminHtml(
+    `/admin/bookings?q=${encodeURIComponent(gateFixture.razorpay_payment_id)}`,
+    manageStaff.cookie,
+  );
+  check(
+    "a staff member can search by a payment id a guest read out over the phone",
+    staffSearch.status === 200 &&
+      staffSearch.html.includes(gateFixture.booking_id) &&
+      !staffSearch.html.includes(gateFixture.customer_mobile),
+  );
+
+  const searchWildcard = await adminHtml("/admin/bookings?q=%25", manageAdmin.cookie);
+  check(
+    "a search for a literal % finds nothing rather than every booking in the event",
+    searchWildcard.status === 200 && searchWildcard.text.includes("No bookings match these filters"),
+    `${searchWildcard.status}`,
+  );
+
+  const searchUnknown = await adminHtml("/admin/bookings?q=DND999999999", manageAdmin.cookie);
+  check(
+    "an unknown reference gets an honest empty state, not a blank page",
+    searchUnknown.status === 200 && searchUnknown.text.includes("No bookings match these filters"),
+  );
+
+  // ---- filters -------------------------------------------------------------------
+  const listFor = (filters, cookie = manageAdmin.cookie) => adminHtml(`/admin/bookings?${filters}`, cookie);
+  const holds = (page, reference) => page.html.includes(reference);
+  const nightFilters = `from=${gateToday}&to=${gateToday}`;
+
+  const onTheNight = await listFor(nightFilters);
+  check(
+    "the date filter returns the bookings for that night",
+    holds(onTheNight, gateFixture.booking_id) && holds(onTheNight, unpaidFixture.booking_reference),
+  );
+
+  const pastFixture = (
+    await dbQuery(`select booking_id from public.bookings where customer_mobile = $1`, ["+919800000402"])
+  )[0];
+  const otherNight = await listFor(`from=${gatePast}&to=${gatePast}`);
+  check(
+    "and excludes the bookings of every other night, while still listing the ones that belong to it",
+    !holds(otherNight, gateFixture.booking_id) &&
+      !holds(otherNight, unpaidFixture.booking_reference) &&
+      holds(otherNight, pastFixture.booking_id),
+  );
+
+  const invertedRange = await listFor(`from=${gateToday}&to=${gatePast}`);
+  check(
+    "a night range that ends before it starts says so instead of silently swapping the dates",
+    invertedRange.text.includes("The night range ends before it starts"),
+  );
+
+  const couponOnly = await listFor(`${nightFilters}&pass=${COUPLE_PASS}`);
+  check("the pass filter narrows to one pass category", holds(couponOnly, gateFixture.booking_id));
+
+  const otherPassOnly = await listFor(`${nightFilters}&pass=${otherCategory.id}`);
+  check(
+    "and a category nothing was booked under returns nothing rather than everything",
+    otherPassOnly.text.includes("No bookings match these filters") && !holds(otherPassOnly, gateFixture.booking_id),
+    otherCategory.name,
+  );
+
+  const junkPassFilter = await listFor(`${nightFilters}&pass=not-a-uuid`);
+  check(
+    "a pass filter that is not an id is ignored, so the list is still the list",
+    holds(junkPassFilter, gateFixture.booking_id),
+  );
+
+  const paidAndAllIn = await listFor(`${nightFilters}&payment=paid&checkin=all`);
+  check(
+    "the payment and check-in filters compose: paid, and everyone inside",
+    holds(paidAndAllIn, gateFixture.booking_id) && !holds(paidAndAllIn, halfInBooking.booking_reference),
+  );
+
+  const partwayIn = await listFor(`${nightFilters}&checkin=some`);
+  check(
+    "the partial check-in filter finds the group that is half inside",
+    holds(partwayIn, halfInBooking.booking_reference) &&
+      !holds(partwayIn, gateFixture.booking_id) &&
+      !holds(partwayIn, unpaidFixture.booking_reference),
+  );
+
+  const nobodyIn = await listFor(`${nightFilters}&checkin=none`);
+  check(
+    "the empty check-in filter finds the bookings nobody has been admitted from",
+    holds(nobodyIn, unpaidFixture.booking_reference) && !holds(nobodyIn, halfInBooking.booking_reference),
+  );
+
+  const pendingOnly = await listFor(`${nightFilters}&status=pending`);
+  check(
+    "the booking-status filter follows the booking's own lifecycle",
+    holds(pendingOnly, unpaidFixture.booking_reference) && !holds(pendingOnly, gateFixture.booking_id),
+  );
+
+  const unknownStatuses = await listFor(`${nightFilters}&payment=partly-refunded&status=nonsense&checkin=maybe`);
+  check(
+    "a status the schema does not know narrows nothing instead of matching nothing",
+    holds(unknownStatuses, gateFixture.booking_id) && holds(unknownStatuses, unpaidFixture.booking_reference),
+  );
+
+  // ---- paging --------------------------------------------------------------------
+  const bulkFilters = `q=${encodeURIComponent("Bulk Fixture")}`;
+  const bulkPages = bookingsLib.bookingPageCount(BULK_ROWS);
+  const bulkFirst = await listFor(bulkFilters);
+
+  check(
+    "paging a large result set reports the size of the whole match, not of the page",
+    bulkFirst.text.includes(bookingsLib.pageSummary(1, bookingsLib.BOOKING_PAGE_SIZE, BULK_ROWS) ?? "impossible") &&
+      bulkFirst.text.includes(`Page 1 of ${bulkPages}`),
+    `${bulkPages} pages expected`,
+  );
+  check(
+    "the first page holds the newest bookings",
+    holds(bulkFirst, bulkNewest) && !holds(bulkFirst, bulkOldest),
+  );
+  check("and the page links carry the filters forward", bulkFirst.html.includes("page=2"));
+
+  const bulkLast = await listFor(`${bulkFilters}&page=${bulkPages}`);
+  check(
+    "the last page holds the remainder, and does not repeat the first",
+    holds(bulkLast, bulkOldest) &&
+      !holds(bulkLast, bulkNewest) &&
+      bulkLast.text.includes(bookingsLib.pageSummary(bulkPages, bookingsLib.BOOKING_PAGE_SIZE, BULK_ROWS) ?? "impossible"),
+    bookingsLib.pageSummary(bulkPages, bookingsLib.BOOKING_PAGE_SIZE, BULK_ROWS),
+  );
+
+  const bulkPastTheEnd = await listFor(`${bulkFilters}&page=9999`);
+  check(
+    "a page past the end is an honest empty state",
+    bulkPastTheEnd.status === 200 && bulkPastTheEnd.text.includes("No bookings match these filters"),
+  );
+
+  const bulkNegativePage = await listFor(`${bulkFilters}&page=-4`);
+  check(
+    "a negative page number is treated as the first page, not as an error",
+    bulkNegativePage.status === 200 && holds(bulkNegativePage, bulkNewest),
+  );
+
+  const middlePage = await listFor(`${bulkFilters}&page=2`);
+  check(
+    "a middle page shows its own slice and reports where it is",
+    middlePage.text.includes(bookingsLib.pageSummary(2, bookingsLib.BOOKING_PAGE_SIZE, BULK_ROWS) ?? "impossible") &&
+      holds(middlePage, "Bulk Fixture 0026") &&
+      holds(middlePage, "Bulk Fixture 0050") &&
+      !holds(middlePage, bulkNewest),
+    bookingsLib.pageSummary(2, bookingsLib.BOOKING_PAGE_SIZE, BULK_ROWS),
+  );
+
+  // ---- the CSV export ------------------------------------------------------------
+  const hundredFilters = `q=${encodeURIComponent("Bulk Fixture 01")}`;
+
+  const exportHundred = await adminFile(exportPath(hundredFilters), manageAdmin.cookie);
+  const hundredLines = csvLines(exportHundred.body);
+  const hundredHeader = hundredLines[0].split(",");
+
+  check(
+    "the export is served as a dated CSV file, not as a page",
+    exportHundred.status === 200 &&
+      String(exportHundred.headers.get("content-type")).startsWith("text/csv") &&
+      String(exportHundred.headers.get("content-disposition")).includes("bookings-") &&
+      String(exportHundred.headers.get("cache-control")).includes("no-store"),
+    `${exportHundred.status} ${exportHundred.headers.get("content-type")}`,
+  );
+  check(
+    "the file has one row per matching booking, and no more",
+    exportHundred.headers.get("x-export-rows") === "100" && hundredLines.length === 101,
+    `${exportHundred.headers.get("x-export-rows")} rows / ${hundredLines.length} lines`,
+  );
+  check(
+    "the header row names the columns the operations team asked for",
+    ["Booking ID", "Customer", "Mobile", "Email", "Date", "Pass", "Amount", "Payment Status", "Booking Status"]
+      .every((column) => hundredHeader.includes(column)),
+    hundredHeader.join(","),
+  );
+  // The file and the screen must be the same rows, so the reference set is compared
+  // against the bookings the database itself says match the filter.
+  const hundredRefs = (
+    await dbQuery(
+      `select booking_id from public.bookings where customer_name like $1 order by created_at desc`,
+      ["Bulk Fixture 01%"],
+    )
+  ).map((row) => row.booking_id);
+  const exportedRefs = hundredLines.slice(1).map((line) => line.split(",")[0]);
+  check(
+    "the file holds exactly the bookings the filter matches, newest first",
+    exportedRefs.length === hundredRefs.length &&
+      exportedRefs.every((reference, index) => reference === hundredRefs[index]),
+    `${exportedRefs.length} exported of ${hundredRefs.length} matched`,
+  );
+  check(
+    "a contact-carrying export is not truncated, and says so",
+    exportHundred.headers.get("x-export-truncated") === "false",
+  );
+
+  const exportStaff = await adminFile(exportPath(`q=${encodeURIComponent("Bulk Fixture 0100")}`), manageStaff.cookie);
+  const staffHeader = csvLines(exportStaff.body)[0].split(",");
+  check(
+    "a staff member's export has no contact, amount or gateway columns at all",
+    exportStaff.status === 200 &&
+      !staffHeader.includes("Mobile") &&
+      !staffHeader.includes("Email") &&
+      !staffHeader.includes("Amount") &&
+      !staffHeader.includes("Razorpay Payment ID") &&
+      !exportStaff.body.includes("₹"),
+    staffHeader.join(","),
+  );
+  const staffRowCells = csvLines(exportStaff.body)[1].split(",");
+  check(
+    "and none of the withheld values appear anywhere in the file",
+    !staffRowCells.includes("+919800006100") &&
+      !staffRowCells.includes("499") &&
+      !staffRowCells.some((cell) => cell.includes("+91")),
+    staffRowCells.join("|"),
+  );
+
+  const exportAll = await adminFile(exportPath(bulkFilters), manageAdmin.cookie);
+  check(
+    "an export larger than one fetch batch is assembled completely, then flagged as cut short",
+    exportAll.status === 200 &&
+      exportAll.headers.get("x-export-rows") === String(bookingsLib.EXPORT_MAX_ROWS) &&
+      exportAll.headers.get("x-export-truncated") === "true" &&
+      csvLines(exportAll.body).length === bookingsLib.EXPORT_MAX_ROWS + 1,
+    `${exportAll.headers.get("x-export-rows")} of ${BULK_ROWS}`,
+  );
+  check(
+    "the cut-short file stops where it said it would, rather than ending at random",
+    exportAll.body.includes("Bulk Fixture 5000") && !exportAll.body.includes("Bulk Fixture 5005"),
+  );
+
+  const exportSignedOut = await adminFile(exportPath(bulkFilters));
+  check(
+    "a signed-out visitor cannot download the customer list",
+    exportSignedOut.status === 307 && String(exportSignedOut.location ?? "").includes("/admin/login"),
+    `${exportSignedOut.status} ${exportSignedOut.location ?? ""}`,
+  );
+
+  const exportGuest = await adminFile(exportPath(bulkFilters), manageGuest.cookie);
+  check(
+    "and neither can a signed-in visitor who is not staff",
+    exportGuest.status === 307 && String(exportGuest.location ?? "").includes("/admin/login"),
+    `${exportGuest.status} ${exportGuest.location ?? ""}`,
+  );
+
+  // ---- one booking in full -------------------------------------------------------
+  const detailAdmin = await adminHtml(`/admin/bookings/${gateFixture.booking_id}`, manageAdmin.cookie);
+  check(
+    "the detail view opens for an admin and names the booking",
+    detailAdmin.status === 200 && detailAdmin.text.includes(gateFixture.booking_id),
+    `${detailAdmin.status}`,
+  );
+  check(
+    "it shows the whole booking: guest, contact details, night, pass, amount and gateway ids",
+    detailAdmin.text.includes("Nisha Rao") &&
+      detailAdmin.text.includes(gateFixture.customer_mobile) &&
+      detailAdmin.text.includes(gateFixture.customer_email) &&
+      detailAdmin.text.includes(format.formatInr(Number(gateFixture.total_amount))) &&
+      detailAdmin.text.includes(gateFixture.razorpay_order_id),
+  );
+  check(
+    "it lists every pass on the booking",
+    gatePassIds.every((passId) => detailAdmin.text.includes(passId)),
+    gatePassIds.join(" "),
+  );
+  check(
+    "and every gate entry, with the gate and the staff member who made it",
+    detailAdmin.text.includes("Gate B") && detailAdmin.text.includes("Gate Night Scanner"),
+  );
+  check(
+    "the pass token that admits is nowhere on the page",
+    tonightPasses.every((pass) => !detailAdmin.html.includes(pass.qr_token)),
+  );
+  // The gate fixture was confirmed by the signature-checked callback, which does not
+  // leave a webhook row — so its page must say exactly that rather than imply the
+  // payment is unverified.
+  check(
+    "a booking confirmed without a webhook delivery says so honestly, instead of implying the payment is unverified",
+    detailAdmin.text.includes("No webhook delivery has been recorded for this order"),
+  );
+
+  // The webhook-only fixture is the other half: a payment Razorpay confirmed by
+  // delivery, and the screen has to show what arrived.
+  const webhookOrderFixture = (
+    await dbQuery(`select booking_id, razorpay_order_id from public.bookings where customer_mobile = $1`, [
+      "+919800000203",
+    ])
+  )[0];
+  const detailWebhook = await adminHtml(`/admin/bookings/${webhookOrderFixture.booking_id}`, manageAdmin.cookie);
+  check(
+    "the detail shows what the gateway reported, not a status somebody typed",
+    detailWebhook.status === 200 &&
+      detailWebhook.text.includes("payment.captured") &&
+      detailWebhook.text.includes("confirmed") &&
+      detailWebhook.text.includes(webhookOrderFixture.razorpay_order_id),
+    detailWebhook.text.includes("payment.captured") ? "gateway events shown" : "no events",
+  );
+  check(
+    "and it offers no control that could change a payment status",
+    !/mark\s*(it\s*)?(as\s*)?paid/i.test(detailAdmin.text) &&
+      !detailAdmin.html.includes('name="payment_status"') &&
+      !detailAdmin.html.includes('value="paid"'),
+    /mark\s*(it\s*)?(as\s*)?paid/i.test(detailAdmin.text) ? "a manual paid control was rendered" : "none",
+  );
+
+  const detailStaff = await adminHtml(`/admin/bookings/${gateFixture.booking_id}`, manageStaff.cookie);
+  check(
+    "a staff member sees the booking in full without the contact details or the money",
+    detailStaff.status === 200 &&
+      detailStaff.text.includes("Nisha Rao") &&
+      detailStaff.text.includes(gatePassIds[0]) &&
+      detailStaff.text.includes("Gate B") &&
+      !detailStaff.html.includes(gateFixture.customer_mobile) &&
+      !detailStaff.html.includes(gateFixture.customer_email) &&
+      !detailStaff.html.includes("₹") &&
+      !detailStaff.html.includes(gateFixture.razorpay_payment_id),
+    `${detailStaff.status}`,
+  );
+  check(
+    "and is told why those fields are missing",
+    detailStaff.text.includes("Amounts and Razorpay IDs are hidden for your role"),
+  );
+
+  const detailUnpaid = await adminHtml(`/admin/bookings/${unpaidFixture.booking_reference}`, manageAdmin.cookie);
+  check(
+    "a booking with no verified payment says it has no pass, and says why",
+    detailUnpaid.status === 200 &&
+      detailUnpaid.text.includes("No pass has been issued for this booking") &&
+      detailUnpaid.text.includes("No webhook delivery has been recorded for this order"),
+  );
+
+  const detailMissing = await adminHtml("/admin/bookings/DND999999999", manageAdmin.cookie);
+  check(
+    "an identifier nothing matches explains itself instead of failing",
+    detailMissing.status === 200 && detailMissing.text.includes("No booking with that identifier"),
+  );
+
+  const backFilters = `q=${encodeURIComponent("Nisha Rao")}&payment=paid&page=1`;
+  const detailWithBack = await adminHtml(
+    `/admin/bookings/${gateFixture.booking_id}?back=${encodeURIComponent(backFilters)}`,
+    manageAdmin.cookie,
+  );
+  check(
+    "the way back to the list keeps the search that led here",
+    detailWithBack.html.includes("q=Nisha+Rao") && detailWithBack.html.includes("payment=paid"),
+  );
+
+  // ---- the shared rules, directly -------------------------------------------------
+  const parsedQuery = bookingsLib.parseBookingQuery({
+    q: "  Nisha   Rao  ",
+    from: "2026-10-12",
+    to: "2026-02-31",
+    pass: "not-a-uuid",
+    payment: "paid",
+    status: "shipped",
+    checkin: "some",
+    page: "-3",
+  });
+  check(
+    "the query parser cleans the term, keeps what it recognises and drops what it does not",
+    parsedQuery.q === "Nisha Rao" &&
+      parsedQuery.dateFrom === "2026-10-12" &&
+      parsedQuery.dateTo === null &&
+      parsedQuery.passCategoryId === null &&
+      parsedQuery.paymentStatus === "paid" &&
+      parsedQuery.bookingStatus === null &&
+      parsedQuery.checkInStatus === "some" &&
+      parsedQuery.page === 1,
+    JSON.stringify(parsedQuery),
+  );
+  check(
+    "a date the calendar does not have is not a filter, and an inverted range is still recognised",
+    bookingsLib.isInvertedDateRange({ ...bookingsLib.EMPTY_BOOKING_QUERY, dateFrom: "2026-10-13", dateTo: "2026-10-12" }) &&
+      !bookingsLib.isInvertedDateRange(bookingsLib.parseBookingQuery({ to: "2026-02-31" })),
+  );
+  const roundTrip = bookingsLib.parseBookingQueryString(
+    bookingsLib.bookingQueryToSearchParams({ ...parsedQuery, page: 3, dateTo: "2026-10-14" }),
+  );
+  check(
+    "a link built from a query parses back into the same query",
+    roundTrip.q === parsedQuery.q &&
+      roundTrip.paymentStatus === "paid" &&
+      roundTrip.checkInStatus === "some" &&
+      roundTrip.dateFrom === "2026-10-12" &&
+      roundTrip.dateTo === "2026-10-14" &&
+      roundTrip.page === 3,
+    JSON.stringify(roundTrip),
+  );
+  check(
+    "a spreadsheet formula cannot be smuggled in through a guest's name",
+    bookingsLib.csvCell("=1+1") === "'=1+1" &&
+      bookingsLib.csvCell('Nisha "Nia" Rao') === '"Nisha ""Nia"" Rao"' &&
+      bookingsLib.csvCell("Nisha, Rao") === '"Nisha, Rao"' &&
+      bookingsLib.csvCell(null) === "",
+    bookingsLib.csvCell("=1+1"),
+  );
+  check(
+    "the check-in column reads as three different states, not as a number",
+    bookingsLib.checkInSummary({ passesIssued: 0, passesCheckedIn: 0, paymentStatus: "unpaid" }) === "No pass yet" &&
+      bookingsLib.checkInSummary({ passesIssued: 2, passesCheckedIn: 0, paymentStatus: "paid" }) === "Not in yet (2)" &&
+      bookingsLib.checkInSummary({ passesIssued: 2, passesCheckedIn: 1, paymentStatus: "paid" }) === "1 of 2 in" &&
+      bookingsLib.checkInSummary({ passesIssued: 2, passesCheckedIn: 2, paymentStatus: "paid" }) === "All 2 in" &&
+      bookingsLib.checkInSummary({ passesIssued: 1, passesCheckedIn: 1, paymentStatus: "paid" }) === "Checked in",
+  );
+  check(
+    "an export of an empty result set is never offered",
+    bookingsLib.csvHeader(true).length > bookingsLib.csvHeader(false).length &&
+      bookingsLib.bookingsToCsv([], false).split(",").length === bookingsLib.csvHeader(false).length,
+    `${bookingsLib.csvHeader(false).length} staff columns / ${bookingsLib.csvHeader(true).length} admin columns`,
+  );
 
   // ---------------------------------------------------------------------------
   section("Result");
