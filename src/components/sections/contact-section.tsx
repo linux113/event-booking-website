@@ -2,18 +2,20 @@ import { ContactCard } from "@/components/contact/contact-card";
 import { MapPinIcon } from "@/components/icons";
 import { WhatsAppButton } from "@/components/layout/whatsapp-button";
 import { Container, Section } from "@/components/ui/container";
-import { DemoBadge } from "@/components/ui/demo-badge";
 import { SectionHeading } from "@/components/ui/section-heading";
-import { contactChannels } from "@/config/contact";
-import { siteConfig } from "@/config/site";
+import { buildContactChannels } from "@/config/contact";
+import type { EventSummary } from "@/types";
 
 type ContactSectionProps = {
-  /** `preview` hides the venue block and shows fewer details on the home page. */
+  /** `preview` hides the venue block on the home page. */
   variant?: "full" | "preview";
+  /** When present, its contact details take precedence over the site-level ones. */
+  event?: EventSummary;
 };
 
-export function ContactSection({ variant = "full" }: ContactSectionProps) {
+export function ContactSection({ variant = "full", event }: ContactSectionProps) {
   const isPreview = variant === "preview";
+  const channels = buildContactChannels(event);
 
   return (
     <Section id="contact">
@@ -25,7 +27,7 @@ export function ContactSection({ variant = "full" }: ContactSectionProps) {
         />
 
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {contactChannels.map((channel) => (
+          {channels.map((channel) => (
             <ContactCard key={channel.id} channel={channel} />
           ))}
         </div>
@@ -38,16 +40,15 @@ export function ContactSection({ variant = "full" }: ContactSectionProps) {
                 Venue &amp; directions
               </h3>
               <address className="text-muted text-sm/6 not-italic">
-                {siteConfig.contact.addressLines.map((line) => (
-                  <span key={line} className="block">
-                    {line}
-                  </span>
-                ))}
+                {[event?.venueName, event?.venueAddress, event?.city, event?.state]
+                  .filter(Boolean)
+                  .map((line) => (
+                    <span key={line} className="block">
+                      {line}
+                    </span>
+                  ))}
+                {event ? null : <span className="block">Venue to be confirmed</span>}
               </address>
-              <p className="text-muted text-sm/6">
-                A map embed is added once the final venue is confirmed — we will not publish a
-                location we have not verified.
-              </p>
               <WhatsAppButton
                 variant="full"
                 size="sm"
@@ -59,19 +60,16 @@ export function ContactSection({ variant = "full" }: ContactSectionProps) {
             <div
               className="border-border/80 from-violet/15 to-navy/25 flex min-h-44 items-center justify-center rounded-xl border bg-gradient-to-br p-6 text-center"
               role="img"
-              aria-label="Map placeholder — venue location will be embedded here"
+              aria-label="Map placeholder — the venue map will be embedded here"
             >
               <p className="text-muted max-w-xs text-sm/6">
-                Map embed placeholder
-                <span className="mt-1 block text-xs">
-                  Connect the venue coordinates with the event record in the database step.
-                </span>
+                {event?.mapsUrl
+                  ? "Open the venue in Google Maps from the link above."
+                  : "The venue map is published once the organiser confirms the location."}
               </p>
             </div>
           </div>
         )}
-
-        <DemoBadge label="Demo contact details — replace before launch" className="w-fit" />
       </Container>
     </Section>
   );

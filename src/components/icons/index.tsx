@@ -1,4 +1,4 @@
-import type { SVGProps } from "react";
+import type { ReactElement, SVGProps } from "react";
 
 /**
  * Inline icon set.
@@ -182,6 +182,23 @@ export function LedWallIcon(props: IconProps) {
   );
 }
 
+export function UsersIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="9" cy="8.5" r="3.2" />
+      <path d="M3.5 19.5a5.5 5.5 0 0 1 11 0M16 6.2a3 3 0 0 1 0 5.6M17.5 19.5a5.4 5.4 0 0 0-1.6-3.8" />
+    </Icon>
+  );
+}
+
+export function SparkIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 3.5 13.6 9 19 10.5 13.6 12 12 17.5 10.4 12 5 10.5 10.4 9 12 3.5Z" />
+    </Icon>
+  );
+}
+
 export function DjIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -230,14 +247,23 @@ export function YouTubeIcon(props: IconProps) {
   );
 }
 
-export const featureIcons = {
+/**
+ * Icon per `event_features.code`. The codes live in the database, so this is a
+ * lookup with a fallback — an organiser can add a feature row with a new code
+ * and the UI still renders it.
+ */
+export const featureIcons: Record<string, (props: SVGProps<SVGSVGElement>) => ReactElement> = {
   anchor: AnchorRoleIcon,
   gorilla: GorillaMaskIcon,
   videographer: CameraIcon,
   drone: DroneIcon,
   "led-wall": LedWallIcon,
   dj: DjIcon,
-} as const;
+};
+
+export function getFeatureIcon(code: string) {
+  return featureIcons[code] ?? SparkIcon;
+}
 
 export const contactIcons = {
   whatsapp: WhatsAppIcon,

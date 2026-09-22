@@ -1,14 +1,21 @@
-import { featureIcons } from "@/components/icons";
+import { getFeatureIcon } from "@/components/icons";
 import { Container, Section } from "@/components/ui/container";
 import { SectionHeading } from "@/components/ui/section-heading";
-import { demoFeatures } from "@/config/features";
+import type { EventFeature } from "@/types";
+
+type FeatureStripProps = {
+  features: readonly EventFeature[];
+};
 
 /**
- * What is included at the event: anchor, gorilla dancer, videographer, drone,
- * LED wall and DJ. Icon + label come from the same `Feature` type the admin
- * dashboard will write to later.
+ * Production inclusions for the featured event, read from `event_features`.
+ * The icon is resolved from the row's `code`, with a fallback for new codes.
  */
-export function FeatureStrip() {
+export function FeatureStrip({ features }: FeatureStripProps) {
+  if (features.length === 0) {
+    return null;
+  }
+
   return (
     <Section className="pt-6 sm:pt-8">
       <Container className="flex flex-col gap-8">
@@ -20,8 +27,8 @@ export function FeatureStrip() {
         />
 
         <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-          {demoFeatures.map((feature) => {
-            const FeatureIcon = featureIcons[feature.id];
+          {features.map((feature) => {
+            const FeatureIcon = getFeatureIcon(feature.code);
 
             return (
               <li key={feature.id}>
@@ -32,7 +39,11 @@ export function FeatureStrip() {
                   <span className="text-sm font-semibold tracking-tight text-balance">
                     {feature.label}
                   </span>
-                  <span className="text-muted hidden text-xs/5 sm:block">{feature.description}</span>
+                  {feature.description ? (
+                    <span className="text-muted hidden text-xs/5 sm:block">
+                      {feature.description}
+                    </span>
+                  ) : null}
                 </div>
               </li>
             );

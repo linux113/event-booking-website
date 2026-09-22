@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "typecheck": "next typegen && tsc --noEmit",
     "db:verify": "node scripts/verify-db.mjs",
+    "verify:web": "node scripts/verify-web.mjs",
     "check": "npm run typecheck && npm run lint && npm run build"
   },
   "dependencies": {

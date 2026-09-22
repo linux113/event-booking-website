@@ -156,6 +156,55 @@ on conflict (id) do update set
 
 
 -- -----------------------------------------------------------------------------
+-- Event highlights — "what to expect on the night"
+-- -----------------------------------------------------------------------------
+insert into public.event_highlights (id, event_id, title, description, sort_order)
+values
+  ('a1000000-0000-4000-8000-000000000001', 'e0000000-0000-4000-8000-000000000001', 'Live dandiya & garba',
+   'Traditional garba raas circles and dandiya rounds with live dhol, every night of the festival.', 1),
+  ('a1000000-0000-4000-8000-000000000002', 'e0000000-0000-4000-8000-000000000001', 'All-night DJ set',
+   'A Bollywood and Gujarati DJ set that keeps the floor moving after the live performance ends.', 2),
+  ('a1000000-0000-4000-8000-000000000003', 'e0000000-0000-4000-8000-000000000001', 'Best dresser contest',
+   'Daily prizes for the best chaniya choli, kediyu and duo outfits, judged by the crowd.', 3),
+  ('a1000000-0000-4000-8000-000000000004', 'e0000000-0000-4000-8000-000000000001', 'Food & refreshment court',
+   'Gujarati thali, chaat, falooda and mocktail stalls with seating away from the dance floor.', 4),
+  ('a1000000-0000-4000-8000-000000000005', 'e0000000-0000-4000-8000-000000000001', 'Safe & family friendly',
+   'Separate family section, medical desk, professional bouncers and trained floor marshals.', 5),
+  ('a1000000-0000-4000-8000-000000000006', 'e0000000-0000-4000-8000-000000000001', 'Secure digital entry',
+   'Every booking gets a QR entry pass. No paper tickets, no queue at the gate.', 6)
+on conflict (id) do update set
+  event_id    = excluded.event_id,
+  title       = excluded.title,
+  description = excluded.description,
+  sort_order  = excluded.sort_order;
+
+
+-- -----------------------------------------------------------------------------
+-- Event features — production inclusions. `code` drives the icon in the UI.
+-- -----------------------------------------------------------------------------
+insert into public.event_features (id, event_id, code, label, description, sort_order)
+values
+  ('f0000000-0000-4000-8000-000000000001', 'e0000000-0000-4000-8000-000000000001', 'anchor', 'Girl Anchor',
+   'Professional anchor hosting the games, contests and announcements.', 1),
+  ('f0000000-0000-4000-8000-000000000002', 'e0000000-0000-4000-8000-000000000001', 'gorilla', 'Gorilla Dancer',
+   'Costumed crowd performer who leads the dandiya rounds and hypes the floor.', 2),
+  ('f0000000-0000-4000-8000-000000000003', 'e0000000-0000-4000-8000-000000000001', 'videographer', 'Videographer',
+   'Full-night filming with an edited highlights reel after the festival.', 3),
+  ('f0000000-0000-4000-8000-000000000004', 'e0000000-0000-4000-8000-000000000001', 'drone', 'Drone Camera',
+   'Aerial coverage of the garba circles and the stage, subject to local permissions.', 4),
+  ('f0000000-0000-4000-8000-000000000005', 'e0000000-0000-4000-8000-000000000001', 'led-wall', 'LED Wall',
+   'Large LED backdrop for visuals, live scores and contest displays.', 5),
+  ('f0000000-0000-4000-8000-000000000006', 'e0000000-0000-4000-8000-000000000001', 'dj', 'DJ',
+   'Resident DJ with a Gujarati, Bollywood and EDM set till close.', 6)
+on conflict (id) do update set
+  event_id    = excluded.event_id,
+  code        = excluded.code,
+  label       = excluded.label,
+  description = excluded.description,
+  sort_order  = excluded.sort_order;
+
+
+-- -----------------------------------------------------------------------------
 -- Sanity check (run manually after seeding)
 --
 --   select e.name, count(d.id) as nights
@@ -164,4 +213,9 @@ on conflict (id) do update set
 --
 --   select code, composition, price_inr, number_of_people
 --     from public.pass_categories order by sort_order;   -- expect: 5 rows
+--
+--   select code, label from public.event_features order by sort_order;    -- expect: 6 rows
+--
+--   select public.get_event_night_availability('e0000000-0000-4000-8000-000000000001');
+--     -- expect: 9 rows, booked_people 0, is_bookable true
 -- -----------------------------------------------------------------------------

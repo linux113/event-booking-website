@@ -5,6 +5,8 @@ import { cn } from "@/lib/utils";
 type WhatsAppButtonProps = {
   /** Prefilled enquiry message. */
   message?: string;
+  /** E.164 number, digits only. Defaults to the site-level contact number. */
+  number?: string;
   /** `default` shows the label on ≥sm screens, `icon` is icon-only, `full` always shows it. */
   variant?: "default" | "icon" | "full";
   size?: "sm" | "md" | "lg";
@@ -31,6 +33,7 @@ const iconOnlySize = {
  */
 export function WhatsAppButton({
   message,
+  number,
   variant = "default",
   size = "md",
   className,
@@ -41,7 +44,7 @@ export function WhatsAppButton({
 
   return (
     <a
-      href={whatsappLink(message)}
+      href={whatsappLink(message, number)}
       target="_blank"
       rel="noopener noreferrer"
       aria-label={isIconOnly ? `Chat with us on ${label}` : undefined}

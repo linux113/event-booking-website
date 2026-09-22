@@ -7,11 +7,11 @@ import { WhatsAppButton } from "@/components/layout/whatsapp-button";
 import { CtaBand } from "@/components/sections/cta-band";
 import { Button } from "@/components/ui/button";
 import { Container, Section } from "@/components/ui/container";
-import { DemoBadge } from "@/components/ui/demo-badge";
 import { EmptyState } from "@/components/ui/empty-state";
+import { ErrorState } from "@/components/ui/error-state";
 import { SectionHeading } from "@/components/ui/section-heading";
-import { contactChannels, supportHours } from "@/config/contact";
-import { siteConfig } from "@/config/site";
+import { buildContactChannels, supportHours } from "@/config/contact";
+import { getFeaturedEvent } from "@/lib/services/events";
 
 export const metadata: Metadata = {
   title: "Contact",
@@ -19,7 +19,9 @@ export const metadata: Metadata = {
     "Contact the organiser for booking help, group passes, sponsorships and venue directions.",
 };
 
-const faqs = [
+export const revalidate = 300;
+
+const FAQS = [
   {
     question: "Do I need a partner for garba or dandiya?",
     answer:
@@ -42,7 +44,22 @@ const faqs = [
   },
 ] as const;
 
-export default function ContactPage() {
+export default async function ContactPage() {
+  const result = await getFeaturedEvent();
+
+  if (!result.ok) {
+    return (
+      <Section>
+        <Container>
+          <ErrorState error={result.error} title="Contact details are unavailable" />
+        </Container>
+      </Section>
+    );
+  }
+
+  const event = result.data;
+  const channels = buildContactChannels(event ?? undefined);
+
   return (
     <>
       <PageHero
@@ -53,14 +70,20 @@ export default function ContactPage() {
 
       <Section className="pt-0">
         <Container className="flex flex-col gap-8">
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {contactChannels.map((channel) => (
-              <ContactCard key={channel.id} channel={channel} />
-            ))}
-          </div>
+          {channels.length > 0 ? (
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {channels.map((channel) => (
+                <ContactCard key={channel.id} channel={channel} />
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              title="No contact details published yet"
+              description="The organiser has not added phone or email details to the event record. They appear here as soon as they exist — we do not invent contact information."
+            />
+          )}
 
           <div className="flex flex-wrap items-center gap-3">
-            <DemoBadge label="Demo contact details — replace with the real numbers before launch" />
             <Button href="/passes" variant="ghost" size="sm">
               See passes
             </Button>
@@ -75,21 +98,38 @@ export default function ContactPage() {
               <MapPinIcon className="text-marigold size-5" />
               Venue &amp; directions
             </h2>
-            <address className="text-muted text-sm/7 not-italic">
-              {siteConfig.contact.addressLines.map((line) => (
-                <span key={line} className="block">
-                  {line}
-                </span>
-              ))}
-            </address>
-            <p className="text-muted text-sm/6">
-              The venue map is published with the confirmed event record. We do not embed a location
-              we have not verified.
-            </p>
+            {event ? (
+              <>
+                <address className="text-muted text-sm/7 not-italic">
+                  {[event.venueName, event.venueAddress, event.city, event.state]
+                    .filter(Boolean)
+                    .map((line) => (
+                      <span key={line} className="block">
+                        {line}
+                      </span>
+                    ))}
+                </address>
+                {event.mapsUrl ? (
+                  <a
+                    href={event.mapsUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-marigold-soft hover:text-marigold w-fit text-sm font-semibold underline-offset-4 hover:underline"
+                  >
+                    Open in Google Maps
+                  </a>
+                ) : null}
+              </>
+            ) : (
+              <p className="text-muted text-sm/6">
+                The venue is published with the event record once it is confirmed.
+              </p>
+            )}
             <WhatsAppButton
               variant="full"
               size="sm"
               className="w-fit"
+              number={event?.contactPhone?.replace(/[^0-9]/g, "")}
               message="Hi! I need directions to the venue."
             />
           </div>
@@ -112,7 +152,9 @@ export default function ContactPage() {
               aria-label="Map placeholder — the venue map will be embedded here"
             >
               <p className="text-muted text-xs/5">
-                Map embed placeholder — connects to the venue coordinates from the event record.
+                {event?.mapsUrl
+                  ? "Use the directions link to open the venue in your maps app."
+                  : "The venue map is published once the organiser confirms the location."}
               </p>
             </div>
           </div>
@@ -128,7 +170,7 @@ export default function ContactPage() {
           />
 
           <div className="grid gap-4 sm:grid-cols-2">
-            {faqs.map((faq) => (
+            {FAQS.map((faq) => (
               <div key={faq.question} className="border-border bg-surface/50 rounded-2xl border p-5">
                 <h3 className="text-base font-semibold tracking-tight">{faq.question}</h3>
                 <p className="text-muted mt-2 text-sm/6">{faq.answer}</p>
@@ -153,6 +195,7 @@ export default function ContactPage() {
               <WhatsAppButton
                 variant="full"
                 size="sm"
+                number={event?.contactPhone?.replace(/[^0-9]/g, "")}
                 message="Hi! I have a question about the Navratri event."
               />
             }

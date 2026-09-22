@@ -13,10 +13,11 @@
  * It is a development-only check: PGlite is a devDependency and nothing here is
  * bundled into the app or deployed.
  */
-import { PGlite } from "@electric-sql/pglite";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { createVerificationDb } from "./test/pglite.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MIGRATIONS_DIR = join(REPO_ROOT, "supabase", "migrations");
@@ -35,7 +36,7 @@ const RESET = "\u001b[0m";
 let passed = 0;
 const failures = [];
 
-const db = new PGlite();
+const db = createVerificationDb();
 
 function check(name, condition, detail = "") {
   if (condition) {
@@ -130,6 +131,8 @@ async function main() {
     "check_ins",
     "digital_passes",
     "event_dates",
+    "event_features",
+    "event_highlights",
     "events",
     "gallery",
     "pass_categories",
@@ -138,7 +141,7 @@ async function main() {
     (row) => row.tablename,
   );
   check(
-    "all 8 tables exist",
+    "all expected tables exist",
     expectedTables.every((table) => tables.includes(table)),
     `found: ${tables.join(", ")}`,
   );
@@ -173,7 +176,11 @@ async function main() {
     select count(*)::int as n from information_schema.table_constraints
     where table_schema = 'public' and constraint_type = 'PRIMARY KEY';
   `);
-  check("every table has a primary key", primaryKeys[0].n === 8, `found ${primaryKeys[0].n}`);
+  check(
+    "every table has a primary key",
+    primaryKeys[0].n === expectedTables.length,
+    `found ${primaryKeys[0].n} of ${expectedTables.length}`,
+  );
 
   // pg_constraint is authoritative: information_schema hides foreign keys that
   // reference another schema (admin_users.user_id -> auth.users).
@@ -239,6 +246,7 @@ async function main() {
     `)
   ).map((row) => row.relname);
   check("RLS enabled on every table", rlsDisabled.length === 0, `off: ${rlsDisabled.join(", ")}`);
+  check("RLS applies to the new event tables", (await q(`select relrowsecurity from pg_class where relname in ('event_highlights','event_features');`)).every((row) => row.relrowsecurity));
 
   const policyCount = await q(`select count(*)::int as n from pg_policies where schemaname = 'public';`);
   check("RLS policies defined", policyCount[0].n >= 20, `${policyCount[0].n} policies`);
@@ -289,6 +297,8 @@ async function main() {
   );
 
   check("gallery intentionally left empty", (await count("gallery")) === 0);
+  check("6 highlights seeded", (await count("event_highlights")) === 6);
+  check("6 features seeded", (await count("event_features")) === 6);
   check("no bookings seeded", (await count("bookings")) === 0);
   check("seed is re-runnable (idempotent)", (await expectError(readFileSync(SEED_FILE, "utf8"))) === null);
   check("re-running the seed does not duplicate", (await count("event_dates")) === 9);
@@ -501,6 +511,15 @@ async function main() {
     "signed-in non-admin still sees published events",
     (await asRole("authenticated", `select count(*)::int as n from public.events;`))[0].n === 1,
   );
+
+  // A disabled pass must stay visible to the public (shown as "not on sale"),
+  // while remaining unbookable.
+  await run(`update public.pass_categories set is_active = false where code = 'family';`);
+  check(
+    "anon still sees a disabled pass (shown as not on sale)",
+    (await asRole("anon", `select count(*)::int as n from public.pass_categories;`))[0].n === 5,
+  );
+  await run(`update public.pass_categories set is_active = true where code = 'family';`);
 
   const ownerId = "aaaa0000-0000-4000-8000-000000000001";
   const scannerId = "aaaa0000-0000-4000-8000-000000000002";

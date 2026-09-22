@@ -1,12 +1,21 @@
 import { PassCard } from "@/components/events/pass-card";
 import { Button } from "@/components/ui/button";
 import { Container, Section } from "@/components/ui/container";
-import { DemoBadge } from "@/components/ui/demo-badge";
 import { SectionHeading } from "@/components/ui/section-heading";
-import { demoPasses } from "@/config/passes";
+import type { PassOption } from "@/types";
 
-/** Home-page pass grid. The full comparison table lives on `/passes`. */
-export function PassesPreview() {
+type PassesPreviewProps = {
+  passes: readonly PassOption[];
+};
+
+/** Home-page pass grid, straight from `pass_categories`. */
+export function PassesPreview({ passes }: PassesPreviewProps) {
+  if (passes.length === 0) {
+    return null;
+  }
+
+  const bookable = passes.filter((pass) => pass.availability.enabled);
+
   return (
     <Section id="passes">
       <Container className="flex flex-col gap-10">
@@ -14,18 +23,19 @@ export function PassesPreview() {
           <SectionHeading
             eyebrow="Passes"
             title="Pick the pass that fits your group"
-            description="Five ways to enter — from a pair of friends to the whole family."
+            description={
+              bookable.length > 0
+                ? `${passes.length} ways to enter — from a pair of friends to the whole family.`
+                : "Passes for this event are not on sale at the moment."
+            }
           />
-          <div className="flex flex-col items-start gap-3 sm:items-end">
-            <Button href="/passes" variant="secondary">
-              Compare all passes
-            </Button>
-            <DemoBadge label="Demo prices — will load from the database" />
-          </div>
+          <Button href="/passes" variant="secondary" className="sm:self-end">
+            Compare all passes
+          </Button>
         </div>
 
         <ul className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-          {demoPasses.map((pass) => (
+          {passes.map((pass) => (
             <li key={pass.id} className="h-full">
               <PassCard pass={pass} variant="preview" />
             </li>

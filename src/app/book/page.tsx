@@ -1,44 +1,79 @@
 import type { Metadata } from "next";
 
+import { NightSelector } from "@/components/booking/night-selector";
 import { PassCard } from "@/components/events/pass-card";
-import { CalendarIcon, CheckIcon, SparkleIcon } from "@/components/icons";
+import { CalendarIcon, CheckIcon, MapPinIcon, SparkleIcon } from "@/components/icons";
 import { PageHero } from "@/components/layout/page-hero";
 import { WhatsAppButton } from "@/components/layout/whatsapp-button";
 import { Button } from "@/components/ui/button";
 import { Container, Section } from "@/components/ui/container";
-import { DemoBadge } from "@/components/ui/demo-badge";
+import { EmptyState } from "@/components/ui/empty-state";
+import { ErrorState } from "@/components/ui/error-state";
 import { SectionHeading } from "@/components/ui/section-heading";
-import { demoEvent } from "@/config/event";
-import { demoPasses } from "@/config/passes";
+import { formatDateRange, formatTimeRange } from "@/lib/format";
+import { getFeaturedEventBundle } from "@/lib/services/events";
 
 export const metadata: Metadata = {
   title: "Book Now",
   description:
-    "Reserve your Navratri and Dandiya passes. Online checkout opens with Razorpay in the next build step.",
+    "Choose your night and passes for the Navratri and Dandiya festival. Online checkout opens with Razorpay in the next build step.",
 };
 
-const bookingSteps = [
-  {
-    title: "Choose your night",
-    body: "Pick which of the festival nights you are coming for. Per-night availability is shown once the events table is connected.",
-  },
-  {
-    title: "Select your passes",
-    body: "Add the pass types your group needs and check the total before paying. Nothing is reserved until payment succeeds.",
-  },
-  {
-    title: "Pay securely with Razorpay",
-    body: "Checkout runs on Razorpay with UPI, cards and netbanking. Your QR entry pass is issued after the payment is verified.",
-  },
+// Availability must be current on every request.
+export const dynamic = "force-dynamic";
+
+const WHAT_YOU_NEED = [
+  "A mobile number that can receive the booking confirmation",
+  "A UPI app, card or netbanking account for the Razorpay checkout",
+  "One lead name per pass group for the entry register",
+  "Photo ID for the lead guest, checked at the gate",
 ] as const;
 
-export default function BookPage() {
+export default async function BookPage() {
+  const result = await getFeaturedEventBundle();
+
+  if (!result.ok) {
+    return (
+      <Section>
+        <Container>
+          <ErrorState error={result.error} title="Booking information is unavailable" />
+        </Container>
+      </Section>
+    );
+  }
+
+  const bundle = result.data;
+
+  if (!bundle) {
+    return (
+      <Section>
+        <Container>
+          <EmptyState
+            title="Nothing to book yet"
+            description="No event is published in the database, so there are no nights or passes to choose from."
+            action={
+              <Button href="/" variant="secondary" size="sm">
+                Back to home
+              </Button>
+            }
+          />
+        </Container>
+      </Section>
+    );
+  }
+
+  const { event, nights, passes } = bundle;
+  const bookableNights = nights.filter((night) => night.isBookable);
+  const bookablePasses = passes.filter((pass) => pass.availability.enabled);
+  const firstNight = nights[0];
+  const timeRange = firstNight ? formatTimeRange(firstNight.startTime, firstNight.endTime) : null;
+
   return (
     <>
       <PageHero
         eyebrow="Book now"
         title="Reserve your pass"
-        description="Here is exactly how booking will work. The checkout itself is not live yet — this page will not take a payment until Razorpay is wired up in the next step."
+        description="Pick your night and pass below. Checkout is not live yet — this page collects nothing and takes no payment until Razorpay is wired up in the next step."
       >
         <div className="flex flex-col gap-3 sm:flex-row">
           <Button href="/passes" size="lg" className="w-full sm:w-auto">
@@ -54,23 +89,6 @@ export default function BookPage() {
       </PageHero>
 
       <Section className="pt-0">
-        <Container className="grid gap-6 lg:grid-cols-3">
-          {bookingSteps.map((step, index) => (
-            <article
-              key={step.title}
-              className="border-border bg-surface/60 flex flex-col gap-3 rounded-2xl border p-6"
-            >
-              <span className="text-marigold font-mono text-sm font-semibold">
-                {String(index + 1).padStart(2, "0")}
-              </span>
-              <h2 className="text-lg font-semibold tracking-tight">{step.title}</h2>
-              <p className="text-muted text-sm/6">{step.body}</p>
-            </article>
-          ))}
-        </Container>
-      </Section>
-
-      <Section className="pt-0">
         <Container className="flex flex-col gap-8">
           <div className="border-marigold/40 bg-marigold/8 flex flex-col gap-3 rounded-2xl border p-6">
             <h2 className="flex items-center gap-2.5 text-lg font-semibold tracking-tight">
@@ -78,22 +96,80 @@ export default function BookPage() {
               Checkout is not open yet
             </h2>
             <p className="text-muted text-sm/7">
-              We are building this in stages. Online booking, payment and the QR entry pass arrive
-              with the Razorpay and database steps — until then this page collects no details and
-              takes no money. For a group booking or a corporate enquiry, message us on WhatsApp
-              and the organiser will confirm availability manually.
+              Choosing a night and a pass below does not reserve anything: the booking and payment
+              steps arrive with Razorpay. For group or corporate bookings, message the organiser on
+              WhatsApp and availability will be confirmed manually.
             </p>
             <div className="flex flex-wrap gap-3 pt-1">
               <WhatsAppButton
                 variant="full"
                 size="sm"
+                number={event.contactPhone?.replace(/[^0-9]/g, "")}
                 message="Hi! I'd like to book a group pass for the Navratri event."
               />
               <Button href="/contact" variant="secondary" size="sm">
                 Other ways to reach us
               </Button>
             </div>
-            <DemoBadge label="No payment, no form and no booking record is created on this page" />
+          </div>
+        </Container>
+      </Section>
+
+      <Section className="pt-0">
+        <Container className="grid gap-6 lg:grid-cols-[1fr_0.85fr]">
+          <div className="border-border bg-surface/50 flex flex-col gap-5 rounded-2xl border p-6">
+            <div className="flex flex-col gap-1">
+              <h2 className="text-lg font-semibold tracking-tight">Available nights</h2>
+              <p className="text-muted text-sm/6">
+                {bookableNights.length} of {nights.length} nights can be booked right now. Fully
+                booked and cancelled nights are shown but cannot be selected.
+              </p>
+            </div>
+
+            <NightSelector nights={nights} />
+          </div>
+
+          <div className="flex flex-col gap-6">
+            <div className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-6">
+              <h2 className="flex items-center gap-2.5 text-lg font-semibold tracking-tight">
+                <CalendarIcon className="text-marigold size-5" />
+                Event details
+              </h2>
+              <dl className="grid gap-3 text-sm sm:grid-cols-2">
+                <Detail label="Event" value={event.name} />
+                <Detail label="Dates" value={formatDateRange(nights.map((n) => n.date)) || "—"} />
+                <Detail label="Timing" value={timeRange ?? "—"} />
+                <Detail label="Venue" value={event.venueName} />
+                <Detail label="Location" value={[event.city, event.state].filter(Boolean).join(", ")} />
+              </dl>
+              {event.mapsUrl ? (
+                <a
+                  href={event.mapsUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-marigold-soft hover:text-marigold flex w-fit items-center gap-1.5 text-sm font-semibold"
+                >
+                  <MapPinIcon className="size-4" />
+                  Get directions
+                </a>
+              ) : null}
+            </div>
+
+            <div className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-6">
+              <h2 className="text-lg font-semibold tracking-tight">What you will need</h2>
+              <ul className="flex flex-col gap-2.5">
+                {WHAT_YOU_NEED.map((item) => (
+                  <li key={item} className="text-muted flex items-start gap-2.5 text-sm/6">
+                    <CheckIcon className="text-peacock mt-0.5 size-4 shrink-0" />
+                    {item}
+                  </li>
+                ))}
+              </ul>
+              <p className="text-muted/80 border-border/70 border-t pt-4 text-xs">
+                Refunds, transfers and cancellations are governed by the organiser&apos;s policy,
+                which will be published here alongside the checkout.
+              </p>
+            </div>
           </div>
         </Container>
       </Section>
@@ -102,57 +178,28 @@ export default function BookPage() {
         <Container className="flex flex-col gap-8">
           <SectionHeading
             eyebrow="Choose a pass"
-            title="Passes available at this event"
-            description="Selecting a pass will lead into the checkout once it exists. For now these cards show what each pass will include."
+            title="Passes on sale"
+            description={
+              bookablePasses.length === passes.length
+                ? "Every pass type is currently on sale."
+                : `${bookablePasses.length} of ${passes.length} pass types are on sale. Disabled passes cannot be booked.`
+            }
           />
 
-          <ul className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-            {demoPasses.map((pass) => (
-              <li key={pass.id} className="h-full">
-                <PassCard pass={pass} variant="preview" bookHref="/passes" />
-              </li>
-            ))}
-          </ul>
-        </Container>
-      </Section>
-
-      <Section className="pt-0">
-        <Container className="grid gap-6 lg:grid-cols-2">
-          <div className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-6">
-            <h2 className="flex items-center gap-2.5 text-lg font-semibold tracking-tight">
-              <CalendarIcon className="text-marigold size-5" />
-              Event details
-            </h2>
-            <dl className="grid gap-3 text-sm sm:grid-cols-2">
-              <Detail label="Event" value={demoEvent.name} />
-              <Detail label="Dates" value={demoEvent.dates} />
-              <Detail label="Timing" value={demoEvent.time} />
-              <Detail label="Venue" value={demoEvent.venue} />
-              <Detail label="Location" value={demoEvent.location} />
-            </dl>
-            <DemoBadge label="Demo event details" />
-          </div>
-
-          <div className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-6">
-            <h2 className="text-lg font-semibold tracking-tight">What you will need</h2>
-            <ul className="flex flex-col gap-2.5">
-              {[
-                "A mobile number that can receive the booking confirmation",
-                "A UPI app, card or netbanking account for the Razorpay checkout",
-                "One lead name per pass group for the entry register",
-                "Photo ID for the lead guest, checked at the gate",
-              ].map((item) => (
-                <li key={item} className="text-muted flex items-start gap-2.5 text-sm/6">
-                  <CheckIcon className="text-peacock mt-0.5 size-4 shrink-0" />
-                  {item}
+          {passes.length > 0 ? (
+            <ul className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+              {passes.map((pass) => (
+                <li key={pass.id} className="h-full">
+                  <PassCard pass={pass} variant="preview" />
                 </li>
               ))}
             </ul>
-            <p className="text-muted/80 border-border/70 border-t pt-4 text-xs">
-              Refunds, transfers and cancellations are governed by the organiser&apos;s policy, which
-              will be published here alongside the checkout.
-            </p>
-          </div>
+          ) : (
+            <EmptyState
+              title="No passes on sale"
+              description="This event has no pass categories yet."
+            />
+          )}
         </Container>
       </Section>
     </>

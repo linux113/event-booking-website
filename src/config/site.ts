@@ -67,9 +67,15 @@ export const siteConfig = {
 
 export type SiteConfig = typeof siteConfig;
 
-/** `wa.me` deep link with a prefilled enquiry message. */
+/**
+ * `wa.me` deep link with a prefilled enquiry message.
+ *
+ * `number` overrides the site-level fallback, so an event's own contact number
+ * from the database is used when it exists.
+ */
 export function whatsappLink(
   message = "Hi! I'd like to know more about the Navratri event passes.",
+  number: string = siteConfig.contact.whatsappNumber,
 ): string {
-  return `https://wa.me/${siteConfig.contact.whatsappNumber}?text=${encodeURIComponent(message)}`;
+  return `https://wa.me/${number}?text=${encodeURIComponent(message)}`;
 }

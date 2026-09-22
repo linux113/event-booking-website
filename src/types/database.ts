@@ -15,6 +15,71 @@ export type Json = string | number | boolean | null | { [key: string]: Json | un
 export interface Database {
   public: {
     Tables: {
+      event_highlights: {
+        Row: {
+          id: string;
+          event_id: string;
+          title: string;
+          description: string | null;
+          sort_order: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          event_id: string;
+          title: string;
+          description?: string | null;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          event_id?: string;
+          title?: string;
+          description?: string | null;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+
+      event_features: {
+        Row: {
+          id: string;
+          event_id: string;
+          code: string;
+          label: string;
+          description: string | null;
+          sort_order: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          event_id: string;
+          code: string;
+          label: string;
+          description?: string | null;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          event_id?: string;
+          code?: string;
+          label?: string;
+          description?: string | null;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+
       events: {
         Row: {
           id: string;
@@ -421,6 +486,21 @@ export interface Database {
         Args: Record<string, never>;
         Returns: string;
       };
+      get_event_night_availability: {
+        Args: { p_event_id: string };
+        Returns: {
+          event_date_id: string;
+          event_date: string;
+          start_time: string | null;
+          end_time: string | null;
+          night_status: string;
+          capacity: number;
+          booked_people: number;
+          remaining: number;
+          is_fully_booked: boolean;
+          is_bookable: boolean;
+        }[];
+      };
     };
     Enums: Record<string, never>;
     CompositeTypes: Record<string, never>;
@@ -462,4 +542,6 @@ export type BookingRow = Row<"bookings">;
 export type DigitalPassRow = Row<"digital_passes">;
 export type CheckInRow = Row<"check_ins">;
 export type GalleryRow = Row<"gallery">;
+export type EventHighlightRow = Row<"event_highlights">;
+export type EventFeatureRow = Row<"event_features">;
 export type AdminUserRow = Row<"admin_users">;
