@@ -1,0 +1,167 @@
+-- =============================================================================
+-- Garba Nights — initial seed data
+--
+-- Idempotent: every row has a hard-coded uuid and an `on conflict ... do update`
+-- branch, so re-running this file never duplicates or orphans anything.
+--
+-- ⚠️  These are the *initial* values for the Jaipur festival. They are seed data
+--     only: nothing in the application hard-codes them, and the admin dashboard
+--     will edit them directly. Replace the venue/city/prices here (or in the
+--     dashboard) rather than anywhere in the frontend.
+--
+-- Apply with: supabase db reset (local) or paste into the Supabase SQL editor.
+-- =============================================================================
+
+
+-- -----------------------------------------------------------------------------
+-- Event
+-- -----------------------------------------------------------------------------
+insert into public.events (
+  id, slug, name, tagline, description,
+  venue_name, venue_address, city, state, maps_url,
+  contact_phone, contact_email,
+  currency, status
+)
+values (
+  'e0000000-0000-4000-8000-000000000001',
+  'navratri-2026-jaipur',
+  'Garba Nights Navratri Utsav',
+  'Nine nights of garba, dandiya and non-stop beats',
+  'A nine-night Navratri and Dandiya festival with live dhol, garba raas rounds, dandiya circles, an anchor, DJ, LED wall, videographer and drone coverage. Family section and food court on site.',
+  'My Village Garden',
+  'My Village Garden, Ajmer Road',
+  'Jaipur',
+  'Rajasthan',
+  'https://maps.google.com/?q=My+Village+Garden+Jaipur',
+  null,
+  null,
+  'INR',
+  'published'
+)
+on conflict (id) do update set
+  slug          = excluded.slug,
+  name          = excluded.name,
+  tagline       = excluded.tagline,
+  description   = excluded.description,
+  venue_name    = excluded.venue_name,
+  venue_address = excluded.venue_address,
+  city          = excluded.city,
+  state         = excluded.state,
+  maps_url      = excluded.maps_url,
+  currency      = excluded.currency,
+  status        = excluded.status;
+
+
+-- -----------------------------------------------------------------------------
+-- Event dates — 11 to 19 October 2026 (nine nights)
+--
+-- `capacity` is the number of people admitted per night. 1500 is a starting
+-- assumption taken from the venue size; the organiser edits it per night.
+-- -----------------------------------------------------------------------------
+insert into public.event_dates (id, event_id, event_date, start_time, end_time, capacity, status)
+values
+  ('d0000000-0000-4000-8000-000000000001', 'e0000000-0000-4000-8000-000000000001', date '2026-10-11', time '19:00', time '23:30', 1500, 'scheduled'),
+  ('d0000000-0000-4000-8000-000000000002', 'e0000000-0000-4000-8000-000000000001', date '2026-10-12', time '19:00', time '23:30', 1500, 'scheduled'),
+  ('d0000000-0000-4000-8000-000000000003', 'e0000000-0000-4000-8000-000000000001', date '2026-10-13', time '19:00', time '23:30', 1500, 'scheduled'),
+  ('d0000000-0000-4000-8000-000000000004', 'e0000000-0000-4000-8000-000000000001', date '2026-10-14', time '19:00', time '23:30', 1500, 'scheduled'),
+  ('d0000000-0000-4000-8000-000000000005', 'e0000000-0000-4000-8000-000000000001', date '2026-10-15', time '19:00', time '23:30', 1500, 'scheduled'),
+  ('d0000000-0000-4000-8000-000000000006', 'e0000000-0000-4000-8000-000000000001', date '2026-10-16', time '19:00', time '23:30', 1500, 'scheduled'),
+  ('d0000000-0000-4000-8000-000000000007', 'e0000000-0000-4000-8000-000000000001', date '2026-10-17', time '19:00', time '23:30', 1500, 'scheduled'),
+  ('d0000000-0000-4000-8000-000000000008', 'e0000000-0000-4000-8000-000000000001', date '2026-10-18', time '19:00', time '23:30', 1500, 'scheduled'),
+  ('d0000000-0000-4000-8000-000000000009', 'e0000000-0000-4000-8000-000000000001', date '2026-10-19', time '19:00', time '23:30', 1500, 'scheduled')
+on conflict (id) do update set
+  event_id   = excluded.event_id,
+  event_date = excluded.event_date,
+  start_time = excluded.start_time,
+  end_time   = excluded.end_time,
+  capacity   = excluded.capacity,
+  status     = excluded.status;
+
+
+-- -----------------------------------------------------------------------------
+-- Pass categories — the five passes offered at this event
+--
+-- `number_of_people` is how many people one pass admits; it is what capacity and
+-- check-in counts are measured in. The Family pass is seeded as 4 (two adults +
+-- two children) — confirm with the organiser and update here if it differs.
+-- -----------------------------------------------------------------------------
+insert into public.pass_categories (
+  id, event_id, code, name, composition, description,
+  price_inr, number_of_people, max_per_booking, is_active, sort_order
+)
+values
+  (
+    'c0000000-0000-4000-8000-000000000001',
+    'e0000000-0000-4000-8000-000000000001',
+    'girls-2', 'Duo Pass', '2 Girls',
+    'Entry for two, ideal for a friends'' pair.',
+    399, 2, 10, true, 1
+  ),
+  (
+    'c0000000-0000-4000-8000-000000000002',
+    'e0000000-0000-4000-8000-000000000001',
+    'couple', 'Couple Pass', '1 Boy + 1 Girl',
+    'The most-booked pass, priced for a couple entering together.',
+    499, 2, 10, true, 2
+  ),
+  (
+    'c0000000-0000-4000-8000-000000000003',
+    'e0000000-0000-4000-8000-000000000001',
+    'boy-2-girls', 'Trio Pass', '1 Boy + 2 Girls',
+    'Entry for three, so the group stays together on the floor.',
+    599, 3, 10, true, 3
+  ),
+  (
+    'c0000000-0000-4000-8000-000000000004',
+    'e0000000-0000-4000-8000-000000000001',
+    'girls-4', 'Squad Pass', '4 Girls',
+    'Best value for a group of four friends.',
+    799, 4, 10, true, 4
+  ),
+  (
+    'c0000000-0000-4000-8000-000000000005',
+    'e0000000-0000-4000-8000-000000000001',
+    'family', 'Family Pass', 'Family',
+    'One pass for the whole family — children are welcome.',
+    1099, 4, 5, true, 5
+  )
+on conflict (id) do update set
+  event_id         = excluded.event_id,
+  code             = excluded.code,
+  name             = excluded.name,
+  composition      = excluded.composition,
+  description      = excluded.description,
+  price_inr        = excluded.price_inr,
+  number_of_people = excluded.number_of_people,
+  max_per_booking  = excluded.max_per_booking,
+  is_active        = excluded.is_active,
+  sort_order       = excluded.sort_order;
+
+
+-- -----------------------------------------------------------------------------
+-- Intentionally NOT seeded
+--
+-- gallery       → published photos/videos come from the first shoot; seeding
+--                 placeholder URLs would put non-existent files on the site.
+-- admin_users   → rows require a matching auth.users row. Create the owner in
+--                 Supabase Auth first, then insert the allow-list row, e.g.:
+--
+--                   insert into public.admin_users (user_id, email, full_name, role)
+--                   values ('<auth-user-uuid>', 'you@example.com', 'Your Name', 'owner');
+--
+-- bookings,
+-- digital_passes,
+-- check_ins     → transactional data. Never seeded; created by the booking flow.
+-- -----------------------------------------------------------------------------
+
+
+-- -----------------------------------------------------------------------------
+-- Sanity check (run manually after seeding)
+--
+--   select e.name, count(d.id) as nights
+--     from public.events e left join public.event_dates d on d.event_id = e.id
+--    group by e.name;                                   -- expect: 9
+--
+--   select code, composition, price_inr, number_of_people
+--     from public.pass_categories order by sort_order;   -- expect: 5 rows
+-- -----------------------------------------------------------------------------

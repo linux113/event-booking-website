@@ -12,11 +12,12 @@ fits within free tiers for development and small-scale launch.
 | ---- | ----- | ----- |
 | 1 | Project setup — Next.js, TypeScript, Tailwind, structure, tooling | ✅ done |
 | 2 | Public UI — all six public pages, responsive, accessible | ✅ done |
-| 3 | Supabase project + schema (events, pass tiers, bookings, payments) | ⏳ next |
-| 4 | Auth and attendee accounts | ⏳ |
-| 5 | Razorpay order creation, signature verification, webhook, booking record | ⏳ |
-| 6 | Admin dashboard (publish events, capacity, check-in) | ⏳ |
-| 7 | Hardening — rate limiting, RLS tests, analytics, perf budget | ⏳ |
+| 3 | Supabase database — schema, RLS, seed data, typed clients | ✅ done |
+| 4 | Wire the UI to the database (replace `src/config/*` demo values) | ⏳ next |
+| 5 | Auth and attendee accounts | ⏳ |
+| 6 | Razorpay order creation, signature verification, webhook, booking record | ⏳ |
+| 7 | Admin dashboard (publish events, capacity, check-in) | ⏳ |
+| 8 | Hardening — rate limiting, analytics, perf budget | ⏳ |
 
 **There is no backend yet, no payment code and no mock API.** Sections that will be
 database-driven render explicit empty states rather than invented content, and every
@@ -51,6 +52,7 @@ npm run dev                  # http://localhost:3000
 | `npm run start`     | Serve the production build                                         |
 | `npm run lint`      | ESLint (Next core-web-vitals + TypeScript rules)                   |
 | `npm run typecheck` | `next typegen && tsc --noEmit` (route types must exist first)      |
+| `npm run db:verify` | Run the migrations + seed against PostgreSQL (WASM) and assert schema, constraints and RLS |
 | `npm run check`     | typecheck → lint → build, in one command                           |
 
 ## Demo content policy
@@ -60,11 +62,11 @@ They are isolated so the swap to Supabase is a data-source change, not a UI rewr
 
 | File | Contents | Becomes |
 | ---- | -------- | ------- |
-| `src/config/event.ts` | Hero event + highlights | `events` / `event_highlights` tables |
-| `src/config/passes.ts` | Five pass tiers, prices, inclusions | `pass_tiers` table (per event, with availability) |
+| `src/config/event.ts` | Hero event + highlights | `events` + `event_dates` (seeded — see `supabase/`) |
+| `src/config/passes.ts` | Five pass tiers, prices, inclusions | `pass_categories` (seeded — see `supabase/`) |
 | `src/config/features.ts` | Production elements (anchor, DJ, drone…) | `event_features` table or an enum column |
-| `src/config/gallery.ts` | Gallery artwork | Supabase Storage bucket + `gallery_items` |
-| `src/config/promos.ts` | Video slots (no URLs set) | `promo_videos` with real URLs |
+| `src/config/gallery.ts` | Gallery artwork | `gallery` table + Supabase Storage bucket |
+| `src/config/promos.ts` | Video slots (no URLs set) | `gallery` rows with `media_type = 'video'` |
 | `src/config/contact.ts` | Phone, email, address, map link | `organisers` table |
 | `src/config/site.ts` | Branding, nav, socials | Env/DB as appropriate |
 
@@ -93,8 +95,22 @@ src/
 │   ├── sections/               # hero, feature strip, about, passes/gallery preview, CTA
 │   └── ui/                     # Button, Card, Badge, Container, Section, EmptyState…
 ├── config/                     # site, env, event, passes, features, gallery, promos, contact
-├── lib/                        # utils (cn), format (INR), supabase/ payments/ services/ (empty)
-└── types/index.ts              # Domain types shared by UI and the future data layer
+├── lib/
+│   ├── supabase/               # browser / server / admin clients (admin is server-only)
+│   ├── payments/ services/     # (empty) Razorpay helpers, data-access layer
+│   ├── format.ts               # INR + href helpers
+│   └── utils.ts                # cn(): clsx + tailwind-merge
+├── types/
+│   ├── index.ts                # Presentational types used by the UI
+│   └── database.ts             # Generated-shape Supabase types for every table
+└── assets/images/              # Original generated artwork
+
+supabase/
+├── migrations/                 # 1) schema  2) RLS policies
+├── seed.sql                    # event, 9 nights, 5 pass categories
+└── README.md                   # how to apply, roles, what is/isn't seeded
+
+scripts/verify-db.mjs           # npm run db:verify — schema + RLS test harness
 ```
 
 ### Conventions
@@ -121,6 +137,37 @@ src/
 - Fonts self-hosted (no third-party requests), images optimised through `next/image`,
   production CSS ≈ 8 KB gzipped, all routes prerendered static.
 
+## Database (Supabase)
+
+The authoritative schema lives in `supabase/` — see **[supabase/README.md](./supabase/README.md)**
+for the full table reference, roles and setup steps.
+
+| Table | Purpose | Public read? |
+| ----- | ------- | ------------ |
+| `events` | One festival (venue, city, status) | ✅ published only |
+| `event_dates` | One night per row, with capacity | ✅ published, not cancelled |
+| `pass_categories` | Pass types + prices, per event | ✅ active only |
+| `bookings` | One booking = pass category × night | ❌ staff only |
+| `digital_passes` | QR passes issued after payment | ❌ staff only |
+| `check_ins` | Gate scan log (one row per pass, ever) | ❌ staff only |
+| `gallery` | Photo/video metadata (files in Storage) | ✅ published only |
+| `admin_users` | Auth users allow-listed as staff | ❌ admins only |
+
+Seeded: one published Jaipur event (My Village Garden), nine nights
+11–19 October 2026, and five pass categories (₹399 / ₹499 / ₹599 / ₹799 / ₹1099).
+
+**Price tampering is impossible from the client.** `bookings.subtotal`,
+`number_of_people` and `total_amount` are computed by a database trigger from
+`pass_categories`, so a forged payload cannot change what a booking costs.
+
+**There is no INSERT policy on `bookings`.** Bookings are created by server code
+using the service role after the amount is recalculated, so a browser session can
+neither fabricate a booking nor read anyone else's.
+
+```bash
+npm run db:verify   # applies migrations + seed to PostgreSQL and asserts all of the above
+```
+
 ## Environment variables
 
 See [`.env.example`](./.env.example). Copy it to `.env.local`; the values are git-ignored.
@@ -130,9 +177,9 @@ production. `src/config/env.ts` is the only module that reads `process.env`.
 | Variable                        | Scope          | Used now? | Purpose                                  |
 | ------------------------------- | -------------- | --------- | ---------------------------------------- |
 | `NEXT_PUBLIC_SITE_URL`          | client + server | yes       | Canonical/OG URLs, absolute links        |
-| `NEXT_PUBLIC_SUPABASE_URL`      | client + server | no        | Supabase project URL                     |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | client + server | no        | Supabase anon key (RLS-protected)        |
-| `SUPABASE_SERVICE_ROLE_KEY`     | server only     | no        | Admin/webhook operations — keep secret   |
+| `NEXT_PUBLIC_SUPABASE_URL`      | client + server | for DB reads | Supabase project URL                  |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | client + server | for DB reads | Supabase anon key (RLS-protected)     |
+| `SUPABASE_SERVICE_ROLE_KEY`     | **server only** | booking writes | Bypasses RLS. Guarded by `server-only` — a client import fails the build |
 | `NEXT_PUBLIC_RAZORPAY_KEY_ID`   | client + server | no        | Opens Razorpay Checkout                  |
 | `RAZORPAY_KEY_SECRET`           | server only     | no        | Creates orders, verifies signatures      |
 | `RAZORPAY_WEBHOOK_SECRET`       | server only     | no        | Verifies webhook signatures              |
@@ -152,4 +199,7 @@ production. `src/config/env.ts` is the only module that reads `process.env`.
   (`siteConfig.contact.whatsappNumber`, international format, digits only).
 - Swap the placeholder artwork in `src/assets/images/` for real event photography, and
   delete the `DemoBadge` components once sections read live data.
-- Change the festival dates/venue in `src/config/event.ts` (or, after step 3, in the DB).
+- Update the event, nights and prices in the database (or `supabase/seed.sql`) rather
+  than in the frontend — the DB is now the source of truth.
+- Create the first admin: insert a row in `admin_users` for an existing Auth user with
+  `role = 'owner'` (see supabase/README.md).

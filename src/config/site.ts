@@ -55,7 +55,7 @@ export const siteConfig = {
     whatsappNumber: "919000000000",
     phoneDisplay: "+91 90000 00000",
     email: "hello@example.com",
-    addressLines: ["Royal Garden Lawns", "Andheri West, Mumbai 400053"],
+    addressLines: ["My Village Garden", "Ajmer Road, Jaipur, Rajasthan"],
   },
 
   socials: [

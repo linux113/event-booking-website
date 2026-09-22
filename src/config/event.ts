@@ -2,20 +2,21 @@ import heroImage from "@/assets/images/hero-festival.jpg";
 import type { EventDetails, Highlight } from "@/types";
 
 /**
- * ⚠️ DEMO CONTENT.
+ * ⚠️ DEMO CONTENT — mirrors the seeded row in `supabase/seed.sql`.
  *
- * The hero event and its highlights are hard-coded placeholders so the public UI
- * can be reviewed before the database exists. In the Supabase step this file is
- * deleted and the same values are read from the `events` table — pages already
- * consume the `EventDetails` shape, so only the data source changes.
+ * These values are placeholders for the UI while it still reads from config.
+ * The authoritative record now lives in the database (`events`, `event_dates`,
+ * `pass_categories`); wiring the pages to query it is the next step, and then
+ * this file is deleted. Pages already consume the `EventDetails` shape, so only
+ * the data source changes.
  */
 export const demoEvent: EventDetails = {
   name: "Garba Nights Navratri Utsav",
   tagline: "Nine nights of garba, dandiya and non-stop beats",
   dates: "11 – 19 October 2026",
   time: "7:00 PM onwards",
-  venue: "Royal Garden Lawns",
-  location: "Andheri West, Mumbai",
+  venue: "My Village Garden",
+  location: "Jaipur, Rajasthan",
   image: heroImage,
   imageAlt:
     "Illustration of a decorated Navratri garba stage with marigold garlands, hanging lanterns and dandiya sticks",

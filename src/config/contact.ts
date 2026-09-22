@@ -37,7 +37,7 @@ export const contactChannels: readonly ContactChannel[] = [
     label: "Venue",
     value: siteConfig.contact.addressLines.join(", "),
     description: "Gates open one hour before the event start time.",
-    href: "https://maps.google.com/?q=Andheri+West+Mumbai",
+    href: "https://maps.google.com/?q=My+Village+Garden+Jaipur",
     external: true,
     icon: "map",
   },
