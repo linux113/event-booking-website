@@ -824,6 +824,144 @@ export interface Database {
         }[];
       };
       /**
+       * The operations screens (step 11): /admin/payments and /admin/passes.
+       *
+       * Same two conventions as the booking list, because an operator moving between
+       * these three screens should not have to learn a second set of rules: money,
+       * contact details and gateway ids are `null` for a caller without
+       * `bookings:view_contact`, and a filter value the schema does not recognise
+       * narrows nothing. All four are `service_role` only.
+       */
+      admin_payment_events: {
+        Args: {
+          p_query?: string | null;
+          p_outcome?: string | null;
+          p_event_type?: string | null;
+          p_from?: string | null;
+          p_to?: string | null;
+          p_include_contact?: boolean;
+          p_limit?: number;
+          p_offset?: number;
+        };
+        Returns: {
+          event_uuid: string;
+          event_id: string;
+          event_type: string;
+          outcome: string;
+          razorpay_order_id: string | null;
+          razorpay_payment_id: string | null;
+          amount_paise: number | null;
+          received_at: string;
+          processed_at: string | null;
+          booking_uuid: string | null;
+          booking_id: string | null;
+          customer_name: string | null;
+          customer_mobile: string | null;
+          booking_status: string | null;
+          payment_status: string | null;
+          total_amount: number | null;
+          currency: string | null;
+          total_count: number;
+        }[];
+      };
+      admin_payment_attention: {
+        Args: { p_include_contact?: boolean; p_limit?: number };
+        Returns: {
+          reason_code: string;
+          reason: string;
+          action: string;
+          booking_uuid: string;
+          booking_id: string;
+          customer_name: string;
+          customer_mobile: string | null;
+          booking_status: string;
+          payment_status: string;
+          total_amount: number | null;
+          currency: string;
+          razorpay_order_id: string | null;
+          razorpay_payment_id: string | null;
+          event_date: string;
+          passes_issued: number;
+          passes_active: number;
+          event_count: number;
+          created_at: string;
+          total_count: number;
+        }[];
+      };
+      admin_payment_summary: {
+        Args: { p_include_contact?: boolean };
+        Returns: {
+          events_total: number;
+          events_confirmed: number;
+          events_failed: number;
+          events_refunded: number;
+          events_ignored: number;
+          events_duplicate: number;
+          orders_awaiting: number;
+          last_received_at: string | null;
+          last_processed_at: string | null;
+          captured_paise: number | null;
+          refunded_paise: number | null;
+        }[];
+      };
+      admin_pass_list: {
+        Args: {
+          p_query?: string | null;
+          p_status?: string | null;
+          p_check_in?: string | null;
+          p_event_date_id?: string | null;
+          p_from?: string | null;
+          p_to?: string | null;
+          p_include_contact?: boolean;
+          p_limit?: number;
+          p_offset?: number;
+        };
+        Returns: {
+          pass_uuid: string;
+          pass_id: string;
+          pass_number: number;
+          pass_status: string;
+          checked_in: boolean;
+          checked_in_at: string | null;
+          valid_date: string;
+          gate: string | null;
+          admitted_by: string | null;
+          issued_at: string;
+          booking_uuid: string;
+          booking_id: string;
+          booking_status: string;
+          payment_status: string;
+          customer_name: string;
+          customer_mobile: string | null;
+          pass_name: string;
+          quantity: number;
+          number_of_people: number;
+          total_amount: number | null;
+          currency: string;
+          event_name: string;
+          start_time: string | null;
+          end_time: string | null;
+          passes_on_booking: number;
+          total_count: number;
+        }[];
+      };
+      admin_pass_summary: {
+        Args: { p_tz?: string; p_include_contact?: boolean };
+        Returns: {
+          passes_issued: number;
+          passes_active: number;
+          passes_used: number;
+          passes_cancelled: number;
+          passes_expired: number;
+          bookings_with_passes: number;
+          checked_in_total: number;
+          checked_in_today: number;
+          last_check_in_at: string | null;
+          gates_used: number;
+          passes_revenue: number | null;
+        }[];
+      };
+      /**
        * The dashboard's statistics (step 9). Every figure on /admin comes from one of
        * these four functions, so no statistic is ever summed in the browser or in
        * Node. Two conventions are visible in the types on purpose:

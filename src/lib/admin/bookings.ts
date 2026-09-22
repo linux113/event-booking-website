@@ -396,6 +396,7 @@ export function isInvertedDateRange(query: BookingQuery): boolean {
 }
 
 /** The zero-based offset the database is asked for. */
+/** The zero-based row offset a page starts at. */
 export function bookingOffset(page: number, pageSize: number = BOOKING_PAGE_SIZE): number {
   return (Math.max(1, page) - 1) * pageSize;
 }
@@ -496,6 +497,7 @@ export function csvCell(value: string | number | null | undefined): string {
   return quoteCsv(text);
 }
 
+/** Quoting and escaping, in one place: `csvCell` above is how every caller writes a cell. */
 function quoteCsv(text: string): string {
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }

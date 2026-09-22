@@ -1,6 +1,5 @@
 import "server-only";
 
-import { isSupabaseConfigured } from "@/config/env";
 import { siteConfig } from "@/config/site";
 import { can, ROLE_LABELS, type StaffRole } from "@/lib/auth/permissions";
 import {
@@ -15,10 +14,9 @@ import {
   type FilterOption,
 } from "@/lib/admin/bookings";
 import { gateNight } from "@/lib/gate/night";
-import { fail, ok, type Result, type ServiceError } from "@/lib/services/result";
-import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { getAdminClient } from "@/lib/services/admin-client";
+import { fail, ok, type Result } from "@/lib/services/result";
 import type { Database } from "@/types/database";
-import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
  * Reads for the admin area — server side only.
@@ -36,25 +34,6 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  *   3. **No service-role key ever leaves the server.** Everything here runs on the
  *      server and returns plain objects; the browser gets rendered HTML.
  */
-
-const NOT_CONFIGURED: ServiceError = {
-  kind: "not-configured",
-  message: "The admin area needs the database: add the Supabase variables and try again.",
-};
-
-function getAdminClient(): { ok: true; client: SupabaseClient<Database> } | { ok: false; error: ServiceError } {
-  if (!isSupabaseConfigured()) {
-    return { ok: false, error: NOT_CONFIGURED };
-  }
-
-  try {
-    return { ok: true, client: createSupabaseAdminClient() };
-  } catch (error) {
-    console.error("[admin] admin client unavailable:", error);
-
-    return { ok: false, error: NOT_CONFIGURED };
-  }
-}
 
 // -----------------------------------------------------------------------------
 // Dashboard

@@ -3405,6 +3405,653 @@ async function main() {
   await run("reset role;");
 
   // ---------------------------------------------------------------------------
+  section("Admin payments and passes: the gateway's record and the door list");
+  // ---------------------------------------------------------------------------
+  // Two read-only screens. What is checked here is the part a screen cannot fake: that
+  // the delivery log reports what the gateway actually sent (including the deliveries
+  // nothing could be done with), that the attention list contains exactly the rows whose
+  // payment state contradicts the rest of the row, and that the pass list knows where
+  // every pass is — without ever handing out the token that admits one.
+  const payAttentionMobile = "+919800001230";
+  const payAttentionBooking = await createBooking({
+    p_event_date_id: DASH_NIGHT,
+    p_pass_category_id: COUPLE,
+    p_customer_name: "Gateway Trouble",
+    p_customer_mobile: payAttentionMobile,
+    p_customer_email: "trouble@example.com",
+    p_quantity: 1,
+    p_number_of_people: 2,
+    p_idempotency_key: "pay-attention-1",
+  });
+
+  // The order is attached before anything looks for it: an event log searched for a
+  // null order id would be searched for nothing at all, and would answer with the log.
+  await rpc("attach_razorpay_order", {
+    p_booking_id: payAttentionBooking.booking_uuid,
+    p_razorpay_order_id: "order_ATTENTION0000001",
+  });
+  const [attentionBookingRow] = await q(`
+    select booking_id, razorpay_order_id, razorpay_payment_id, payment_status, booking_status
+      from public.bookings where id = '${payAttentionBooking.booking_uuid}';
+  `);
+  check(
+    "the attention fixture is a booking with an order and no verified payment yet",
+    attentionBookingRow.razorpay_order_id === "order_ATTENTION0000001" &&
+      attentionBookingRow.payment_status === "unpaid",
+    JSON.stringify(attentionBookingRow),
+  );
+
+  // Confirmed through the gateway's own dispatcher, so the delivery log below has a row
+  // to find and the fixture starts from a state the app genuinely produces — before this
+  // section breaks it on purpose.
+  const attentionEvent = await rpc("apply_razorpay_event", {
+    p_event_id: "evt_ATTENTION0000001",
+    p_event_type: "payment.captured",
+    p_razorpay_order_id: "order_ATTENTION0000001",
+    p_razorpay_payment_id: "pay_ATTENTION0000001",
+    p_amount_paise: payAttentionBooking.total_amount * 100,
+  });
+  check(
+    "the attention fixture is confirmed through the gateway's dispatcher, as a real payment is",
+    attentionEvent[0]?.outcome === "confirmed",
+    JSON.stringify(attentionEvent[0] ?? null),
+  );
+
+  // ---- the delivery log ---------------------------------------------------------
+  const eventsAll = await rpc("admin_payment_events", { p_include_contact: true, p_limit: 100 });
+  const [eventLedger] = await q(`select count(*)::int as n from public.payment_events;`);
+
+  check(
+    "the delivery log lists every event the gateway sent",
+    eventsAll.length === eventLedger.n && eventsAll.length > 0,
+    `${eventsAll.length} rows / ${eventLedger.n} events`,
+  );
+  check(
+    "newest delivery first",
+    eventsAll.every((row, index) => index === 0 || new Date(eventsAll[index - 1].received_at) >= new Date(row.received_at)),
+  );
+  check(
+    "each row carries what the gateway said and what the site did",
+    eventsAll.every(
+      (row) =>
+        typeof row.event_type === "string" &&
+        typeof row.outcome === "string" &&
+        typeof row.event_id === "string" &&
+        row.received_at !== null,
+    ),
+    JSON.stringify(eventsAll[0] ?? null).slice(0, 200),
+  );
+  check(
+    "and the booking it belongs to, where one can be identified",
+    eventsAll.some((row) => row.booking_id === attentionBookingRow.booking_id) &&
+      eventsAll.some((row) => row.booking_uuid !== null),
+  );
+  const unmatched = eventsAll.filter((row) => row.booking_uuid === null);
+  check(
+    "an event that matches no booking is still listed, with an honest null on every booking column",
+    unmatched.length > 0 &&
+      unmatched.every(
+        (row) =>
+          row.booking_id === null &&
+          row.customer_name === null &&
+          row.customer_mobile === null &&
+          row.total_amount === null &&
+          row.payment_status === null,
+      ),
+    `${unmatched.length} deliveries belong to no booking we hold`,
+  );
+
+  const ignoredOutcome = await rpc("admin_payment_events", { p_outcome: "ignored", p_limit: 100 });
+  check(
+    "filtering by outcome returns only that outcome",
+    ignoredOutcome.length > 0 && ignoredOutcome.every((row) => row.outcome === "ignored"),
+    `${ignoredOutcome.length} ignored`,
+  );
+  const confirmedOutcome = await rpc("admin_payment_events", { p_outcome: "confirmed", p_limit: 100 });
+  check(
+    "and a different outcome returns a different set",
+    confirmedOutcome.length > 0 &&
+      confirmedOutcome.every((row) => row.outcome === "confirmed") &&
+      !confirmedOutcome.some((row) => row.event_uuid === ignoredOutcome[0]?.event_uuid),
+  );
+  const unknownOutcome = await rpc("admin_payment_events", { p_outcome: "nonsense", p_limit: 100 });
+  check(
+    "an outcome the schema does not know narrows nothing rather than matching nothing",
+    unknownOutcome.length === eventsAll.length,
+    `${unknownOutcome.length} rows for an unknown outcome`,
+  );
+
+  const capturedOnly = await rpc("admin_payment_events", { p_event_type: "payment.captured", p_limit: 100 });
+  check(
+    "the event-type filter is exact",
+    capturedOnly.length > 0 && capturedOnly.every((row) => row.event_type === "payment.captured"),
+    capturedOnly.map((row) => row.event_type).join(", ") || "no rows",
+  );
+
+  const eventByOrderId = await rpc("admin_payment_events", {
+    p_query: attentionBookingRow.razorpay_order_id,
+    p_include_contact: true,
+    p_limit: 100,
+  });
+  check(
+    "a delivery is found by the gateway order id",
+    eventByOrderId.length > 0 && eventByOrderId.every((row) => row.booking_uuid === payAttentionBooking.booking_uuid),
+    `${eventByOrderId.length} rows`,
+  );
+  const eventByBooking = await rpc("admin_payment_events", {
+    p_query: attentionBookingRow.booking_id,
+    p_limit: 100,
+  });
+  check(
+    "and by anything about the booking it belongs to",
+    eventByBooking.length > 0 &&
+      eventByBooking.every((row) => row.booking_uuid === payAttentionBooking.booking_uuid),
+    `${eventByBooking.length} rows`,
+  );
+  const eventByMobile = await rpc("admin_payment_events", { p_query: "+91 98000 01230", p_limit: 100 });
+  check(
+    "and by the guest's mobile number, however it was typed",
+    eventByMobile.length > 0 && eventByMobile.every((row) => row.booking_uuid === payAttentionBooking.booking_uuid),
+    `${eventByMobile.length} rows`,
+  );
+  const noDigitsForNames = await rpc("admin_payment_events", { p_query: "payment.captured 2", p_limit: 100 });
+  check(
+    "a term with letters in it is never treated as a phone number",
+    noDigitsForNames.every((row) => row.booking_uuid === null || row.event_type === "payment.captured"),
+    `${noDigitsForNames.length} rows`,
+  );
+
+  const todayUtc = (await q(`select (now() at time zone 'UTC')::date::text as today;`))[0].today;
+  const tomorrowUtc = (
+    await q(`select ((now() at time zone 'UTC')::date + 1)::text as tomorrow;`)
+  )[0].tomorrow;
+  const datedFrom = await rpc("admin_payment_events", { p_from: todayUtc, p_limit: 100 });
+  const datedTo = await rpc("admin_payment_events", { p_to: tomorrowUtc, p_limit: 100 });
+  const datedFuture = await rpc("admin_payment_events", { p_from: tomorrowUtc, p_limit: 100 });
+  check(
+    "the date range is inclusive at both ends and empty outside",
+    datedFrom.length === eventsAll.length && datedTo.length > 0 && datedFuture.length === 0,
+    `${datedFrom.length} from today / ${datedFuture.length} from tomorrow`,
+  );
+
+  const eventPage = await rpc("admin_payment_events", { p_limit: 2, p_offset: 0 });
+  const eventPageTwo = await rpc("admin_payment_events", { p_limit: 2, p_offset: 2 });
+  check(
+    "the log pages without repeating a row, and every page reports the same total",
+    eventPage.length === 2 &&
+      eventPageTwo.length === 2 &&
+      !eventPage.some((row) => eventPageTwo.some((other) => other.event_uuid === row.event_uuid)) &&
+      eventPage[0].total_count === eventPageTwo[0].total_count,
+    `${eventPage[0]?.total_count ?? "?"} total`,
+  );
+
+  const eventsStaff = await rpc("admin_payment_events", { p_include_contact: false, p_limit: 100 });
+  check(
+    "the staff view of the log withholds the amount, the booking's amount and the contact details",
+    eventsStaff.length > 0 &&
+      eventsStaff.every(
+        (row) => row.amount_paise === null && row.total_amount === null && row.customer_mobile === null,
+      ) &&
+      eventsStaff.some((row) => row.booking_uuid !== null),
+    JSON.stringify(eventsStaff.find((row) => row.booking_uuid !== null) ?? {}),
+  );
+  check(
+    "but still shows what happened and to which order",
+    eventsStaff.every((row) => typeof row.outcome === "string" && typeof row.event_type === "string"),
+  );
+
+  // ---- the counts ---------------------------------------------------------------
+  const gatewaySummary = (await rpc("admin_payment_summary", { p_include_contact: true }))[0];
+  const [summaryLedger] = await q(`
+    select
+      (select count(*)::int from public.payment_events) as total,
+      (select count(*)::int from public.payment_events where outcome in ('confirmed', 'already_confirmed')) as confirmed,
+      (select count(*)::int from public.payment_events where outcome = 'failed') as failed,
+      (select count(*)::int from public.payment_events where outcome = 'refunded') as refunded,
+      (select count(*)::int from public.payment_events where outcome = 'ignored') as ignored,
+      (select count(*)::int from public.payment_events where outcome = 'duplicate') as duplicate,
+      (select coalesce(sum(amount_paise) filter (where outcome in ('confirmed', 'already_confirmed')), 0)::bigint
+         from public.payment_events) as captured,
+      (select coalesce(sum(amount_paise) filter (where outcome = 'refunded'), 0)::bigint
+         from public.payment_events) as refunded_amount,
+      (select count(*)::int from public.bookings b
+        where b.razorpay_order_id is not null and b.payment_status in ('unpaid', 'created', 'failed')) as awaiting;
+  `);
+  check(
+    "every count above the log matches the gateway rows it describes",
+    Number(gatewaySummary.events_total) === Number(summaryLedger.total) &&
+      Number(gatewaySummary.events_confirmed) === Number(summaryLedger.confirmed) &&
+      Number(gatewaySummary.events_failed) === Number(summaryLedger.failed) &&
+      Number(gatewaySummary.events_refunded) === Number(summaryLedger.refunded) &&
+      Number(gatewaySummary.events_ignored) === Number(summaryLedger.ignored) &&
+      Number(gatewaySummary.events_duplicate) === Number(summaryLedger.duplicate) &&
+      Number(gatewaySummary.orders_awaiting) === Number(summaryLedger.awaiting),
+    JSON.stringify(gatewaySummary),
+  );
+  check(
+    "the captured and refunded figures are the gateway's own amounts, not the bookings'",
+    Number(gatewaySummary.captured_paise) === Number(summaryLedger.captured) &&
+      Number(gatewaySummary.refunded_paise) === Number(summaryLedger.refunded_amount) &&
+      Number(gatewaySummary.captured_paise) > 0,
+    `${gatewaySummary.captured_paise} captured / ${gatewaySummary.refunded_paise} refunded`,
+  );
+  check(
+    "and neither sum is a booking total: they are the gateway's paise, not the site's rupees",
+    Number(gatewaySummary.captured_paise) % 100 === 0 &&
+      Number(gatewaySummary.refunded_paise) % 100 === 0 &&
+      Number(gatewaySummary.captured_paise) !==
+        Number(
+          (
+            await q(`select coalesce(sum(total_amount), 0)::int as n from public.bookings where payment_status = 'paid';`)
+          )[0].n,
+        ),
+    `${gatewaySummary.captured_paise} paise captured vs the paid bookings' rupees`,
+  );
+  const summaryStaff = (await rpc("admin_payment_summary", { p_include_contact: false }))[0];
+  check(
+    "a caller who may not see money receives no money at all, only nulls",
+    summaryStaff.captured_paise === null &&
+      summaryStaff.refunded_paise === null &&
+      Number(summaryStaff.events_total) === Number(gatewaySummary.events_total),
+    JSON.stringify(summaryStaff),
+  );
+
+  // ---- rows that contradict themselves -------------------------------------------
+  // A paid booking that holds its passes is not a contradiction either: this list is
+  // about states, not about suspicion.
+  const healthyAttention = await rpc("admin_payment_attention", { p_include_contact: true, p_limit: 100 });
+  check(
+    "a paid booking holding its pass is not listed",
+    !healthyAttention.some((row) => row.booking_uuid === payAttentionBooking.booking_uuid),
+    `${healthyAttention.length} rows need attention`,
+  );
+
+  // A state the app cannot produce (a paid booking always gets its passes) and the
+  // database does not forbid: exactly what this list exists to catch.
+  await run(`
+    delete from public.digital_passes where booking_id = '${payAttentionBooking.booking_uuid}';
+  `);
+
+  const paidNoPass = await rpc("admin_payment_attention", { p_include_contact: true, p_limit: 100 });
+  const paidNoPassRow = paidNoPass.find((row) => row.booking_uuid === payAttentionBooking.booking_uuid);
+  check(
+    "a paid booking with no pass is listed, with the reason and the action",
+    paidNoPassRow?.reason_code === "paid-no-pass" &&
+      /no pass was ever issued/i.test(paidNoPassRow.reason) &&
+      /resend|re-deliver/i.test(paidNoPassRow.action),
+    JSON.stringify(paidNoPassRow ?? null).slice(0, 200),
+  );
+  check(
+    "and the row carries the identifiers needed to act on it",
+    paidNoPassRow.booking_id === attentionBookingRow.booking_id &&
+      paidNoPassRow.razorpay_order_id === "order_ATTENTION0000001" &&
+      paidNoPassRow.customer_name === "Gateway Trouble" &&
+      Number(paidNoPassRow.total_amount) === Number(payAttentionBooking.total_amount),
+  );
+
+  // The pass put back by hand — the same shape of fixture the gate section uses — so
+  // the list's rule can be tested from both sides: it is the *absence* of a pass that
+  // is the contradiction, not a marker on some row.
+  await run(`
+    insert into public.digital_passes (booking_id, valid_date, pass_number)
+    values ('${payAttentionBooking.booking_uuid}', '${manageNightDate}'::date, 1);
+  `);
+  const afterReissue = await rpc("admin_payment_attention", { p_include_contact: true, p_limit: 100 });
+  check(
+    "a paid booking that holds a pass is no longer listed",
+    !afterReissue.some((row) => row.booking_uuid === payAttentionBooking.booking_uuid),
+    `${afterReissue.length} rows need attention`,
+  );
+
+  await rpc("refund_booking_payment", { p_razorpay_payment_id: "pay_ATTENTION0000001" });
+  await run(`
+    update public.digital_passes set status = 'active', checked_in = false, checked_in_at = null
+     where booking_id = '${payAttentionBooking.booking_uuid}';
+  `);
+  const refundedWithPass = await rpc("admin_payment_attention", { p_include_contact: true, p_limit: 100 });
+  const refundedRow = refundedWithPass.find((row) => row.booking_uuid === payAttentionBooking.booking_uuid);
+  check(
+    "a refunded booking holding an active pass is listed, and says to cancel it",
+    refundedRow?.reason_code === "refunded-with-active-pass" &&
+      Number(refundedRow.passes_active) === 1 &&
+      /cancel the pass/i.test(refundedRow.action),
+    JSON.stringify(refundedRow ?? null).slice(0, 200),
+  );
+
+  const attentionStaff = await rpc("admin_payment_attention", { p_include_contact: false, p_limit: 100 });
+  const attentionStaffRow = attentionStaff.find((row) => row.booking_uuid === payAttentionBooking.booking_uuid);
+  check(
+    "the staff view of the attention list withholds the money and the gateway ids",
+    attentionStaffRow?.total_amount === null &&
+      attentionStaffRow.razorpay_order_id === null &&
+      attentionStaffRow.customer_mobile === null &&
+      Boolean(attentionStaffRow.reason),
+    JSON.stringify(attentionStaffRow ?? null).slice(0, 200),
+  );
+
+  const attentionFiltered = await rpc("admin_payment_attention", { p_include_contact: true, p_limit: 1 });
+  check(
+    "the attention list respects its own limit while still reporting the full count",
+    attentionFiltered.length === 1 && Number(attentionFiltered[0].total_count) >= refundedWithPass.length,
+    `${attentionFiltered[0]?.total_count ?? "?"} rows need attention`,
+  );
+
+  // Put the fixture night back to a state the rest of the harness can reason about.
+  await run(`
+    update public.digital_passes set status = 'cancelled'
+     where booking_id = '${payAttentionBooking.booking_uuid}';
+  `);
+
+  // ---- the pass list ------------------------------------------------------------
+  const allPasses = await rpc("admin_pass_list", { p_include_contact: true, p_limit: 100, p_offset: 0 });
+  const [passLedger] = await q(`select count(*)::int as n from public.digital_passes;`);
+
+  check(
+    "the pass list has one row per pass there is, and says how many that is",
+    Number(allPasses[0]?.total_count) === passLedger.n && allPasses.length === Math.min(100, passLedger.n),
+    `${allPasses[0]?.total_count ?? "?"} passes / ${passLedger.n} rows in the table`,
+  );
+  check(
+    "every row carries the pass, the booking, the night and the guest",
+    allPasses.every(
+      (row) =>
+        /^PS-\d{6}$/.test(row.pass_id) &&
+        typeof row.booking_id === "string" &&
+        typeof row.valid_date === "string" &&
+        typeof row.customer_name === "string" &&
+        typeof row.pass_name === "string" &&
+        Number(row.passes_on_booking) >= 1,
+    ),
+    JSON.stringify(allPasses[0] ?? null).slice(0, 240),
+  );
+  check(
+    "the token that admits a guest is not in the list, in any column",
+    !JSON.stringify(allPasses).includes("qr_token") && !JSON.stringify(allPasses).match(/[0-9a-f]{64}/),
+    Object.keys(allPasses[0] ?? {}).join(","),
+  );
+  check(
+    "the entry record is carried on the pass that was admitted",
+    allPasses.some((row) => row.checked_in === true && row.checked_in_at !== null && row.gate !== null),
+    `${allPasses.filter((row) => row.checked_in).length} admitted`,
+  );
+
+  await run(`
+    update public.digital_passes set checked_in = true, checked_in_at = now(), status = 'used'
+     where id = (select dp.id from public.digital_passes dp
+                  join public.bookings b on b.id = dp.booking_id
+                 where b.customer_name like 'Manage %'
+                 order by dp.pass_id limit 1);
+  `);
+  const admittedPass = await rpc("admin_pass_list", { p_query: "Manage", p_include_contact: true, p_limit: 100 });
+  check(
+    "a pass that was admitted says when, where and by whom",
+    admittedPass.some((row) => row.checked_in && row.gate === "Management Test Gate" && row.admitted_by !== null),
+    `${admittedPass.filter((row) => row.checked_in).length} of ${admittedPass.length} admitted`,
+  );
+
+  const inFilter = await rpc("admin_pass_list", { p_check_in: "in", p_limit: 100 });
+  const outFilter = await rpc("admin_pass_list", { p_check_in: "out", p_limit: 100 });
+  check(
+    "the entry filter splits the list into admitted and not, with nothing in both",
+    inFilter.length > 0 &&
+      outFilter.length > 0 &&
+      inFilter.every((row) => row.checked_in) &&
+      outFilter.every((row) => !row.checked_in) &&
+      Number(inFilter[0].total_count) + Number(outFilter[0].total_count) === passLedger.n,
+    `${inFilter.length} in / ${outFilter.length} out of ${passLedger.n}`,
+  );
+  const unknownEntry = await rpc("admin_pass_list", { p_check_in: "maybe", p_limit: 100 });
+  check(
+    "an entry filter the schema does not know narrows nothing",
+    Number(unknownEntry[0]?.total_count) === passLedger.n,
+    `${unknownEntry[0]?.total_count ?? "?"} rows`,
+  );
+
+  const usedOnly = await rpc("admin_pass_list", { p_status: "used", p_limit: 100 });
+  check(
+    "the status filter follows the pass's own state",
+    usedOnly.length > 0 && usedOnly.every((row) => row.pass_status === "used"),
+    usedOnly.map((row) => row.pass_status).join(", ") || "no rows",
+  );
+  const unknownStatusFilter = await rpc("admin_pass_list", { p_status: "lost", p_limit: 100 });
+  check(
+    "a pass status the schema does not know narrows nothing rather than matching nothing",
+    Number(unknownStatusFilter[0]?.total_count) === passLedger.n,
+    `${unknownStatusFilter[0]?.total_count ?? "?"} rows`,
+  );
+
+  const passByPassId = await rpc("admin_pass_list", { p_query: allPasses[0].pass_id, p_limit: 100 });
+  check(
+    "a pass is found by its id",
+    passByPassId.length === 1 && passByPassId[0].pass_uuid === allPasses[0].pass_uuid,
+    `${passByPassId.length} rows`,
+  );
+  const passesByBooking = await rpc("admin_pass_list", { p_query: allPasses[0].booking_id, p_limit: 100 });
+  check(
+    "and by its booking reference, which brings the whole group with it",
+    passesByBooking.length === Number(allPasses[0].passes_on_booking) &&
+      passesByBooking.every((row) => row.booking_id === allPasses[0].booking_id),
+    `${passesByBooking.length} passes on ${allPasses[0].booking_id}`,
+  );
+
+  const nightFilter = await rpc("admin_pass_list", {
+    p_event_date_id: MANAGE_NIGHT,
+    p_limit: 100,
+  });
+  check(
+    "the night filter takes a night, not a date",
+    nightFilter.length > 0 &&
+      nightFilter.every((row) => new Date(row.valid_date).toISOString().slice(0, 10) === manageNightDate) &&
+      nightFilter.length < passLedger.n,
+    `${nightFilter.length} passes for ${manageNightDate} of ${passLedger.n}`,
+  );
+  const nightWithNoPasses = await rpc("admin_pass_list", { p_from: "2099-01-01", p_limit: 100 });
+  check(
+    "a date range with nothing in it returns nothing rather than everything",
+    nightWithNoPasses.length === 0,
+    `${nightWithNoPasses.length} rows`,
+  );
+
+  const passPages = await rpc("admin_pass_list", { p_limit: 3, p_offset: 0 });
+  const passPageTwo = await rpc("admin_pass_list", { p_limit: 3, p_offset: 3 });
+  check(
+    "the pass list pages without repeating a row",
+    passPages.length === 3 &&
+      passPageTwo.length === 3 &&
+      !passPages.some((row) => passPageTwo.some((other) => other.pass_uuid === row.pass_uuid)) &&
+      passPages[0].total_count === passPageTwo[0].total_count,
+    `${passPages[0]?.total_count ?? "?"} passes`,
+  );
+  check(
+    "and the passes of one booking stay together, in order",
+    passPages.every((row, index) => index === 0 || row.booking_id !== passPages[index - 1].booking_id || row.pass_number <= passPages[index - 1].pass_number),
+  );
+
+  const passListStaff = await rpc("admin_pass_list", { p_include_contact: false, p_limit: 100 });
+  check(
+    "the staff view of the door list withholds the mobile number and the amount",
+    passListStaff.length > 0 &&
+      passListStaff.every((row) => row.customer_mobile === null && row.total_amount === null) &&
+      passListStaff.every((row) => typeof row.pass_id === "string" && typeof row.checked_in === "boolean"),
+    JSON.stringify(passListStaff[0] ?? null).slice(0, 200),
+  );
+
+  // ---- the counts above the door list -------------------------------------------
+  const passSummary = (await rpc("admin_pass_summary", { p_tz: "Asia/Kolkata", p_include_contact: true }))[0];
+  const [passSummaryLedger] = await q(`
+    select
+      (select count(*)::int from public.digital_passes) as issued,
+      (select count(*)::int from public.digital_passes where status = 'active') as active,
+      (select count(*)::int from public.digital_passes where status = 'used') as used,
+      (select count(*)::int from public.digital_passes where status = 'cancelled') as cancelled,
+      (select count(*)::int from public.digital_passes where status = 'expired') as expired,
+      (select count(distinct booking_id)::int from public.digital_passes) as bookings,
+      (select count(*)::int from public.digital_passes where checked_in) as checked_in,
+      (select count(distinct ci.gate)::int from public.check_ins ci) as gates,
+      (select max(ci.checked_in_at) from public.check_ins ci) as last_at,
+      (select coalesce(sum(b.total_amount), 0)::int from public.bookings b
+        where b.payment_status = 'paid'
+          and exists (select 1 from public.digital_passes dp where dp.booking_id = b.id)) as revenue;
+  `);
+  check(
+    "every pass count matches the table it counts",
+    Number(passSummary.passes_issued) === Number(passSummaryLedger.issued) &&
+      Number(passSummary.passes_active) === Number(passSummaryLedger.active) &&
+      Number(passSummary.passes_used) === Number(passSummaryLedger.used) &&
+      Number(passSummary.passes_cancelled) === Number(passSummaryLedger.cancelled) &&
+      Number(passSummary.passes_expired) === Number(passSummaryLedger.expired) &&
+      Number(passSummary.bookings_with_passes) === Number(passSummaryLedger.bookings) &&
+      Number(passSummary.checked_in_total) === Number(passSummaryLedger.checked_in) &&
+      Number(passSummary.gates_used) === Number(passSummaryLedger.gates),
+    JSON.stringify(passSummary),
+  );
+  check(
+    "the money behind the passes is counted once per booking, not once per pass",
+    Number(passSummary.passes_revenue) === Number(passSummaryLedger.revenue) &&
+      Number(passSummary.passes_revenue) > 0,
+    `${passSummary.passes_revenue} / ${passSummaryLedger.revenue}`,
+  );
+  check(
+    "a booking with more than one pass is not counted more than once",
+    Number(passSummary.passes_revenue) <
+      Number(
+        (
+          await q(`select coalesce(sum(b.total_amount), 0)::int as n from public.bookings b
+                    join public.digital_passes dp on dp.booking_id = b.id
+                   where b.payment_status = 'paid';`)
+        )[0].n,
+      ),
+    "revenue is lower than the fan-out figure, as it must be",
+  );
+  check(
+    "check-ins today are counted in the venue's days",
+    Number(passSummary.checked_in_today) <= Number(passSummary.checked_in_total) &&
+      Number(passSummary.checked_in_today) > 0,
+    `${passSummary.checked_in_today} of ${passSummary.checked_in_total}`,
+  );
+  check(
+    "the last entry is the newest one written",
+    passSummary.last_check_in_at !== null &&
+      new Date(passSummary.last_check_in_at).getTime() === new Date(passSummaryLedger.last_at).getTime(),
+  );
+  const passSummaryStaff = (await rpc("admin_pass_summary", { p_include_contact: false }))[0];
+  check(
+    "a caller who may not see money receives no figure, only a null",
+    passSummaryStaff.passes_revenue === null &&
+      Number(passSummaryStaff.passes_issued) === Number(passSummary.passes_issued),
+    JSON.stringify(passSummaryStaff),
+  );
+
+  // ---- one set of search rules, shared -------------------------------------------
+  // Escaping is checked in SQL, where a backslash means one thing: comparing escaped
+  // strings inside a JavaScript literal is a good way to test the test.
+  const escapedPattern = await q(`
+    select public.admin_search_pattern('50%_off') = '50\\%\\_off' as percent_and_underscore,
+           public.admin_search_pattern('%') = '\\%' as only_wildcard,
+           public.admin_search_pattern('  padded  ') = 'padded' as trimmed,
+           public.admin_search_pattern(left('x' || repeat('y', 200), 200)) = left('x' || repeat('y', 200), 64) as capped;
+  `);
+  check(
+    "the search helpers escape LIKE wildcards, trim, and cap a term",
+    escapedPattern[0].percent_and_underscore === true &&
+      escapedPattern[0].only_wildcard === true &&
+      escapedPattern[0].trimmed === true &&
+      escapedPattern[0].capped === true,
+    JSON.stringify(escapedPattern[0]),
+  );
+  check(
+    "and decide whether a term is a phone number at all",
+    (await q(`select public.admin_search_digits('98123 45678') as d,
+                     public.admin_search_digits('Gate 4') as words,
+                     public.admin_search_digits('42') as short;`))[0].d === "9812345678" &&
+      (await q(`select public.admin_search_digits('Gate 4') as words;`))[0].words === "" &&
+      (await q(`select public.admin_search_digits('42') as short;`))[0].short === "",
+  );
+  check(
+    "the booking search and the two new lists agree about a term with no digits and no letters",
+    (await rpc("admin_search_bookings", { p_query: "%%", p_limit: 5 })).length === 0 &&
+      (await rpc("admin_pass_list", { p_query: "%%", p_limit: 5 })).length === 0,
+  );
+
+  // ---- the reads are reads, and they are closed ----------------------------------
+  const operationsReads = await q(`
+    select p.proname, p.provolatile, p.prosecdef,
+           coalesce(array_to_string(p.proconfig, ','), '') as config
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public'
+       and p.proname in ('admin_payment_events', 'admin_payment_attention', 'admin_payment_summary',
+                         'admin_pass_list', 'admin_pass_summary')
+     order by p.proname;
+  `);
+  check(
+    "all five operations reads are declared stable and security definer with a pinned search_path",
+    operationsReads.length === 5 &&
+      operationsReads.every(
+        (row) => row.provolatile === "s" && row.prosecdef === true && row.config.includes("search_path=public"),
+      ),
+    JSON.stringify(operationsReads),
+  );
+
+  const operationsGrants = await q(`
+    select
+      has_function_privilege('anon', 'public.admin_payment_events(text, text, text, date, date, boolean, integer, integer)', 'execute') as events_anon,
+      has_function_privilege('authenticated', 'public.admin_payment_events(text, text, text, date, date, boolean, integer, integer)', 'execute') as events_auth,
+      has_function_privilege('service_role', 'public.admin_payment_events(text, text, text, date, date, boolean, integer, integer)', 'execute') as events_service,
+      has_function_privilege('anon', 'public.admin_pass_list(text, text, text, uuid, date, date, boolean, integer, integer)', 'execute') as passes_anon,
+      has_function_privilege('authenticated', 'public.admin_pass_list(text, text, text, uuid, date, date, boolean, integer, integer)', 'execute') as passes_auth,
+      has_function_privilege('service_role', 'public.admin_pass_list(text, text, text, uuid, date, date, boolean, integer, integer)', 'execute') as passes_service,
+      has_function_privilege('anon', 'public.admin_payment_summary(boolean)', 'execute') as summary_anon,
+      has_function_privilege('authenticated', 'public.admin_payment_summary(boolean)', 'execute') as summary_auth,
+      has_function_privilege('service_role', 'public.admin_payment_summary(boolean)', 'execute') as summary_service,
+      has_function_privilege('anon', 'public.admin_pass_summary(text, boolean)', 'execute') as pass_summary_anon,
+      has_function_privilege('authenticated', 'public.admin_pass_summary(text, boolean)', 'execute') as pass_summary_auth,
+      has_function_privilege('service_role', 'public.admin_pass_summary(text, boolean)', 'execute') as pass_summary_service,
+      has_function_privilege('anon', 'public.admin_payment_attention(boolean, integer)', 'execute') as attention_anon,
+      has_function_privilege('service_role', 'public.admin_payment_attention(boolean, integer)', 'execute') as attention_service,
+      has_function_privilege('anon', 'public.admin_search_pattern(text)', 'execute') as pattern_anon,
+      has_function_privilege('service_role', 'public.admin_search_pattern(text)', 'execute') as pattern_service;
+  `);
+  check(
+    "only the service role may read the gateway log or the pass list",
+    operationsGrants[0].events_anon === false &&
+      operationsGrants[0].events_auth === false &&
+      operationsGrants[0].events_service === true &&
+      operationsGrants[0].passes_anon === false &&
+      operationsGrants[0].passes_auth === false &&
+      operationsGrants[0].passes_service === true &&
+      operationsGrants[0].summary_anon === false &&
+      operationsGrants[0].summary_auth === false &&
+      operationsGrants[0].summary_service === true &&
+      operationsGrants[0].pass_summary_anon === false &&
+      operationsGrants[0].pass_summary_auth === false &&
+      operationsGrants[0].pass_summary_service === true &&
+      operationsGrants[0].attention_anon === false &&
+      operationsGrants[0].attention_service === true &&
+      operationsGrants[0].pattern_anon === false &&
+      operationsGrants[0].pattern_service === true,
+    JSON.stringify(operationsGrants[0]),
+  );
+
+  const anonPassList = await expectError(`set role anon; select * from public.admin_pass_list('PS-000001');`);
+  check("an anon session cannot read the pass list", anonPassList !== null, anonPassList ?? "call succeeded");
+  await run("reset role;");
+  const anonEventLog = await expectError(`set role anon; select * from public.admin_payment_events();`);
+  check("nor the gateway log", anonEventLog !== null, anonEventLog ?? "call succeeded");
+  await run("reset role;");
+
+  // A screen cannot write, whichever key it holds: the guard is still the guard.
+  const screenCannotMarkPaid = await expectError(`
+    update public.bookings set payment_status = 'paid'
+     where id = '${payAttentionBooking.booking_uuid}';
+  `);
+  check(
+    "and nothing on these screens can move a payment status, because the database still refuses the write",
+    typeof screenCannotMarkPaid === "string" && /payment_status may only change/.test(screenCannotMarkPaid),
+    screenCannotMarkPaid ?? "the update succeeded",
+  );
+
+  // ---------------------------------------------------------------------------
   section("Result");
   // ---------------------------------------------------------------------------
   console.log(`\n  ${passed} passed, ${failures.length} failed\n`);

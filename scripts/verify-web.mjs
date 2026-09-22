@@ -2406,10 +2406,11 @@ async function main() {
     adminHome.text.slice(0, 160),
   );
   check(
-    "the sections that are not built yet say so instead of linking nowhere",
-    adminHome.text.includes("Not built yet") &&
-      adminHome.text.includes("Payments") &&
-      !adminHome.html.includes('href="/admin/payments"') &&
+    "a section that exists is a link, and a section that does not says so instead",
+    adminHome.html.includes('href="/admin/payments"') &&
+      adminHome.html.includes('href="/admin/passes"') &&
+      adminHome.text.includes("Not built yet") &&
+      adminHome.text.includes("Gallery") &&
       !adminHome.html.includes('href="/admin/gallery"'),
   );
 
@@ -3655,6 +3656,662 @@ async function main() {
     bookingsLib.csvHeader(true).length > bookingsLib.csvHeader(false).length &&
       bookingsLib.bookingsToCsv([], false).split(",").length === bookingsLib.csvHeader(false).length,
     `${bookingsLib.csvHeader(false).length} staff columns / ${bookingsLib.csvHeader(true).length} admin columns`,
+  );
+
+  // ---------------------------------------------------------------------------
+  section("Payments and passes: the gateway's record, and the door list");
+  // ---------------------------------------------------------------------------
+  // Two read-only screens. What a page-level test can prove that the database checks
+  // above cannot is the part that goes wrong in practice: that the screens are closed to
+  // the wrong people, open to the right ones, that a staff member's response contains
+  // none of the values their role may not see, and that the door list a door team prints
+  // holds the rows the screen showed.
+  //
+  // The fixtures this section needs already exist: the payments section confirmed one
+  // booking through the browser and one through a webhook (which is the only path that
+  // writes a `payment_events` row), delivered a duplicate, an ignored event, a failure
+  // and a refund, and the gate section admitted real passes at a real gate.
+  const operationsLib = await import("../src/lib/admin/operations.ts");
+
+  const operationsAdmin = await signIn("admin@example.com", STAFF_PASSWORD);
+  const operationsStaff = await signIn("scanner@example.com", STAFF_PASSWORD);
+  const operationsSuper = await signIn("owner@example.com", STAFF_PASSWORD);
+  const operationsGuest = await signIn("guest@example.com", STAFF_PASSWORD);
+
+  // A season of passes: enough to prove the door list pages without gaps and that a
+  // download larger than the fetch batch is either assembled completely or honestly
+  // flagged as truncated. The bulk bookings from the previous section are unpaid, so
+  // these passes deliberately count towards the list and not towards its revenue.
+  const BULK_PASSES = BULK_ROWS;
+  await dbRun(`
+    insert into public.digital_passes (booking_id, valid_date, pass_number, created_at)
+    select b.id, '${gateToday}'::date, 1, now() - (row_number() over (order by b.customer_mobile)) * interval '1 second'
+      from public.bookings b
+     where b.customer_name like 'Bulk Fixture %'
+     order by b.customer_mobile
+     limit ${BULK_PASSES};
+  `);
+  const [bulkPassTotals] = await dbQuery(`
+    select count(*)::int as passes,
+           count(distinct dp.booking_id)::int as bookings
+      from public.digital_passes dp
+      join public.bookings b on b.id = dp.booking_id
+     where b.customer_name like 'Bulk Fixture %';
+  `);
+  const bulkPassNewest = (
+    await dbQuery(`
+      select dp.pass_id from public.digital_passes dp join public.bookings b on b.id = dp.booking_id
+       where b.customer_name like 'Bulk Fixture %' order by dp.created_at desc limit 1;
+    `)
+  )[0].pass_id;
+
+  check(
+    "the operations fixtures: a pass for every bulk booking, and more passes than one file holds",
+    bulkPassTotals.passes === BULK_PASSES &&
+      bulkPassTotals.bookings === BULK_PASSES &&
+      BULK_PASSES > operationsLib.PASS_EXPORT_MAX_ROWS,
+    `${bulkPassTotals.passes} passes on ${bulkPassTotals.bookings} bookings, cap ${operationsLib.PASS_EXPORT_MAX_ROWS}`,
+  );
+
+  // ---- who may look --------------------------------------------------------------
+  for (const path of ["/admin/payments", "/admin/passes", "/admin/passes/export"]) {
+    const anonymous = await adminHtml(path, null);
+
+    check(
+      `a signed-out visitor is sent to the sign-in screen from ${path}`,
+      anonymous.status === 307 &&
+        String(anonymous.location ?? "").includes(`/admin/login?next=${encodeURIComponent(path)}`),
+      `${anonymous.status} ${anonymous.location ?? ""}`,
+    );
+  }
+
+  const passesForGuest = await adminHtml("/admin/passes", operationsGuest.cookie);
+  const exportForGuest = await adminFile("/admin/passes/export", operationsGuest.cookie);
+  check(
+    "a signed-in visitor who is not staff gets the same nothing from both screens",
+    passesForGuest.status === 307 &&
+      String(passesForGuest.location ?? "").includes("/admin/login") &&
+      exportForGuest.status === 307 &&
+      String(exportForGuest.location ?? "").includes("/admin/login"),
+    `${passesForGuest.status} / ${exportForGuest.status}`,
+  );
+
+  // The scanner role is real staff, and is deliberately not given either screen: the
+  // gate needs to admit passes, not to read the payment log or the guest list.
+  const paymentsForStaff = await adminHtml("/admin/payments", operationsStaff.cookie);
+  const passesForStaff = await adminHtml("/admin/passes", operationsStaff.cookie);
+  check(
+    "a scanner is sent away from both screens, told why, and given somewhere to go",
+    paymentsForStaff.status === 307 &&
+      String(paymentsForStaff.location ?? "").includes("denied=payments%3Aview") &&
+      passesForStaff.status === 307 &&
+      String(passesForStaff.location ?? "").includes("denied=passes%3Aview"),
+    `${paymentsForStaff.status} ${paymentsForStaff.location ?? ""} / ${passesForStaff.location ?? ""}`,
+  );
+  check(
+    "and the redirect carries no payment or pass data at all",
+    !paymentsForStaff.html.includes("payment_events") && !passesForStaff.html.includes("PS-0"),
+  );
+
+  // ---- the payments screen -------------------------------------------------------
+  const paymentsPage = await adminHtml("/admin/payments", operationsAdmin.cookie);
+  const [gatewayTotals] = await dbQuery(`
+    select count(*)::int as events,
+           count(*) filter (where outcome = 'already_confirmed')::int as already,
+           count(*) filter (where outcome = 'duplicate')::int as duplicates,
+           count(*) filter (where outcome = 'ignored')::int as ignored,
+           count(*) filter (where outcome = 'failed')::int as failed,
+           count(*) filter (where outcome = 'refunded')::int as refunded,
+           (select count(*)::int from public.bookings
+             where razorpay_order_id is not null and payment_status <> 'paid') as awaiting
+      from public.payment_events;
+  `);
+  const [webhookBookingRow] = await dbQuery(
+    `select booking_id, razorpay_order_id, razorpay_payment_id, total_amount, payment_status
+       from public.bookings where customer_mobile = $1`,
+    [MOBILE_WEBHOOK],
+  );
+  const deliveredEvents = await dbQuery(
+    `select event_id, event_type, outcome from public.payment_events order by received_at desc limit 20`,
+  );
+  const deliveredOutcomes = [...new Set(deliveredEvents.map((row) => row.outcome))];
+
+  check(
+    "the payments screen opens for an admin",
+    paymentsPage.status === 200 && paymentsPage.text.includes("Delivery log"),
+    `${paymentsPage.status}`,
+  );
+  check(
+    "it shows the gateway's own totals, counted from the deliveries it recorded",
+    paymentsPage.text.includes(String(gatewayTotals.events)) &&
+      paymentsPage.text.includes(String(gatewayTotals.failed)) &&
+      paymentsPage.text.includes(String(gatewayTotals.refunded + gatewayTotals.ignored + gatewayTotals.duplicates)) &&
+      paymentsPage.text.includes(String(gatewayTotals.awaiting)),
+    JSON.stringify(gatewayTotals),
+  );
+  check(
+    "the delivery log names the events the gateway actually sent, id and all",
+    deliveredEvents.length > 0 &&
+      deliveredEvents.every(
+        (row) => paymentsPage.html.includes(row.event_id) && paymentsPage.html.includes(row.event_type),
+      ),
+    `${deliveredEvents.length} deliveries: ${deliveredEvents.map((row) => row.event_type).join(", ")}`,
+  );
+  check(
+    "each delivery is attributed to the booking it belongs to, with the gateway ids",
+    paymentsPage.text.includes(webhookBookingRow.razorpay_order_id) &&
+      paymentsPage.text.includes(webhookBookingRow.razorpay_payment_id) &&
+      paymentsPage.text.includes(webhookBookingRow.booking_id),
+  );
+  check(
+    "the outcome the site recorded is on every row, in words rather than as the enum",
+    deliveredOutcomes.every((outcome) => paymentsPage.text.includes(operationsLib.outcomeLabel(outcome))),
+    deliveredOutcomes.join(", "),
+  );
+  check(
+    "the payments screen is not indexable, and is a page rather than a redirect",
+    /noindex/.test(paymentsPage.html) && paymentsPage.status === 200,
+  );
+
+  const paymentsStaffView = await adminHtml("/admin/payments", operationsSuper.cookie);
+  check(
+    "a super admin sees the same log",
+    paymentsStaffView.status === 200 && paymentsStaffView.text.includes(webhookBookingRow.booking_id),
+    `${paymentsStaffView.status}`,
+  );
+
+  // ---- the payments screen cannot write ------------------------------------------
+  // The one control the brief forbids, checked as a fact rather than as an intention:
+  // posting to the payment endpoints from an admin session still cannot mark anything
+  // paid, because the only writer is a verified gateway event.
+  const [paidBookingRow] = await dbQuery(
+    `select booking_id, razorpay_order_id, payment_status from public.bookings where customer_mobile = $1`,
+    [MOBILE_PAID],
+  );
+  const passesBeforeForgery = await passesFor(MOBILE_PAID);
+  const forgedMarkPaid = await postJson("/api/payment/verify", {
+    razorpay_order_id: paidBookingRow.razorpay_order_id,
+    razorpay_payment_id: "pay_FORGED0000000001",
+    razorpay_signature: "0".repeat(64),
+  });
+  const afterForged = await bookingRow(paidBookingRow.booking_id);
+  check(
+    "a hand-written payment verification is refused, and the booking is exactly as the gateway left it",
+    forgedMarkPaid.status === 400 &&
+      afterForged.payment_status === paidBookingRow.payment_status &&
+      afterForged.razorpay_payment_id !== "pay_FORGED0000000001" &&
+      (await passesFor(MOBILE_PAID)) === passesBeforeForgery,
+    `status ${forgedMarkPaid.status}, payment ${afterForged.payment_status}, ${passesBeforeForgery} passes`,
+  );
+
+  // ---- attention -----------------------------------------------------------------
+  const [attentionCandidate] = await dbQuery(`
+    select b.id, b.booking_id, b.customer_mobile
+      from public.bookings b
+     where b.payment_status = 'paid'
+       and exists (select 1 from public.digital_passes dp where dp.booking_id = b.id)
+     order by b.created_at desc
+     limit 1;
+  `);
+  const candidatePasses = await dbQuery(
+    `select id, pass_id from public.digital_passes where booking_id = $1 order by pass_number`,
+    [attentionCandidate.id],
+  );
+  await dbQuery(`delete from public.digital_passes where booking_id = $1`, [attentionCandidate.id]);
+
+  const attentionBefore = await dbQuery(`
+    select reason_code, count(*)::int as n from public.admin_payment_attention(true, 50) group by reason_code order by reason_code;
+  `);
+  const attentionTotalBefore = (
+    await dbQuery(`select count(*)::int as n from public.admin_payment_attention(true, 50)`)
+  )[0].n;
+  const paymentsAttention = await adminHtml("/admin/payments", operationsAdmin.cookie);
+  check(
+    "a paid booking that lost its pass is listed, with the reason and the fix",
+    paymentsAttention.html.includes(attentionCandidate.booking_id) &&
+      paymentsAttention.text.includes("Paid, but no pass was ever issued") &&
+      paymentsAttention.text.includes("Re-deliver the gateway event") &&
+      paymentsAttention.text.includes("Needs attention"),
+    `on page: ${paymentsAttention.text.includes(attentionCandidate.booking_id)} · reason: ${paymentsAttention.text.includes("Paid, but no pass was ever issued")}`,
+  );
+  check(
+    "and it sits beside the contradictions the database already held, not instead of them",
+    attentionBefore.some((row) => row.reason_code === "event-ignored") &&
+      attentionBefore.some((row) => row.reason_code === "paid-no-pass") &&
+      paymentsAttention.text.includes("A gateway event we could not act on"),
+    attentionBefore.map((row) => `${row.reason_code}:${row.n}`).join(" "),
+  );
+
+  // One row per pass it had, each with the id it had, and the token the table generates
+  // for every real pass (64 hex characters, from the column's own default).
+  for (const [index, pass] of candidatePasses.entries()) {
+    await dbQuery(
+      `insert into public.digital_passes (booking_id, pass_id, valid_date, pass_number)
+       values ($1, $2, $3::date, $4)`,
+      [attentionCandidate.id, pass.pass_id, gateToday, index + 1],
+    );
+  }
+  const paymentsHealthy = await adminHtml("/admin/payments", operationsAdmin.cookie);
+  const attentionAfter = await dbQuery(`
+    select reason_code, count(*)::int as n from public.admin_payment_attention(true, 50) group by reason_code;
+  `);
+  const attentionTotalAfter = (
+    await dbQuery(`
+      select count(*)::int as n from public.admin_payment_attention(true, 50)
+       where booking_id = '${attentionCandidate.booking_id}'
+    `)
+  )[0].n;
+  check(
+    "and it is gone from the list once the pass is back, because the list reports states and not suspicions",
+    !paymentsHealthy.html.includes(attentionCandidate.booking_id) &&
+      attentionTotalAfter === 0 &&
+      attentionBefore.some((row) => row.reason_code === "paid-no-pass" && row.n >= 2) &&
+      attentionAfter.some((row) => row.reason_code === "paid-no-pass" && row.n === 1),
+    `${attentionAfter.map((row) => `${row.reason_code}:${row.n}`).join(" ")} (was ${attentionTotalBefore} rows)`,
+  );
+
+  // ---- the pass list -------------------------------------------------------------
+  const passesPage = await adminHtml("/admin/passes", operationsAdmin.cookie);
+  const [passTotals] = await dbQuery(`
+    select count(*)::int as passes,
+           count(*) filter (where checked_in)::int as admitted,
+           (select count(*)::int from public.digital_passes where status = 'used')::int as used
+      from public.digital_passes;
+  `);
+  const [checksumPass] = await dbQuery(
+    `select dp.id, dp.pass_id, dp.qr_token, b.booking_id, b.customer_name, b.customer_mobile, b.total_amount
+       from public.digital_passes dp join public.bookings b on b.id = dp.booking_id
+      where b.customer_mobile = $1 order by dp.pass_number limit 1`,
+    ["+919800000401"],
+  );
+
+  // The season of bulk passes fills the first page, so the checks about what a *row*
+  // says are made on the row itself: the pass looked up the way a door team looks one up.
+  const focusedPasses = await adminHtml(`/admin/passes?q=${encodeURIComponent(checksumPass.pass_id)}`, operationsAdmin.cookie);
+  check(
+    "the pass list opens for an admin and reports how many passes there are",
+    passesPage.status === 200 &&
+      passesPage.text.includes(String(passTotals.passes)) &&
+      passesPage.text.includes(bookingsLib.pageSummary(1, operationsLib.OPERATIONS_PAGE_SIZE, passTotals.passes) ?? "impossible"),
+    `${passesPage.status} / ${passTotals.passes} passes`,
+  );
+  check(
+    "a pass is shown with its booking, its guest, its night and whether it is in",
+    focusedPasses.status === 200 &&
+      focusedPasses.text.includes(checksumPass.pass_id) &&
+      focusedPasses.text.includes(checksumPass.booking_id) &&
+      focusedPasses.text.includes(checksumPass.customer_name) &&
+      focusedPasses.text.includes(checksumPass.customer_mobile) &&
+      focusedPasses.text.includes(format.formatEventDate(gateToday)) &&
+      focusedPasses.text.includes("Admitted"),
+    contextAround(focusedPasses.text, checksumPass.pass_id),
+  );
+  check(
+    "the pass list says how many passes the booking holds, so a group is a group",
+    focusedPasses.text.includes("1 of 2") && focusedPasses.text.includes(`Page 1 of 1`),
+    contextAround(focusedPasses.text, "1 of 2"),
+  );
+
+  const tokenInList = await adminHtml(`/admin/passes?q=${encodeURIComponent(checksumPass.pass_id)}`, operationsAdmin.cookie);
+  check(
+    "the token that admits a guest is nowhere in the list, not even for the pass asked for by id",
+    !tokenInList.html.includes(checksumPass.qr_token) &&
+      !tokenInList.html.includes("qr_token") &&
+      !tokenInList.text.includes(checksumPass.qr_token),
+    `${checksumPass.pass_id} (token length ${checksumPass.qr_token.length})`,
+  );
+  check(
+    "and the page says why it is not there rather than leaving it out silently",
+    tokenInList.text.includes("Pass tokens are never included"),
+  );
+
+  // ---- who the withheld view is for ----------------------------------------------
+  // The scanner's screen is never rendered, because the scanner never gets there. The
+  // rule is checked where it is actually decided — the permission matrix the guards,
+  // the pages and the database all read — and the withheld shape itself is checked in
+  // verify-db, against the two functions these pages call.
+  const permissionsLib = await import("../src/lib/auth/permissions.ts");
+  check(
+    "only the roles that may see contact details may see these screens at all",
+    permissionsLib.can("staff", "passes:view") === false &&
+      permissionsLib.can("staff", "payments:view") === false &&
+      permissionsLib.can("admin", "passes:view") === true &&
+      permissionsLib.can("admin", "bookings:view_contact") === true &&
+      permissionsLib.can("super_admin", "payments:view") === true,
+    JSON.stringify({
+      staff: permissionsLib.permissionsFor("staff"),
+      admin: permissionsLib.permissionsFor("admin"),
+    }),
+  );
+
+  // ---- search and filters --------------------------------------------------------
+  const passesPageFor = (filters, cookie = operationsAdmin.cookie) => adminHtml(`/admin/passes?${filters}`, cookie);
+
+  const byPassId = await passesPageFor(`q=${encodeURIComponent(checksumPass.pass_id)}`);
+  check(
+    "a pass is found by the id printed on it, and nothing else is",
+    byPassId.text.includes(checksumPass.pass_id) &&
+      !byPassId.text.includes(bulkPassNewest) &&
+      byPassId.text.includes(bookingsLib.pageSummary(1, operationsLib.OPERATIONS_PAGE_SIZE, 1) ?? "impossible"),
+    bookingsLib.pageSummary(1, operationsLib.OPERATIONS_PAGE_SIZE, 1),
+  );
+
+  const byGuest = await passesPageFor(`q=${encodeURIComponent("nisha rao")}`);
+  check("and by the guest's name, however it is typed", byGuest.text.includes(checksumPass.pass_id));
+
+  const byMobile = await passesPageFor(`q=${encodeURIComponent("+91 98000 00401")}`);
+  check("and by the number the guest booked with", byMobile.text.includes(checksumPass.pass_id));
+
+  const byBooking = await passesPageFor(`q=${encodeURIComponent(checksumPass.booking_id)}`);
+  const bookingPasses = Number(
+    (await dbQuery(`select count(*)::int as n from public.digital_passes where booking_id = $1`, [
+      (await dbQuery(`select id from public.bookings where booking_id = $1`, [checksumPass.booking_id]))[0].id,
+    ]))[0].n,
+  );
+  check(
+    "a booking reference brings the whole group's passes with it",
+    byBooking.text.includes(checksumPass.pass_id) &&
+      byBooking.text.includes(bookingsLib.pageSummary(1, operationsLib.OPERATIONS_PAGE_SIZE, bookingPasses) ?? "impossible"),
+    bookingsLib.pageSummary(1, operationsLib.OPERATIONS_PAGE_SIZE, bookingPasses),
+  );
+
+  const nightFiltered = await passesPageFor(`night=${GATE_TONIGHT}`);
+  const [nightCount] = await dbQuery(
+    `select count(*)::int as n from public.digital_passes where valid_date = $1::date`,
+    [gateToday],
+  );
+  check(
+    "the night filter takes a night, and the screen reports that night's own total",
+    nightFiltered.text.includes(
+      bookingsLib.pageSummary(1, operationsLib.OPERATIONS_PAGE_SIZE, nightCount.n) ?? "impossible",
+    ) && nightCount.n < passTotals.passes,
+    `${nightCount.n} passes tonight of ${passTotals.passes}`,
+  );
+
+  const admittedTonight = Number(
+    (
+      await dbQuery(
+        `select count(*)::int as n from public.digital_passes where valid_date = $1::date and checked_in`,
+        [gateToday],
+      )
+    )[0].n,
+  );
+  const admittedOnly = await passesPageFor(`checkin=in&night=${GATE_TONIGHT}`);
+  check(
+    "the entry filter finds the passes that have been admitted",
+    admittedOnly.text.includes(checksumPass.pass_id) &&
+      admittedOnly.text.includes(
+        bookingsLib.pageSummary(1, operationsLib.OPERATIONS_PAGE_SIZE, admittedTonight) ?? "impossible",
+      ),
+    `${admittedTonight} admitted tonight of ${passTotals.admitted} overall`,
+  );
+
+  const notAdmitted = await passesPageFor(`checkin=out&night=${GATE_TONIGHT}`);
+  check(
+    "and its opposite finds the ones that have not, splitting the night exactly in two",
+    notAdmitted.text.includes(
+      bookingsLib.pageSummary(1, operationsLib.OPERATIONS_PAGE_SIZE, nightCount.n - admittedTonight) ?? "impossible",
+    ) && !notAdmitted.html.includes(checksumPass.pass_id),
+    `${admittedTonight} in / ${nightCount.n - admittedTonight} not, of ${nightCount.n} tonight`,
+  );
+
+  const junkPassFilters = await passesPageFor("status=lost&checkin=maybe&night=not-a-uuid&from=2026-02-31&page=-3");
+  check(
+    "filters the schema does not know narrow nothing instead of matching nothing",
+    junkPassFilters.status === 200 &&
+      junkPassFilters.text.includes(
+        bookingsLib.pageSummary(1, operationsLib.OPERATIONS_PAGE_SIZE, passTotals.passes) ?? "impossible",
+      ),
+    `${junkPassFilters.status}`,
+  );
+
+  const passFiltersPeeking = await passesPageFor(
+    `q=${encodeURIComponent(checksumPass.pass_id)}&includeContact=false&withContact=0&p_include_contact=false&contact=no`,
+  );
+  check(
+    "the role decides what is shown: asking the page to hide contact details does not hide them either",
+    passFiltersPeeking.status === 200 &&
+      passFiltersPeeking.text.includes(checksumPass.customer_mobile) &&
+      passFiltersPeeking.text.includes(checksumPass.customer_name),
+    contextAround(passFiltersPeeking.text, checksumPass.pass_id),
+  );
+
+  // ---- paging a season of passes --------------------------------------------------
+  const passPages = operationsLib.operationsPageCount(passTotals.passes);
+  const firstPassPage = await passesPageFor("page=1");
+  const lastPassPage = await passesPageFor(`page=${passPages}`);
+
+  check(
+    "paging a season of passes reports the size of the whole match, not of the page",
+    firstPassPage.text.includes(
+      bookingsLib.pageSummary(1, operationsLib.OPERATIONS_PAGE_SIZE, passTotals.passes) ?? "impossible",
+    ) && firstPassPage.text.includes(`Page 1 of ${passPages}`),
+    `${passPages} pages`,
+  );
+  check(
+    "the last page holds the remainder and does not repeat the first",
+    lastPassPage.status === 200 &&
+      !lastPassPage.text.includes(bulkPassNewest) &&
+      lastPassPage.text.includes(
+        bookingsLib.pageSummary(passPages, operationsLib.OPERATIONS_PAGE_SIZE, passTotals.passes) ?? "impossible",
+      ),
+    bookingsLib.pageSummary(passPages, operationsLib.OPERATIONS_PAGE_SIZE, passTotals.passes),
+  );
+  const pastTheEnd = await passesPageFor("page=9999");
+  check(
+    "a page past the end says so — it does not pretend the event has no passes",
+    pastTheEnd.status === 200 &&
+      pastTheEnd.text.includes("That page is past the end of the list") &&
+      pastTheEnd.text.includes(String(passTotals.passes)) &&
+      pastTheEnd.text.includes("Back to the first page"),
+    pastTheEnd.text.replace(/\s+/g, " ").slice(-260),
+  );
+  const pastTheEndFiltered = await passesPageFor(`q=${encodeURIComponent("Bulk Fixture")}&page=9999`);
+  check(
+    "and a filtered page past the end offers to clear the filters instead",
+    pastTheEndFiltered.text.includes("No passes match these filters") &&
+      pastTheEndFiltered.text.includes("Clear them"),
+    contextAround(pastTheEndFiltered.text, "past the end"),
+  );
+
+  const paymentsPastTheEnd = await adminHtml("/admin/payments?page=9999", operationsAdmin.cookie);
+  check(
+    "the delivery log says the same about a page past its end",
+    paymentsPastTheEnd.status === 200 &&
+      paymentsPastTheEnd.text.includes("That page is past the end of the log") &&
+      paymentsPastTheEnd.text.includes(String(gatewayTotals.events)) &&
+      paymentsPastTheEnd.text.includes("Back to the newest"),
+    contextAround(paymentsPastTheEnd.text, "past the end"),
+  );
+
+  // ---- the door list as a file ----------------------------------------------------
+  const doorListAdmin = await adminFile("/admin/passes/export", operationsAdmin.cookie);
+  const doorHeader = csvLines(doorListAdmin.body)[0].split(",");
+  const doorRows = csvLines(doorListAdmin.body).slice(1);
+
+  check(
+    "the door list is served as a dated CSV file, not as a page",
+    doorListAdmin.status === 200 &&
+      String(doorListAdmin.headers.get("content-type")).startsWith("text/csv") &&
+      String(doorListAdmin.headers.get("content-disposition")).includes("passes-") &&
+      String(doorListAdmin.headers.get("cache-control")).includes("no-store"),
+    `${doorListAdmin.status} ${doorListAdmin.headers.get("content-disposition")}`,
+  );
+  check(
+    "the header row names the columns a door team works from",
+    doorHeader.includes("Pass ID") &&
+      doorHeader.includes("Pass Number") &&
+      doorHeader.includes("Passes On Booking") &&
+      doorHeader.includes("Booking ID") &&
+      doorHeader.includes("Customer") &&
+      doorHeader.includes("Valid Date") &&
+      doorHeader.includes("Checked In") &&
+      doorHeader.includes("Checked In At") &&
+      doorHeader.includes("Gate") &&
+      doorHeader.includes("Admitted By") &&
+      doorHeader.includes("Mobile") &&
+      doorHeader.includes("Amount"),
+    doorHeader.join(","),
+  );
+  check(
+    "and there is no column for the token that admits a pass",
+    !doorHeader.some((header) => /token|qr/i.test(header)) &&
+      !doorListAdmin.body.includes(checksumPass.qr_token) &&
+      !doorListAdmin.headers.get("x-export-columns")?.includes("token"),
+    doorHeader.join(","),
+  );
+  check(
+    "the file is capped, and the cap is reported rather than applied in silence",
+    doorListAdmin.headers.get("x-export-truncated") === "true" &&
+      doorListAdmin.headers.get("x-export-rows") === String(operationsLib.PASS_EXPORT_MAX_ROWS) &&
+      doorRows.length === operationsLib.PASS_EXPORT_MAX_ROWS,
+    `${doorListAdmin.headers.get("x-export-rows")} rows, truncated=${doorListAdmin.headers.get("x-export-truncated")}`,
+  );
+  check(
+    "and the file says the same thing about itself as the screen does",
+    doorListAdmin.body.includes("Bulk Fixture") || doorListAdmin.body.includes("PS-0"),
+  );
+
+  const doorListTonight = await adminFile(`/admin/passes/export?night=${GATE_TONIGHT}&checkin=in`, operationsAdmin.cookie);
+  const tonightLines = csvLines(doorListTonight.body);
+  check(
+    "an export carries the filters it was asked with, and only those rows",
+    doorListTonight.headers.get("x-export-truncated") === "false" &&
+      Number(doorListTonight.headers.get("x-export-rows")) === admittedTonight &&
+      tonightLines.length === admittedTonight + 1,
+    `${doorListTonight.headers.get("x-export-rows")} rows / header ${tonightLines[0].slice(0, 40)}`,
+  );
+  const admittedAt = (
+    await dbQuery(
+      `select dp.checked_in_at from public.digital_passes dp join public.bookings b on b.id = dp.booking_id
+        where b.customer_mobile = $1 and dp.checked_in order by dp.checked_in_at limit 1`,
+      ["+919800000401"],
+    )
+  )[0]?.checked_in_at;
+  check(
+    "the admitted passes are the ones in the file, with their gate and the time they came in",
+    doorListTonight.body.includes(checksumPass.pass_id) &&
+      doorListTonight.body.includes("Gate B") &&
+      doorListTonight.body.includes("Gate Night Scanner") &&
+      doorListTonight.body.includes(new Date(admittedAt).toISOString().slice(0, 10)) &&
+      doorListTonight.body.includes("yes"),
+    `${checksumPass.pass_id} admitted ${String(admittedAt)}`,
+  );
+  check(
+    "a row is one line: a guest's name with a comma in it cannot break the file",
+    tonightLines.every((line) => (line.match(/"/g) ?? []).length % 2 === 0),
+  );
+
+  // Staff may not read the pass list at all, and the export route says so rather than
+  // returning an empty file that looks like "no passes".
+  const doorListStaff = await adminFile("/admin/passes/export", operationsStaff.cookie);
+  check(
+    "a scanner is refused the door list as a file, in words rather than as an empty file",
+    doorListStaff.status === 307 && String(doorListStaff.location ?? "").startsWith("/admin?"),
+    `${doorListStaff.status} ${doorListStaff.location ?? ""}`,
+  );
+  const doorListAnonymous = await adminFile("/admin/passes/export", null);
+  check(
+    "and a signed-out request is refused before any query runs",
+    doorListAnonymous.status === 307 || doorListAnonymous.status === 401,
+    `${doorListAnonymous.status}`,
+  );
+
+  // ---- the roles that read the same screens --------------------------------------
+  const operationsMatrix = await dbQuery(`
+    select
+      has_function_privilege('anon', 'public.admin_pass_list(text, text, text, uuid, date, date, boolean, integer, integer)', 'execute') as anon_passes,
+      has_function_privilege('anon', 'public.admin_payment_summary(boolean)', 'execute') as anon_summary,
+      has_function_privilege('service_role', 'public.admin_payment_attention(boolean, integer)', 'execute') as service_attention;
+  `);
+  check(
+    "the screens read through functions no browser key can call",
+    operationsMatrix[0].anon_passes === false &&
+      operationsMatrix[0].anon_summary === false &&
+      operationsMatrix[0].service_attention === true,
+    JSON.stringify(operationsMatrix[0]),
+  );
+
+  const exportShape = operationsLib.PASS_EXPORT_COLUMNS.filter((column) => column.contact).map((column) => column.header);
+  check(
+    "the columns a staff file would lose are the ones the database withholds",
+    exportShape.join(",") === "Mobile,Amount,Currency" &&
+      operationsLib.PASS_EXPORT_COLUMNS.length - exportShape.length >= 10,
+    `${exportShape.join(",")} of ${operationsLib.PASS_EXPORT_COLUMNS.length} columns`,
+  );
+  check(
+    "the door list is named for the day it was taken, so two downloads cannot be confused",
+    /^passes-\d{4}-\d{2}-\d{2}\.csv$/.test(operationsLib.passExportFileName()),
+    operationsLib.passExportFileName(),
+  );
+
+  const parsedPaymentQuery = operationsLib.parsePaymentQuery({
+    q: "  pay_ABC123  ",
+    outcome: "refunded",
+    event: "payment.refunded",
+    from: "2026-10-11",
+    to: "2026-02-31",
+    page: "-2",
+  });
+  check(
+    "the payment filters clean the term, keep what they recognise and drop what they do not",
+    parsedPaymentQuery.q === "pay_ABC123" &&
+      parsedPaymentQuery.outcome === "refunded" &&
+      parsedPaymentQuery.eventType === "payment.refunded" &&
+      parsedPaymentQuery.from === "2026-10-11" &&
+      parsedPaymentQuery.to === null &&
+      parsedPaymentQuery.page === 1 &&
+      operationsLib.isPaymentFiltered(parsedPaymentQuery),
+    JSON.stringify(parsedPaymentQuery),
+  );
+  const paymentRoundTrip = operationsLib.parsePaymentQueryString(
+    operationsLib.paymentQueryToSearchParams({ ...parsedPaymentQuery, page: 4 }),
+  );
+  check(
+    "a payments link built from a query parses back into the same query",
+    paymentRoundTrip.q === parsedPaymentQuery.q &&
+      paymentRoundTrip.outcome === "refunded" &&
+      paymentRoundTrip.eventType === "payment.refunded" &&
+      paymentRoundTrip.page === 4,
+    JSON.stringify(paymentRoundTrip),
+  );
+  const passRoundTrip = operationsLib.parsePassQueryString(
+    operationsLib.passQueryToSearchParams({
+      ...operationsLib.parsePassQuery({ q: "Nisha", night: GATE_TONIGHT, checkin: "in", status: "used" }),
+      page: 2,
+    }),
+  );
+  check(
+    "and a passes link does too, night and all",
+    passRoundTrip.q === "Nisha" &&
+      passRoundTrip.eventDateId === GATE_TONIGHT &&
+      passRoundTrip.checkIn === "in" &&
+      passRoundTrip.status === "used" &&
+      passRoundTrip.page === 2,
+    JSON.stringify(passRoundTrip),
+  );
+  check(
+    "a pass's two facts are both readable: whether it was admitted, and what its status is",
+    operationsLib.passState({ passStatus: "active", checkedIn: false }) === "Not admitted yet" &&
+      operationsLib.passState({ passStatus: "active", checkedIn: true }) === "Admitted" &&
+      operationsLib.passState({ passStatus: "used", checkedIn: true }) === "Admitted" &&
+      operationsLib.passState({ passStatus: "cancelled", checkedIn: false }) === "Cancelled" &&
+      operationsLib.passState({ passStatus: "cancelled", checkedIn: true }) === "Cancelled after entry" &&
+      operationsLib.passState({ passStatus: "expired", checkedIn: false }) === "Expired",
+  );
+  check(
+    "and an outcome the gateway invented is displayed as itself rather than as a blank",
+    operationsLib.outcomeLabel("ignored") === "ignored" &&
+      operationsLib.outcomeLabel("already_confirmed") === "confirmed" &&
+      operationsLib.outcomeLabel("something_new") === "something_new" &&
+      operationsLib.outcomeTone("confirmed") === "go" &&
+      operationsLib.outcomeTone("duplicate") === "warn" &&
+      operationsLib.outcomeTone("failed") === "stop",
+  );
+  check(
+    "paise become rupees exactly once, on the way out of the database",
+    operationsLib.paiseToRupees(109900) === 1099 && operationsLib.paiseToRupees(null) === null,
+    String(operationsLib.paiseToRupees(109900)),
   );
 
   // ---------------------------------------------------------------------------

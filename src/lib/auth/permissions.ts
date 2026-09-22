@@ -113,7 +113,7 @@ export const ADMIN_SECTIONS: readonly AdminSection[] = [
     description: "What Razorpay reported for each booking, and what went wrong.",
     href: "/admin/payments",
     permission: "payments:view",
-    built: false,
+    built: true,
   },
   {
     key: "passes",
@@ -121,7 +121,7 @@ export const ADMIN_SECTIONS: readonly AdminSection[] = [
     description: "Every issued pass, its state and when it was admitted.",
     href: "/admin/passes",
     permission: "passes:view",
-    built: false,
+    built: true,
   },
   {
     key: "dates",

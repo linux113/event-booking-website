@@ -20,8 +20,9 @@ fits within free tiers for development and small-scale launch.
 | 8 | Admin authentication — staff sign-in, three roles, protected routes, logout, booking lookup | ✅ done |
 | 9 | Admin dashboard — eight live statistics, charts, recent bookings, loading skeletons and error states | ✅ done |
 | 10 | Booking management — searchable, filterable list, one booking in full, CSV export, payment statuses that only the gateway can move | ✅ done |
-| 11 | Operations screens — publish events, capacity and dates, gallery, payments and passes | ⏳ next |
-| 11 | Hardening — rate limiting, analytics, perf budget | ⏳ |
+| 11 | Payments and passes — the gateway's own record, the rows that contradict themselves, and the door list with a CSV export | ✅ done |
+| 12 | Operations screens — publish events, capacity and dates, gallery, settings | ⏳ next |
+| 13 | Hardening — rate limiting, analytics, perf budget | ⏳ |
 
 Step 3 is two halves of one job — the Supabase schema/RLS layer, then replacing every
 hard-coded value in the UI with database reads. Both are done and verified against real
@@ -55,6 +56,9 @@ signature — never by the browser saying so.
 | `/admin/bookings` | Booking management: one search box (reference, name, mobile, email, pass ID, Razorpay payment or order ID), five filters (night range, pass, payment status, booking status, check-in status), paged results and a CSV export of whatever the filters select. One page, two views: an admin sees contact details, amounts and gateway IDs, a staff member sees the guest, the night, the pass and the check-in state |
 | `/admin/bookings/[reference]` | One booking in full: guest and contact details, night, pass, amounts, every issued pass, every gate entry with the staff member who made it, and the Razorpay events received for its order. No control anywhere on the page can change a payment status |
 | `/admin/bookings/export` | The current filters as a CSV file. Contact, amount and gateway columns are omitted entirely for a role without `bookings:view_contact` |
+| `/admin/payments` | What the gateway sent and what the site did with it: the deliveries received (`payment.captured`, `payment.failed`, `payment.refunded`, the ones deliberately ignored, the duplicates), the amounts Razorpay itself reported as captured and refunded, the bookings still waiting on a verified payment, the deliveries that belong to no booking we hold, and a list of the rows whose payment state contradicts the rest of the row — each with the reason and what to do about it. Read-only by construction: a payment status moves only when a verified gateway event says so |
+| `/admin/passes` | The door list: every issued pass with its pass number, state, booking, guest, night, pass category and entry record (when, at which gate, by whom). Search by pass ID, booking reference, guest name or mobile; filter by night, pass status, entry and validity date; paged, with a CSV of the same rows. The QR token is not on the page and cannot be asked for |
+| `/admin/passes/export` | The door list as a CSV file, with the same filters as the screen and up to 5,000 rows in one download. Token-free: a pass is admitted by scanning it, not by reading it out |
 | `/admin/settings` | The event, venue and deployment values the public site reads. Admin and super admin |
 | `/admin/staff` | Who may sign in and with which role, plus how to add somebody. Super admin only |
 | `/gallery` | Published photos and videos from the `gallery` table, grouped by album |
@@ -82,7 +86,7 @@ runs — each route renders a "Database not connected" state instead of event da
 | `npm run lint`      | ESLint (Next core-web-vitals + TypeScript rules)                   |
 | `npm run typecheck` | `next typegen && tsc --noEmit` (route types must exist first)      |
 | `npm run db:verify` | Run the migrations + seed against PostgreSQL (WASM) and assert schema, constraints and RLS |
-| `npm run verify:web` | End-to-end check against a real database: boots PostgreSQL, serves it over a PostgREST-compatible shim, calls the real services, then builds and serves the real pages and exercises the whole booking, **payment** and **gate** flow — validation, capacity, pricing, duplicate submissions, order creation, signature verification, webhooks, refunds, refresh-safe status and the live-key guard, then signs in as staff, an admin and a super admin, proves each role reaches exactly what it should and nothing else, scans a pass, admits it once, races two check-ins against the same code and refuses every kind of bad pass — payments run against a local stub gateway and staff sign-in against a local Auth double, so no credentials are needed |
+| `npm run verify:web` | End-to-end check against a real database: boots PostgreSQL, serves it over a PostgREST-compatible shim, calls the real services, then builds and serves the real pages and exercises the whole booking, **payment** and **gate** flow — validation, capacity, pricing, duplicate submissions, order creation, signature verification, webhooks, refunds, refresh-safe status and the live-key guard, then signs in as staff, an admin and a super admin, proves each role reaches exactly what it should and nothing else, scans a pass, admits it once, races two check-ins against the same code and refuses every kind of bad pass, searches and filters the booking list, the delivery log and the door list, opens one booking in full and downloads each of two CSV exports — payments run against a local stub gateway and staff sign-in against a local Auth double, so no credentials are needed |
 | `npm run check`     | typecheck → lint → build, in one command                           |
 
 ## Booking flow
@@ -364,6 +368,60 @@ own event (Dashboard → Webhooks → resend), which lands in the same signature
 path as the original. The detail page shows that evidence instead — event type, outcome,
 amount, when it was received and when it was processed.
 
+## Payments and passes (`/admin/payments`, `/admin/passes`)
+
+Two read-only screens for the two questions the booking list cannot answer: *did the money
+actually arrive?* and *who is at the door tonight?*
+
+**Payments is evidence, not controls.** The page shows the delivery log — every event the
+gateway sent, newest first, with the event type, the outcome the site recorded, the amount
+Razorpay reported, when it arrived, when it was processed, and the booking it belongs to
+where one can be identified. A signed delivery that matches no booking is *shown*, with
+every booking column null: "a payment arrived that we cannot place" is exactly the thing
+somebody has to see. Nothing on the page can move a payment status — that is the trigger
+from step 10 speaking, so the screen could not offer the button even if it wanted to. What
+it offers instead is the reason and the fix, per row: `admin_payment_attention()` lists the
+bookings whose payment state contradicts the rest of the row (paid with no pass issued,
+refunded with a pass still active, failed and holding a pass, a delivery nothing could be
+done with), each with a sentence and an action — re-deliver the gateway event, cancel the
+pass, look at the delivery. The reason and the action are decided in SQL, next to the rule
+they describe, rather than paraphrased in a component.
+
+**The captured and refunded figures are the gateway's own.** They are summed from the
+amounts in Razorpay's payloads — not from the amounts stored on our bookings — which is
+precisely why they are worth comparing against the bookings list when something looks
+wrong. The page says so in as many words.
+
+**Passes is the door list.** One row per issued pass, with its pass number and how many
+passes the booking holds, the guest and booking it belongs to, the night, the pass
+category, and the entry record: whether it has been admitted, when, at which gate, and by
+which staff account. The search takes anything a guest can read out — pass ID, booking
+reference, name, mobile — and the night filter offers the event's own nights rather than a
+date field, because "which night" is the only question anybody asks at a table. A season's
+worth of passes pages normally; a page past the end says so rather than pretending the
+event has no passes.
+
+**The token is not in the list.** `admin_pass_list()` does not select `qr_token`, there is
+no column for it in the CSV, and no parameter that would add one: a list of live
+credentials sitting behind a shared tablet is the opposite of what a token is for. A pass
+is admitted by scanning it, not by reading it out. The same reasoning keeps any
+cancel/re-admit control off the page — admitting is a scan, and cancelling happens when a
+refund does.
+
+**The door list is a file, because the gate has no wifi.** `/admin/passes/export` reads
+the same function with the same filters, so the file and the screen cannot disagree about
+which passes it holds. Unlike the booking export it deliberately covers the whole match
+rather than the current page — up to 5,000 rows, fetched in batches of 100 — because a
+door team prints it. The cap is reported in the `x-export-truncated` header rather than
+applied in silence, and for a role without `bookings:view_contact` the Mobile, Amount and
+Currency columns are absent from the header row itself.
+
+**Who may look.** Both screens need `payments:view` and `passes:view`: admin and super
+admin. A scanner — the role that exists for the gate — is sent to the dashboard with the
+permission it was missing named in the URL, and can only read the bookings list it has
+always been able to read. The export route repeats the check on the server before it
+queries anything, so a signed-out request is refused before a row is read.
+
 ## Gate check-in (`/admin/scanner`)
 
 The scanner is the only part of the site that *changes* a pass, so it is built around one
@@ -436,6 +494,11 @@ Supabase directly.
 | The booking list, its search, its filters and its paging | `admin_search_bookings()` — searching, filtering, ordering, the page slice and the count of the whole result set all happen in SQL; the contact, amount and gateway columns come back null for a role without `bookings:view_contact` |
 | One booking in full | `admin_booking_detail()` — found by booking reference, pass ID, payment ID or order ID, and returns the passes, the gate entries and the Razorpay events as JSON. It never returns `qr_token`: the credential that admits a guest is not a screen's business |
 | Whether a payment really happened | `payment_events` (received from a signature-verified webhook) plus `bookings.payment_status`, which only the payment functions may change — a trigger refuses any other write |
+| The gateway's record, delivery by delivery | `admin_payment_events()` — every event the gateway sent, newest first, each with the outcome the site recorded and the booking it belongs to where one can be identified. A delivery that matches no booking is listed with nulls rather than hidden, and the amount and contact columns come back null for a role without `bookings:view_contact` |
+| The amounts Razorpay itself reported | `admin_payment_summary()` — deliveries counted by outcome, bookings still awaiting a verified payment, and the captured/refunded totals summed from the gateway's own payloads (paise, not the site's rupees) |
+| The rows that need attention | `admin_payment_attention()` — one rule per broken invariant (paid with no pass issued, paid but not confirmed, refunded with an active pass, failed with a pass, a delivery we could not act on), each carrying its reason code, a sentence and the action that fixes it |
+| The door list, its search, its filters and its paging | `admin_pass_list()` — the search runs over pass ID, booking reference, guest name and mobile; ordering and the page slice happen in SQL and the count of the whole match comes back with every row. It never selects `qr_token` |
+| The pass counts above the door list | `admin_pass_summary()` — passes by status, admitted today in the venue's timezone, gates in use, and the money behind the passes counted **once per booking** rather than once per pass |
 | The dashboard numbers | `admin_dashboard_stats()` — counted in the database, for the venue's today |
 | The dashboard's charts | `admin_booking_series()` (a row per day, quiet days included) and `admin_pass_breakdown()` (per pass category) — both aggregated in SQL |
 | The signed-in role, at the edge | `current_staff_role()` — the caller's own role and nothing else, so the request hook can refuse before a page renders |
@@ -456,7 +519,7 @@ src/
 ├── app/                        # App Router routes (routing + composition only)
 │   ├── about/ book/ contact/ events/ gallery/ passes/   # page.tsx (+ loading.tsx skeleton)
 │   ├── admin/(auth)/login/     # staff sign-in — no admin chrome, no session needed
-│   ├── admin/(shell)/          # dashboard, scanner, bookings, settings, staff (session + role required)
+│   ├── admin/(shell)/          # dashboard, scanner, bookings, payments, passes, settings, staff (session + role required)
 │   ├── api/bookings/route.ts   # POST only: create a pending booking (no-key fallback)
 │   ├── api/payment/            # create-order, verify, webhook, status — all POST/GET server routes
 │   ├── api/staff/              # scan + check-in: staff session required, gate night decided server-side
@@ -479,12 +542,12 @@ src/
 │   └── ui/                     # Button, Card, Badge, Container, Section, EmptyState, Skeleton, ErrorState
 ├── config/                     # env.ts (only reader of process.env), site.ts, contact.ts
 ├── lib/
-│   ├── admin/                  # verdict.ts: the outcome → what the scanner says
+│   ├── admin/                  # verdict.ts (scanner wording), bookings.ts + operations.ts (list filters, paging, CSV vocabulary)
 │   ├── auth/                   # permissions.ts (roles + capabilities), guard.ts, staff.ts
 │   ├── booking/                # shared validation, idempotency keys (browser + server)
 │   ├── gate/                   # night.ts: which night the gate is working, in the venue's timezone
 │   ├── pass/                   # links, status, QR rendering (server) and QR decoding (browser)
-│   ├── services/               # events.ts, gallery.ts, bookings.ts, payments.ts, passes.ts, check-in.ts, admin.ts, result.ts
+│   ├── services/               # events.ts, gallery.ts, bookings.ts, payments.ts, passes.ts, check-in.ts, admin.ts, admin-operations.ts, result.ts
 │   ├── supabase/               # browser / server / admin clients + public.ts (memoised anon client)
 │   ├── payments/               # razorpay.ts (orders + signatures), mode.ts (test/live guard), checkout.ts (browser loader)
 │   ├── format.ts               # INR, dates, times — UTC-anchored, composed from Intl parts
@@ -497,7 +560,7 @@ src/
     └── database.ts             # Generated-shape Supabase types for every table
 
 supabase/
-├── migrations/                 # 1) schema  2) RLS  3) public data API  4) pass visibility  5) booking  6) payments  7) check-in
+├── migrations/                 # schema → RLS → public data API → pass visibility → booking → payments → check-in → roles → dashboard → booking management → payments and passes
 ├── seed.sql                    # event, 9 nights, 5 pass categories, features, highlights
 └── README.md                   # how to apply, roles, what is/isn't seeded
 

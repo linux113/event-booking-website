@@ -235,8 +235,8 @@ word on what they mean:
 
 ### Admin reads
 
-Five `service_role`-only functions back the admin area, so that the app never counts or
-filters rows by pulling a table into Node:
+A growing set of `service_role`-only functions backs the admin area, so that the app never
+counts or filters rows by pulling a table into Node:
 
 | Function | What it does |
 | -------- | ------------ |
@@ -246,6 +246,13 @@ filters rows by pulling a table into Node:
 | `admin_booking_series(p_today, p_days, p_tz, p_include_revenue)` | One row per day over the last `p_days` (1–90, default 14), **including the days with nothing in them** — a chart with gaps in it tells a different story than the data does. Per day: bookings, confirmed bookings, and paid revenue |
 | `admin_pass_breakdown(p_include_revenue)` | Every pass category — including the ones nobody bought — with its bookings, paid bookings, passes issued, people and takings, ordered biggest first |
 | `admin_recent_bookings(p_limit, p_include_contact)` | The newest bookings (1–50, default 8), joined to their night and pass. **The mobile number, email address and amount are `null` when `p_include_contact` is false** |
+| `admin_search_pattern(p_term)` | The one place the search rules live: trims, caps at 64 characters and escapes `%`, `_` and `\` so a term is a term. `admin_search_bookings`, `admin_payment_events` and `admin_pass_list` all call it, which is why a search for `%` finds nothing on every screen rather than the whole event on one | 
+| `admin_search_digits(p_term)` | The digits of a term **only when the term is a number** (no letters, at least four digits), otherwise `''`. Used to decide whether to match the mobile column, so a search for "Suite 101" does not answer with everybody whose phone number contains `101` |
+| `admin_payment_events(p_query, p_outcome, p_event_type, p_from, p_to, p_include_contact, p_limit, p_offset)` | `/admin/payments`: the delivery log, newest first, joined to the booking each delivery belongs to where one can be identified — by Razorpay order/payment ID, by booking reference, or by anything about the booking (name, mobile, email, pass ID). **A delivery that matches no booking is still listed**, with every booking column `null`; hiding it would hide the one row an operator is looking for. `p_outcome` and `p_event_type` outside the schema's vocabulary narrow nothing; `p_from`/`p_to` are inclusive against the day the delivery was **received**; `p_limit` clamps to 1–100. `amount_paise`, the booking's amount and the contact details come back `null` without `p_include_contact` |
+| `admin_payment_attention(p_include_contact, p_limit)` | The rows whose payment state contradicts the rest of the row, each as `reason_code` + `reason` + `action`: `paid-no-pass`, `paid-not-confirmed`, `refunded-with-active-pass`, `failed-with-pass`, `event-ignored`. The reason and the action are sentences decided here, beside the rule they describe, and **nothing on the screen can fix them** — a payment status is only ever moved by a verified gateway event (`PB007`), so the fix is re-delivering the event or cancelling the pass |
+| `admin_payment_summary(p_include_contact)` | The counts above the log: deliveries by outcome (`confirmed`, `already_confirmed`, `failed`, `refunded`, `ignored`, `duplicate`), the bookings still awaiting a verified payment, when the last delivery arrived and was processed, and `captured_paise`/`refunded_paise` summed from **the gateway's own payload amounts** — deliberately not from the amounts stored on our bookings, which is what makes the two comparable. Both sums are `null` without `p_include_contact` |
+| `admin_pass_list(p_query, p_status, p_check_in, p_event_date_id, p_from, p_to, p_include_contact, p_limit, p_offset)` | `/admin/passes`: the door list — one row per issued pass, with its pass number, how many passes the booking holds, the booking, the guest, the night, the pass category, the booking's own statuses, and the entry record (checked in, when, gate, and the staff member who admitted it). Ordering is `created_at desc, booking_id desc, pass_number desc`, so a booking's passes stay together and in order, and every row carries `total_count` for the whole match. Search covers pass ID, booking reference, guest name and mobile. A status or entry value outside the schema's vocabulary narrows nothing. `p_limit` clamps to 1–100. **`qr_token` is never selected** — the credential that admits a guest is not on the list, in the CSV, or in any parameter | 
+| `admin_pass_summary(p_tz, p_include_contact)` | The counts above the door list: passes by status, checked-in totals, **checked in today in the venue's timezone** (`p_tz`, not the server's), how many gates are in use, the last entry, and the money behind the passes counted **once per booking** rather than once per pass — a group of four passes does not pay four times. `passes_revenue` is `null` without `p_include_contact` |
 
 Three conventions run through the dashboard functions:
 
@@ -265,8 +272,16 @@ Three conventions run through the dashboard functions:
 rather than sitting beside it: two functions answering the same question is how a
 dashboard ends up disagreeing with itself.
 
-All five are revoked from `PUBLIC`, `anon` and `authenticated` and granted only to
-`service_role`: a leaked anon key cannot enumerate bookings or read the day's takings.
+All of them are revoked from `PUBLIC`, `anon` and `authenticated` and granted only to
+`service_role`: a leaked anon key cannot enumerate bookings, read the day's takings, list
+passes or read the gateway's delivery log.
+
+**The two operations screens are read-only by construction.** There is no function that
+marks a booking paid, cancels a pass or edits a delivery: `admin_pass_list` does not even
+select `qr_token`, and the attention list names the problem and the fix in words rather
+than offering a button that could write a payment status the trigger would refuse. The
+only writers for money and passes remain the ones described above — a verified Razorpay
+event, and a scanned token at the gate.
 
 ### Integrity rules worth knowing
 
@@ -329,7 +344,7 @@ Supabase **SQL editor**.
 | ---- | -------------- |
 | `anon` | Read published events, their nights, their pass categories (active or not), features, highlights and published gallery rows, plus per-night availability counts through `get_event_night_availability()`. Nothing else — no read or write access to bookings, passes, check-ins or admin users. |
 | `authenticated` | Same public reads. Gains admin powers only when present in `admin_users` with an active role: `is_admin()` for the management roles (super admin, admin), `is_staff()` to include gate staff, `is_super_admin()` for the bare `admin_users` access. |
-| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, the pass reads (`get_booking_passes`, `get_pass_by_token`), the gate functions (`scan_pass`, `check_in_pass`), the admin reads (`admin_search_bookings`, `admin_booking_detail`, `admin_dashboard_stats`, `admin_booking_series`, `admin_pass_breakdown`, `admin_recent_bookings`) and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
+| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, the pass reads (`get_booking_passes`, `get_pass_by_token`), the gate functions (`scan_pass`, `check_in_pass`), the admin reads (`admin_search_bookings`, `admin_booking_detail`, `admin_dashboard_stats`, `admin_booking_series`, `admin_pass_breakdown`, `admin_recent_bookings`, `admin_payment_events`, `admin_payment_attention`, `admin_payment_summary`, `admin_pass_list`, `admin_pass_summary`) and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
 
 There is deliberately **no INSERT policy on `bookings`**: bookings are created by
 server code after recalculating the amount from `pass_categories`, so the browser
