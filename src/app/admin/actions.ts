@@ -4,20 +4,24 @@ import type { Route } from "next";
 import { redirect } from "next/navigation";
 
 import type { SignInState } from "@/lib/admin/sign-in-state";
-import { findStaffMember } from "@/lib/auth/staff";
+import { findStaffMember, recordStaffLogin } from "@/lib/auth/staff";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 /**
- * Staff sign-in and sign-out.
+ * Staff sign-in.
  *
  * Two steps, and both are needed:
  *
  *   1. `signInWithPassword` — Supabase Auth decides whether the email/password pair
- *      is real. Nothing in this repository ever sees or stores a password.
+ *      is real. Nothing in this repository ever sees or stores a password hash.
  *   2. `findStaffMember` — the `admin_users` allow-list decides whether that account
- *      may work the gate. A legitimate Supabase user who is not staff is signed
- *      straight back out, so a curious customer with an account cannot poke around a
- *      staff page.
+ *      may work here, and with which role. A legitimate Supabase user who is not on
+ *      the list is signed straight back out, so a customer with an account of their
+ *      own cannot reach a single admin page.
+ *
+ * The role the app then uses comes from that database row — never from the form, and
+ * never from anything the browser sends. There is no code path in which a visitor can
+ * ask to be an admin.
  *
  * Failures return one message that is deliberately vague about *which* part was
  * wrong: there is no reason to tell an attacker whether an email exists.
@@ -30,10 +34,16 @@ const WRONG_DETAILS = "Those details did not match a staff account.";
 const NOT_STAFF = "That account is not an active staff account for this event.";
 const UNAVAILABLE = "Staff sign-in is unavailable right now: this deployment is not connected to the database.";
 
-/** Only paths on this site, so a crafted link cannot redirect somebody elsewhere. */
+/**
+ * Where to go after signing in.
+ *
+ * Admin routes only, and only same-site paths: an open redirect on a sign-in page is
+ * a phishing tool, and there is no legitimate reason for a staff member to land
+ * anywhere but here.
+ */
 function safeNext(value: unknown): string {
-  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//")) {
-    return "/admin/scanner";
+  if (typeof value !== "string" || !value.startsWith("/admin") || value.startsWith("//")) {
+    return "/admin";
   }
 
   return value;
@@ -78,21 +88,12 @@ export async function signInAction(_previous: SignInState, formData: FormData): 
     return { error: NOT_STAFF };
   }
 
+  // Best effort, and after the decision: the timestamp is a convenience on the staff
+  // page, never a condition for getting in.
+  await recordStaffLogin(staff.userId);
+
   // Outside the try/catch above and outside any handler: `redirect` throws, and the
   // destination must not be swallowed. Typed routes want a literal — `safeNext`
-  // already guaranteed it is a path on this site.
+  // already guaranteed it is an admin path on this site.
   redirect(next as Route);
-}
-
-/** Ends the session and returns to the sign-in screen. */
-export async function signOutAction(): Promise<void> {
-  try {
-    const supabase = await createSupabaseServerClient();
-
-    await supabase.auth.signOut();
-  } catch (error) {
-    console.error("[auth] staff sign-out failed:", error);
-  }
-
-  redirect("/admin/login");
 }

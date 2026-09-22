@@ -502,17 +502,25 @@ export interface Database {
     };
     Views: Record<string, never>;
     Functions: {
+      /** Any active role: super_admin, admin or staff. */
       is_staff: {
         Args: { p_user_id?: string };
         Returns: boolean;
       };
+      /** super_admin or admin — the management roles. */
       is_admin: {
         Args: { p_user_id?: string };
         Returns: boolean;
       };
-      is_owner: {
+      /** Full access, including staff and role management. */
+      is_super_admin: {
         Args: { p_user_id?: string };
         Returns: boolean;
+      };
+      /** The caller's own role, for the request hook (see `src/proxy.ts`). */
+      current_staff_role: {
+        Args: Record<string, never>;
+        Returns: string | null;
       };
       generate_booking_id: {
         Args: Record<string, never>;
@@ -683,6 +691,60 @@ export interface Database {
           remaining: number;
           is_fully_booked: boolean;
           is_bookable: boolean;
+        }[];
+      };
+      /**
+       * Admin lookups (step 8). `admin_lookup_bookings` is the staff-side search;
+       * the contact columns come back null when `p_include_contact` is false, which
+       * is how the limited (staff) view is assembled without the app ever holding
+       * the data it must not show. Both are `service_role` only.
+       */
+      admin_lookup_bookings: {
+        Args: { p_query: string; p_include_contact?: boolean; p_limit?: number };
+        Returns: {
+          booking_uuid: string;
+          booking_id: string;
+          customer_name: string;
+          customer_mobile: string | null;
+          customer_email: string | null;
+          event_name: string;
+          event_slug: string;
+          event_date: string;
+          start_time: string | null;
+          end_time: string | null;
+          pass_name: string;
+          pass_composition: string | null;
+          quantity: number;
+          number_of_people: number;
+          total_amount: number | null;
+          currency: string;
+          booking_status: string;
+          payment_status: string;
+          razorpay_order_id: string | null;
+          created_at: string;
+          passes_issued: number;
+          passes_checked_in: number;
+          check_in_times: string[] | null;
+        }[];
+      };
+      admin_dashboard_stats: {
+        Args: { p_today: string };
+        Returns: {
+          bookings_total: number;
+          bookings_paid: number;
+          bookings_pending: number;
+          bookings_refunded: number;
+          people_admitted: number;
+          passes_issued: number;
+          passes_active: number;
+          passes_used: number;
+          check_ins_today: number;
+          nights_total: number;
+          nights_upcoming: number;
+          gallery_published: number;
+          gallery_draft: number;
+          staff_active: number;
+          staff_total: number;
         }[];
       };
       /**

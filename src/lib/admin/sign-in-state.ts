@@ -11,5 +11,13 @@ export interface SignInState {
   error: string | null;
 }
 
+/**
+ * Where the sign-in screen may send somebody afterwards.
+ *
+ * Kept here so the page (server component) and the action (server function) agree
+ * without either importing the other.
+ */
+export const DEFAULT_ADMIN_PATH = "/admin";
+
 /** Before the first submit: nothing has gone wrong yet. */
 export const EMPTY_SIGN_IN_STATE: SignInState = { error: null };

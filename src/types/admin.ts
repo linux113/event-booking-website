@@ -6,8 +6,13 @@
  * including the "no" answers, which are the ones that matter at a door.
  */
 
-/** Roles from `admin_users.role`; every one of them may work the gate. */
-export type StaffRole = "owner" | "admin" | "manager" | "scanner";
+import type { StaffRole } from "@/lib/auth/permissions";
+
+/**
+ * The staff roles, re-exported from the permission model so a component never has to
+ * know about two definitions: `src/lib/auth/permissions.ts` owns them.
+ */
+export type { StaffRole } from "@/lib/auth/permissions";
 
 export interface StaffMember {
   /** `admin_users.id` — recorded on every check-in this person makes. */
@@ -19,6 +24,8 @@ export interface StaffMember {
   /** What to call them in the UI: their name, or their email if it is not set. */
   displayName: string;
   role: StaffRole;
+  /** Last time this account completed a sign-in, as reported by the database. */
+  lastLoginAt: string | null;
 }
 
 /**
@@ -75,7 +82,12 @@ export interface PassScanResult {
   checkInId: string | null;
 }
 
-export type ScanFailureKind = "invalid-input" | "not-authorized" | "not-configured" | "server-error";
+export type ScanFailureKind =
+  | "invalid-input"
+  | "not-authorized"
+  | "forbidden"
+  | "not-configured"
+  | "server-error";
 
 export interface ScanApiError {
   kind: ScanFailureKind;

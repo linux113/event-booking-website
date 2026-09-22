@@ -534,10 +534,10 @@ async function main() {
     insert into auth.users (id, email) values ('${scannerId}', 'scanner@example.com');
 
     insert into public.admin_users (user_id, email, full_name, role)
-    values ('${ownerId}', 'owner@example.com', 'Test Owner', 'owner');
+    values ('${ownerId}', 'owner@example.com', 'Test Owner', 'super_admin');
 
     insert into public.admin_users (user_id, email, role)
-    values ('${scannerId}', 'scanner@example.com', 'scanner');
+    values ('${scannerId}', 'scanner@example.com', 'staff');
   `);
 
   await run(`set request.jwt.claim.sub = '${ownerId}';`);
@@ -550,13 +550,13 @@ async function main() {
     (await asRole("authenticated", `select count(*)::int as n from public.events;`))[0].n === 2,
   );
   check(
-    "owner can read admin_users",
+    "a super admin can read admin_users",
     (await asRole("authenticated", `select count(*)::int as n from public.admin_users;`))[0].n === 2,
   );
 
   await run(`set request.jwt.claim.sub = '${scannerId}';`);
   check(
-    "scanner can read bookings (gate duty)",
+    "staff can read bookings (gate duty)",
     (await asRole("authenticated", `select count(*)::int as n from public.bookings;`))[0].n >= 2,
   );
 
@@ -571,7 +571,7 @@ async function main() {
       await run("reset role;");
     }
   })();
-  check("scanner cannot edit events", scannerEdit <= 0, `affected rows: ${scannerEdit}`);
+  check("staff cannot edit events", scannerEdit <= 0, `affected rows: ${scannerEdit}`);
 
   await run("reset request.jwt.claim.sub;");
 
@@ -1438,7 +1438,7 @@ async function main() {
   await run(`
     insert into auth.users (id, email) values ('${inactiveStaffUserId}', 'suspended@example.com');
     insert into public.admin_users (user_id, email, full_name, role, is_active)
-    values ('${inactiveStaffUserId}', 'suspended@example.com', 'Suspended Scanner', 'scanner', false);
+    values ('${inactiveStaffUserId}', 'suspended@example.com', 'Suspended Scanner', 'staff', false);
   `);
   const gateInactiveStaff = await gateScan({ p_staff_user_id: inactiveStaffUserId });
   check(
@@ -1639,6 +1639,371 @@ async function main() {
     "the second pass is still unused after every refusal",
     (await q(`select checked_in from public.digital_passes where qr_token = '${gateSecondPassToken}';`))[0]
       .checked_in === false,
+  );
+
+  // ---------------------------------------------------------------------------
+  section("Admin roles: three roles, enforced in the database");
+  // ---------------------------------------------------------------------------
+  // The allow-list is the authorisation table. These checks pin down what each role
+  // means *inside* Postgres — the app's permission model is only as good as this.
+  const roleSuperId = "aaaa0000-0000-4000-8000-000000000011";
+  const roleAdminId = "aaaa0000-0000-4000-8000-000000000012";
+  const roleStaffId = "aaaa0000-0000-4000-8000-000000000013";
+  const roleInactiveId = "aaaa0000-0000-4000-8000-000000000014";
+
+  await run(`
+    insert into auth.users (id, email) values
+      ('${roleSuperId}', 'super@example.com'),
+      ('${roleAdminId}', 'admin2@example.com'),
+      ('${roleStaffId}', 'staff2@example.com'),
+      ('${roleInactiveId}', 'inactive-super@example.com');
+
+    insert into public.admin_users (user_id, email, full_name, role) values
+      ('${roleSuperId}', 'super@example.com', 'Super One', 'super_admin'),
+      ('${roleAdminId}', 'admin2@example.com', 'Admin Two', 'admin'),
+      ('${roleStaffId}', 'staff2@example.com', 'Staff Three', 'staff');
+
+    insert into public.admin_users (user_id, email, full_name, role, is_active)
+    values ('${roleInactiveId}', 'inactive-super@example.com', 'Dormant Super', 'super_admin', false);
+  `);
+
+  const roleFlags = async (userId) =>
+    (
+      await q(`
+        select public.is_staff('${userId}'::uuid) as staff,
+               public.is_admin('${userId}'::uuid) as admin,
+               public.is_super_admin('${userId}'::uuid) as super;
+      `)
+    )[0];
+
+  const superFlags = await roleFlags(roleSuperId);
+  check(
+    "a super admin is staff, admin and super admin",
+    superFlags.staff && superFlags.admin && superFlags.super,
+    JSON.stringify(superFlags),
+  );
+
+  const adminFlags = await roleFlags(roleAdminId);
+  check(
+    "an admin is staff and admin, but not a super admin",
+    adminFlags.staff && adminFlags.admin && !adminFlags.super,
+    JSON.stringify(adminFlags),
+  );
+
+  const staffFlags = await roleFlags(roleStaffId);
+  check(
+    "staff are staff only — no management powers",
+    staffFlags.staff && !staffFlags.admin && !staffFlags.super,
+    JSON.stringify(staffFlags),
+  );
+
+  const inactiveFlags = await roleFlags(roleInactiveId);
+  check(
+    "a deactivated account holds no role at all, whatever its role column says",
+    inactiveFlags.staff === false && inactiveFlags.admin === false && inactiveFlags.super === false,
+    JSON.stringify(inactiveFlags),
+  );
+
+  // `current_staff_role()` is what the request hook asks: the caller's own role, and
+  // nothing about anybody else.
+  await run(`select set_config('request.jwt.claim.sub', '${roleSuperId}', false);`);
+  check(
+    "the caller's own role comes back when they are active staff",
+    (await q(`select public.current_staff_role() as role;`))[0].role === "super_admin",
+    (await q(`select public.current_staff_role() as role;`))[0].role ?? "null",
+  );
+
+  check(
+    "a different account sees its own role, not the previous one",
+    (await (async () => {
+      await run(`select set_config('request.jwt.claim.sub', '${roleStaffId}', false);`);
+      return q(`select public.current_staff_role() as role;`);
+    })())[0].role === "staff",
+  );
+
+  check(
+    "a deactivated account has no role to show",
+    (await (async () => {
+      await run(`select set_config('request.jwt.claim.sub', '${roleInactiveId}', false);`);
+      return q(`select public.current_staff_role() as role;`);
+    })())[0].role === null,
+  );
+
+  check(
+    "somebody with no allow-list row has no role to show",
+    (await (async () => {
+      await run(`select set_config('request.jwt.claim.sub', 'ffffffff-ffff-4fff-8fff-ffffffffffff', false);`);
+      return q(`select public.current_staff_role() as role;`);
+    })())[0].role === null,
+  );
+
+  check(
+    "a request with no session at all has no role",
+    (await (async () => {
+      await run(`select set_config('request.jwt.claim.sub', '', false);`);
+      return q(`select public.current_staff_role() as role;`);
+    })())[0].role === null,
+  );
+  const strangerFlags = await roleFlags("ffffffff-ffff-4fff-8fff-ffffffffffff");
+  check(
+    "a user who is not on the allow-list holds nothing",
+    strangerFlags.staff === false && strangerFlags.admin === false && strangerFlags.super === false,
+  );
+
+  // The old role names must be rejected outright: a row saying "owner" would
+  // otherwise be a row that no helper understands and every policy has to guess at.
+  // Each attempt gets its own auth user, so the refusal can only be the role check —
+  // and the message is asserted, so a different error cannot pass for it.
+  const legacyRoles = ["owner", "manager", "scanner", "superuser", "SUPER_ADMIN"];
+
+  for (const [index, legacyRole] of legacyRoles.entries()) {
+    const legacyUserId = `aaaa0000-0000-4000-8000-0000000000${(20 + index).toString().padStart(2, "0")}`;
+
+    // The auth user exists, so nothing here can fail on a missing parent row.
+    await run(`
+      insert into auth.users (id, email) values ('${legacyUserId}', 'legacy-${index}@example.com')
+      on conflict (id) do nothing;
+    `);
+
+    const legacyError = await expectError(`
+      insert into public.admin_users (user_id, email, role)
+      values ('${legacyUserId}', 'legacy-${index}@example.com', '${legacyRole}');
+    `);
+
+    check(
+      `the database refuses the role "${legacyRole}"`,
+      typeof legacyError === "string" && /admin_users_role_check/.test(legacyError),
+      legacyError ?? "the insert succeeded",
+    );
+  }
+
+  const defaultRoleUserId = "aaaa0000-0000-4000-8000-000000000030";
+  await run(`
+    insert into auth.users (id, email) values ('${defaultRoleUserId}', 'no-role-given@example.com')
+    on conflict (id) do nothing;
+    insert into public.admin_users (user_id, email)
+    values ('${defaultRoleUserId}', 'no-role-given@example.com');
+  `);
+  const defaultRole = (
+    await q(`select role from public.admin_users where user_id = '${defaultRoleUserId}';`)
+  )[0].role;
+  check(
+    "an allow-list row without a role is the least powerful one",
+    defaultRole === "staff",
+    defaultRole ?? "no row",
+  );
+  await run(`delete from public.admin_users where user_id = '${defaultRoleUserId}';`);
+
+  // Only a super admin may write the allow-list (the RLS policy that replaced the
+  // old owner-only one).
+  await run(`set request.jwt.claim.sub = '${roleAdminId}';`);
+  const adminAllowListWrite = await (async () => {
+    await run("set role authenticated;");
+    try {
+      await q(`update public.admin_users set role = 'super_admin' where user_id = '${roleAdminId}';`);
+      return (await q(`select role from public.admin_users where user_id = '${roleAdminId}';`))[0].role;
+    } catch {
+      return "refused";
+    } finally {
+      await run("reset role;");
+    }
+  })();
+  check(
+    "an admin cannot promote themselves",
+    adminAllowListWrite === "admin",
+    adminAllowListWrite,
+  );
+
+  await run(`set request.jwt.claim.sub = '${roleSuperId}';`);
+  const superAllowListWrite = await (async () => {
+    await run("set role authenticated;");
+    try {
+      await q(`update public.admin_users set full_name = 'Super One (edited)' where user_id = '${roleSuperId}';`);
+      return (await q(`select full_name from public.admin_users where user_id = '${roleSuperId}';`))[0].full_name;
+    } finally {
+      await run("reset role;");
+    }
+  })();
+  check(
+    "a super admin may edit the allow-list",
+    superAllowListWrite === "Super One (edited)",
+    superAllowListWrite,
+  );
+  await run("reset request.jwt.claim.sub;");
+
+  // ---------------------------------------------------------------------------
+  section("Admin lookups: booking search and dashboard counts");
+  // ---------------------------------------------------------------------------
+  const lookupBooking = (
+    await q(`
+      select b.booking_id, b.customer_mobile, b.customer_name, b.total_amount, b.created_at
+        from public.bookings b
+       where b.id = '${payA.booking_uuid}';
+    `)
+  )[0];
+  check(
+    "the lookup fixture is a paid booking with the details a lookup returns",
+    Boolean(lookupBooking?.booking_id && lookupBooking?.customer_mobile),
+    JSON.stringify(lookupBooking ?? null),
+  );
+
+  const lookupByReference = await rpc("admin_lookup_bookings", { p_query: lookupBooking.booking_id });
+  check(
+    "a booking is found by its reference",
+    lookupByReference.length === 1 && lookupByReference[0].booking_id === lookupBooking.booking_id,
+    `${lookupByReference.length} rows`,
+  );
+  check(
+    "the lookup returns the guest, the night and the pass",
+    lookupByReference[0]?.customer_name === lookupBooking.customer_name &&
+      /^\d{4}-\d{2}-\d{2}T?/.test(lookupByReference[0]?.event_date ?? "") &&
+      Boolean(lookupByReference[0]?.pass_name),
+    `${lookupByReference[0]?.customer_name ?? ""} / ${lookupByReference[0]?.pass_name ?? ""}`,
+  );
+  check(
+    "the full view carries the contact details and the amount",
+    lookupByReference[0]?.customer_mobile === lookupBooking.customer_mobile &&
+      lookupByReference[0]?.total_amount === lookupBooking.total_amount,
+    `${lookupByReference[0]?.customer_mobile ?? ""} / ${lookupByReference[0]?.total_amount ?? ""}`,
+  );
+  check(
+    "the lookup counts the booking's passes and how many are in",
+    lookupByReference[0]?.passes_issued === 2 && Number(lookupByReference[0]?.passes_checked_in) >= 0,
+    `${lookupByReference[0]?.passes_issued ?? ""} issued`,
+  );
+
+  const lookupLimited = await rpc("admin_lookup_bookings", {
+    p_query: lookupBooking.booking_id,
+    p_include_contact: false,
+  });
+  check(
+    "the limited view withholds the mobile number, the email and the amount",
+    lookupLimited[0]?.customer_mobile === null &&
+      lookupLimited[0]?.customer_email === null &&
+      lookupLimited[0]?.total_amount === null &&
+      lookupLimited[0]?.razorpay_order_id === null,
+    JSON.stringify({
+      mobile: lookupLimited[0]?.customer_mobile,
+      amount: lookupLimited[0]?.total_amount,
+    }),
+  );
+  check(
+    "the limited view still identifies the guest and the pass",
+    lookupLimited[0]?.booking_id === lookupBooking.booking_id &&
+      lookupLimited[0]?.customer_name === lookupBooking.customer_name &&
+      Boolean(lookupLimited[0]?.pass_name),
+  );
+
+  const lookupByName = await rpc("admin_lookup_bookings", {
+    p_query: lookupBooking.customer_name.slice(0, 4),
+    p_include_contact: false,
+  });
+  check(
+    "a partial guest name finds the booking",
+    lookupByName.some((row) => row.booking_id === lookupBooking.booking_id),
+    `${lookupByName.length} rows`,
+  );
+
+  const spacedMobile = `+91 ${lookupBooking.customer_mobile.slice(3)}`;
+  const lookupByMobile = await rpc("admin_lookup_bookings", {
+    p_query: spacedMobile,
+    p_include_contact: false,
+  });
+  check(
+    "a mobile number typed with spaces finds the booking",
+    lookupByMobile.some((row) => row.booking_id === lookupBooking.booking_id),
+    `${lookupByMobile.length} rows`,
+  );
+
+  const lookupEmpty = await rpc("admin_lookup_bookings", { p_query: "" });
+  check("an empty search returns nothing at all", lookupEmpty.length === 0, `${lookupEmpty.length} rows`);
+
+  const lookupPunctuation = await rpc("admin_lookup_bookings", { p_query: "+-() " });
+  check(
+    "a search with no digits and no letters returns nothing, not everything",
+    lookupPunctuation.length === 0,
+    `${lookupPunctuation.length} rows`,
+  );
+
+  const lookupUnknown = await rpc("admin_lookup_bookings", { p_query: "PS-999999" });
+  check("an unknown reference returns nothing", lookupUnknown.length === 0, `${lookupUnknown.length} rows`);
+
+  const lookupLimitedRows = await rpc("admin_lookup_bookings", { p_query: "1", p_limit: 1 });
+  check("the lookup honours the caller's row limit", lookupLimitedRows.length <= 1, `${lookupLimitedRows.length} rows`);
+
+  const lookupGrants = await q(`
+    select
+      has_function_privilege('anon', 'public.admin_lookup_bookings(text, boolean, integer)', 'execute') as anon,
+      has_function_privilege('authenticated', 'public.admin_lookup_bookings(text, boolean, integer)', 'execute') as authenticated,
+      has_function_privilege('service_role', 'public.admin_lookup_bookings(text, boolean, integer)', 'execute') as service;
+  `);
+  check(
+    "only the service role may search bookings",
+    lookupGrants[0].anon === false && lookupGrants[0].authenticated === false && lookupGrants[0].service === true,
+    JSON.stringify(lookupGrants[0]),
+  );
+
+  const anonLookup = await expectError(`set role anon; select * from public.admin_lookup_bookings('x');`);
+  check("an anon session cannot call the lookup", anonLookup !== null, anonLookup ?? "call succeeded");
+  await run("reset role;");
+
+  const statsGrants = await q(`
+    select
+      has_function_privilege('anon', 'public.admin_dashboard_stats(date)', 'execute') as anon,
+      has_function_privilege('authenticated', 'public.admin_dashboard_stats(date)', 'execute') as authenticated,
+      has_function_privilege('service_role', 'public.admin_dashboard_stats(date)', 'execute') as service;
+  `);
+  check(
+    "only the service role may read the dashboard counts",
+    statsGrants[0].anon === false && statsGrants[0].authenticated === false && statsGrants[0].service === true,
+    JSON.stringify(statsGrants[0]),
+  );
+
+  const [statsToday] = await q(`
+    select ((now() at time zone 'UTC')::date)::text as today,
+           (((now() at time zone 'UTC')::date) - 1)::text as yesterday;
+  `);
+  const statsForToday = (await rpc("admin_dashboard_stats", { p_today: statsToday.today }))[0];
+  const statsForYesterday = (await rpc("admin_dashboard_stats", { p_today: statsToday.yesterday }))[0];
+
+  check(
+    "the dashboard counts bookings, passes and staff",
+    statsForToday.bookings_total >= 1 &&
+      statsForToday.passes_issued >= 1 &&
+      statsForToday.staff_active >= 3 &&
+      statsForToday.staff_total >= 4 &&
+      statsForToday.nights_total >= 9,
+    JSON.stringify(statsForToday),
+  );
+  check(
+    "check-ins are counted for the day they asked about",
+    statsForToday.check_ins_today >= 1 && statsForYesterday.check_ins_today === 0,
+    `today ${statsForToday.check_ins_today} / yesterday ${statsForYesterday.check_ins_today}`,
+  );
+  check(
+    "the counts add up: every pass is either used or not",
+    statsForToday.passes_used + statsForToday.passes_active <= statsForToday.passes_issued,
+    `${statsForToday.passes_used} + ${statsForToday.passes_active} / ${statsForToday.passes_issued}`,
+  );
+  check(
+    "paid bookings never exceed all bookings",
+    statsForToday.bookings_paid <= statsForToday.bookings_total &&
+      statsForToday.bookings_pending + statsForToday.bookings_refunded <= statsForToday.bookings_total,
+    JSON.stringify({
+      total: statsForToday.bookings_total,
+      paid: statsForToday.bookings_paid,
+      pending: statsForToday.bookings_pending,
+      refunded: statsForToday.bookings_refunded,
+    }),
+  );
+
+  // The old owner-only helper is gone: two names for one question is how a policy
+  // ends up asking the wrong one.
+  const ownerFunction = await expectError(`select public.is_owner();`);
+  check(
+    "the retired is_owner() helper no longer exists",
+    ownerFunction !== null,
+    ownerFunction ?? "is_owner() still callable",
   );
 
   // ---------------------------------------------------------------------------

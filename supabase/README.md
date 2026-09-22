@@ -12,7 +12,8 @@ supabase/
 │   ├── 20260922090300_pass_catalogue_visibility.sql  # disabled passes stay visible to the site
 │   ├── 20260922090400_booking_flow.sql           # DND reference, idempotency key, atomic booking RPC
 │   ├── 20260922090500_payments.sql               # public token, payment events, confirm/refund, webhook
-│   └── 20260922090700_check_in.sql               # gate verdict + atomic check-in (scan_pass, check_in_pass)
+│   ├── 20260922090700_check_in.sql               # gate verdict + atomic check-in (scan_pass, check_in_pass)
+│   └── 20260922090800_admin_roles.sql            # three-role model, RLS helpers, admin lookup + stats
 └── seed.sql                                      # event, 9 nights, 5 passes, features, highlights
 ```
 
@@ -30,7 +31,7 @@ supabase/
 | `digital_passes` | One row per purchased pass: readable `pass_id` (`PS-000123`), secret 64-character `qr_token`, state and check-in | ❌ staff only — read through `service_role` functions only |
 | `check_ins` | Gate scan log (one row per pass, ever) | ❌ staff only |
 | `gallery` | Photo/video metadata (files in Storage) | ✅ published only |
-| `admin_users` | Auth users allow-listed as staff | ❌ admins only |
+| `admin_users` | Auth users allow-listed as staff (`super_admin` / `admin` / `staff`) | ❌ super admins only |
 
 ### What the public API exposes
 
@@ -157,7 +158,7 @@ the venue's timezone (`src/lib/gate/night.ts`) — never from the phone that is 
 Both are `service_role`-only (`execute` revoked from `PUBLIC`, `anon` and `authenticated`;
 `pass_entry` itself is revoked from every role, including `service_role`), and both
 re-read the caller's `admin_users` row inside the database: an active row with role
-`owner`, `admin`, `manager` or `scanner`, or the answer is `not_authorised`.
+`super_admin`, `admin` or `staff`, or the answer is `not_authorised`.
 
 One transaction, one row read under lock:
 
@@ -184,6 +185,47 @@ Two properties are enforced by the database rather than by the application:
 - **A check-in cannot exist without an admission.** The `check_ins` row is only written on
   the `checked_in` outcome, and `digital_passes.checked_in`/`checked_in_at` move together
   (a CHECK constraint).
+
+### Roles and authorisation
+
+The allow-list carries exactly three roles, and the database — not the app — is the last
+word on what they mean:
+
+| Role | `is_staff()` | `is_admin()` | `is_super_admin()` | What it may do |
+| ---- | ------------ | ------------ | ------------------ | -------------- |
+| `super_admin` | ✅ | ✅ | ✅ | Everything, including writing `admin_users` |
+| `admin` | ✅ | ✅ | ❌ | Events, bookings, passes, gallery, scanner, settings |
+| `staff` | ✅ | ❌ | ❌ | The scanner, check-ins, a limited booking lookup |
+
+- **`is_staff(p_user_id)`** — any active role. `is_admin` — `super_admin` or `admin`.
+  **`is_super_admin`** — the full-access role. All three are `SECURITY DEFINER` so a
+  check against `admin_users` does not recurse through that table's own policies, and
+  all three ship with `execute` granted to `anon`, `authenticated` and `service_role`.
+- **Only a super admin may write `admin_users`** (`admin_users_super_admin_manage`).
+  There is no policy that lets an admin change their own row, which is what makes
+  "an admin cannot promote themselves" a database fact rather than a UI convention.
+- **`current_staff_role()`** returns the caller's own role — one word, never a row, and
+  null for `anon`. `src/proxy.ts` uses it to refuse a request *before* a page renders,
+  because a redirect thrown while a response is streaming cannot change its status code.
+- **Deactivating is `is_active = false`.** All three helpers require it, so a suspended
+  account holds no role at all, everywhere, immediately.
+- A role value that is not one of the three is rejected by a CHECK constraint. The old
+  `owner` / `manager` / `scanner` values were migrated in the step-8 migration
+  (`owner → super_admin`, `manager → admin`, `scanner → staff`), and `is_owner()` was
+  dropped rather than kept as a second name for one question.
+
+### Admin lookups
+
+Two `service_role`-only functions back the admin area, so that the app never counts or
+filters rows by pulling a table into Node:
+
+| Function | What it does |
+| -------- | ------------ |
+| `admin_lookup_bookings(p_query, p_include_contact, p_limit)` | Finds bookings by reference, mobile number (however it was typed) or guest name. **The contact columns — mobile, email, amount, Razorpay order id — come back `null` when `p_include_contact` is false**, which is the limited view a `staff` role gets. The withholding happens in the query, not in the UI |
+| `admin_dashboard_stats(p_today)` | One row of live counts: bookings by payment state, passes issued/active/used, check-ins for `p_today`, nights, gallery state and staff accounts. `p_today` is the *venue's* date, so "tonight" means the venue's tonight |
+
+Both are revoked from `PUBLIC`, `anon` and `authenticated` and granted only to
+`service_role`: a leaked anon key cannot enumerate bookings or read the day's takings.
 
 ### Integrity rules worth knowing
 
@@ -240,8 +282,8 @@ Supabase **SQL editor**.
 | Role | What it can do |
 | ---- | -------------- |
 | `anon` | Read published events, their nights, their pass categories (active or not), features, highlights and published gallery rows, plus per-night availability counts through `get_event_night_availability()`. Nothing else — no read or write access to bookings, passes, check-ins or admin users. |
-| `authenticated` | Same public reads. Gains admin powers only when present in `admin_users` with an active role (`is_admin()` for owner/admin/manager, `is_staff()` to also include scanners). |
-| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, the pass reads (`get_booking_passes`, `get_pass_by_token`), the gate functions (`scan_pass`, `check_in_pass`) and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
+| `authenticated` | Same public reads. Gains admin powers only when present in `admin_users` with an active role: `is_admin()` for the management roles (super admin, admin), `is_staff()` to include gate staff, `is_super_admin()` for the bare `admin_users` access. |
+| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, the pass reads (`get_booking_passes`, `get_pass_by_token`), the gate functions (`scan_pass`, `check_in_pass`), the admin lookups (`admin_lookup_bookings`, `admin_dashboard_stats`) and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
 
 There is deliberately **no INSERT policy on `bookings`**: bookings are created by
 server code after recalculating the amount from `pass_categories`, so the browser
@@ -254,10 +296,24 @@ can never fabricate a booking or a price.
 
 ```sql
 insert into public.admin_users (user_id, email, full_name, role)
-values ('<auth-user-uuid>', 'owner@example.com', 'Owner Name', 'owner');
+values ('<auth-user-uuid>', 'owner@example.com', 'Owner Name', 'super_admin');
 ```
 
-Only `owner` can manage `admin_users` rows; `scanner` can only check passes in.
+A gate volunteer gets the least access that does the job:
+
+```sql
+insert into public.admin_users (user_id, email, full_name, role)
+values ('<auth-user-uuid>', 'gate1@example.com', 'Gate Volunteer', 'staff');
+```
+
+Only the uuid of an existing `auth.users` row is accepted (`user_id` is a foreign key),
+and `email` is unique across the allow-list. Suspending somebody is
+`update public.admin_users set is_active = false where user_id = '<uuid>';` — they keep
+the account and lose the access, on the very next request.
+
+Only `super_admin` can manage `admin_users` rows; `staff` can only check passes in and
+look a booking up. An `admin` runs the event but cannot touch the staff list, which is
+what stops an admin from promoting themselves.
 
 A staff member signs in with **Supabase Auth** (email + password, `supabase.auth` — no
 custom passwords are stored anywhere in this schema). The `admin_users` row is the

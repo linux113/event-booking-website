@@ -17,8 +17,9 @@ fits within free tiers for development and small-scale launch.
 | 5 | Payments — Razorpay test mode: order creation, server-side signature verification, webhook, duplicate protection, refresh-safe status page | ✅ done |
 | 6 | Digital pass + QR code — issued only after a verified payment, printable ticket, gate view | ✅ done |
 | 7 | QR verification and entry — staff sign-in, mobile camera scanner, server-side check-in | ✅ done |
-| 8 | Admin dashboard — publish events, capacity, the rest of the staff surfaces | ⏳ next |
-| 9 | Hardening — rate limiting, analytics, perf budget | ⏳ |
+| 8 | Admin authentication — staff sign-in, three roles, protected routes, logout, booking lookup | ✅ done |
+| 9 | Admin dashboard — publish events, capacity, gallery and staff management screens | ⏳ next |
+| 10 | Hardening — rate limiting, analytics, perf budget | ⏳ |
 
 Step 3 is two halves of one job — the Supabase schema/RLS layer, then replacing every
 hard-coded value in the UI with database reads. Both are done and verified against real
@@ -46,8 +47,12 @@ signature — never by the browser saying so.
 | `/pass/[passId]` | The digital pass itself — mobile-first, ticket-shaped, printable and downloadable. Needs the pass's own 64-character token in `?t=…` (noindex) |
 | `/pass/[passId]/download` | The pass as a standalone SVG ticket, or just the QR code as a PNG (`?format=png`). Token-guarded and never cached |
 | `/verify/[token]` | What the QR code opens — the gate view: `VALID`, `ALREADY CHECKED IN`, `CANCELLED`, `EXPIRED` or `NOT A VALID PASS`. Read-only |
-| `/admin/login` | Staff sign-in: Supabase Auth email + password, then the `admin_users` allow-list. Sends a valid non-staff account back with an explanation |
-| `/admin/scanner` | The gate: camera QR scanner, the verdict for the pass that was scanned, and the CHECK IN button that burns it. Staff session required; the page itself never writes |
+| `/admin/login` | Staff sign-in: Supabase Auth email + password, then the `admin_users` allow-list. A valid account that is not staff is signed back out with an explanation |
+| `/admin` | Staff dashboard: the live numbers, plus exactly the sections the signed-in role may open |
+| `/admin/scanner` | The gate: camera QR scanner, the verdict for the pass that was scanned, and the CHECK IN button that burns it. Every role; the page itself never writes |
+| `/admin/bookings` | Booking lookup by reference, mobile number or guest name. One page, two views: an admin sees contact details and amounts, a staff member sees the guest and the pass |
+| `/admin/settings` | The event, venue and deployment values the public site reads. Admin and super admin |
+| `/admin/staff` | Who may sign in and with which role, plus how to add somebody. Super admin only |
 | `/gallery` | Published photos and videos from the `gallery` table, grouped by album |
 | `/contact` | Contact channels derived from the event row (WhatsApp, phone, email, map), venue block, support hours, FAQ |
 | `/events` | Published events from the database, each with its nights and passes |
@@ -73,7 +78,7 @@ runs — each route renders a "Database not connected" state instead of event da
 | `npm run lint`      | ESLint (Next core-web-vitals + TypeScript rules)                   |
 | `npm run typecheck` | `next typegen && tsc --noEmit` (route types must exist first)      |
 | `npm run db:verify` | Run the migrations + seed against PostgreSQL (WASM) and assert schema, constraints and RLS |
-| `npm run verify:web` | End-to-end check against a real database: boots PostgreSQL, serves it over a PostgREST-compatible shim, calls the real services, then builds and serves the real pages and exercises the whole booking, **payment** and **gate** flow — validation, capacity, pricing, duplicate submissions, order creation, signature verification, webhooks, refunds, refresh-safe status and the live-key guard, then signs in as staff, scans a pass, admits it once, races two check-ins against the same code and refuses every kind of bad pass — payments run against a local stub gateway and staff sign-in against a local Auth double, so no credentials are needed |
+| `npm run verify:web` | End-to-end check against a real database: boots PostgreSQL, serves it over a PostgREST-compatible shim, calls the real services, then builds and serves the real pages and exercises the whole booking, **payment** and **gate** flow — validation, capacity, pricing, duplicate submissions, order creation, signature verification, webhooks, refunds, refresh-safe status and the live-key guard, then signs in as staff, an admin and a super admin, proves each role reaches exactly what it should and nothing else, scans a pass, admits it once, races two check-ins against the same code and refuses every kind of bad pass — payments run against a local stub gateway and staff sign-in against a local Auth double, so no credentials are needed |
 | `npm run check`     | typecheck → lint → build, in one command                           |
 
 ## Booking flow
@@ -199,17 +204,67 @@ the payment — never by a page being opened:
 | Night already over | `EXPIRED` | derived from `valid_date` (no cron job required) |
 | Unknown or malformed token | `NOT A VALID PASS` | the token matched no row |
 
+## Admin authentication and roles
+
+There is one way into the staff area, and it is a real Supabase Auth session: no
+shared staff code, no environment-variable password, no “admin” query string. Signing
+in is only half of it — the account must also be on the `admin_users` allow-list, with
+an active role.
+
+| Role | May open |
+| ---- | -------- |
+| `super_admin` | Everything, including the staff list and managing roles |
+| `admin` | Bookings, payments, passes, dates, gallery, scanner, settings |
+| `staff` | The scanner, check-ins, and a limited booking lookup |
+
+The permission model lives in `src/lib/auth/permissions.ts` as a single table of
+capabilities (`scanner:use`, `bookings:view`, `bookings:view_contact`, `staff:manage`,
+…). Pages are guarded by `requirePermission()`, the request hook guards URLs from the
+same table, and the dashboard navigation is *generated* from it — so a section cannot
+be added to the menu without its URL being guarded by the same permission.
+
+**Two independent "no"s, and neither one leaks a page:**
+
+| Visitor | What happens |
+| ------- | ------------ |
+| Signed out | `307` to `/admin/login?next=<where they were going>`. Real HTTP redirect, issued by `src/proxy.ts` before any page renders |
+| Signed in, not on the allow-list | The same redirect. A Supabase account is not a staff account, and the sign-in screen says so and offers a way out |
+| Signed in as staff, wrong role | `307` to `/admin?denied=<permission>`, and the dashboard explains it in words. Sending them to the sign-in screen would loop — they are already signed in |
+| Staff API without a session | `401` JSON, never an HTML redirect |
+| Staff API with a role that cannot scan | `403` JSON |
+
+The layering is deliberate, and each layer assumes the one above it might be wrong:
+the **request hook** decides before the response starts streaming (a redirect thrown
+mid-stream cannot change the status code, so the boundary has to be here); the **page
+guard** asks again for the capability it actually needs; and the **database** checks
+the staff id on every check-in, because a bug in the app alone must never admit a
+guest.
+
+**The service-role key never reaches the browser.** Every admin read goes through
+`src/lib/services/admin.ts`, which imports `server-only`; pages are server components
+that render HTML, the staff APIs answer with plain JSON, and `npm run verify:web`
+asserts that no rendered admin page contains the key or a `service_role` claim.
+
+**The staff view is a different answer, not the same answer with fields hidden.** A
+staff member's booking lookup calls `admin_lookup_bookings(p_include_contact => false)`,
+so the mobile number, the email address, the amount and the gateway order id are never
+returned to the process at all — there is nothing to remember to hide.
+
+**Signing out** is a `POST` to `/api/staff/logout` (a form, so it works with
+JavaScript disabled), which ends the Supabase session — revoking the refresh token,
+not just clearing a cookie — and deletes the session cookies on the way out. A cookie
+copied from a gate phone before the shift ends no longer works afterwards; the harness
+tests exactly that.
+
 ## Gate check-in (`/admin/scanner`)
 
 The scanner is the only part of the site that *changes* a pass, so it is built around one
 rule: **the door is decided by the database, never by the browser.**
 
-1. **Sign in as staff.** `/admin/login` is Supabase Auth email + password. Signing in is
-   not enough on its own: the account must also be on the `admin_users` allow-list with an
-   active `owner` / `admin` / `manager` / `scanner` role, and that check is made against
-   the database on every request (`src/lib/auth/staff.ts`). A perfectly valid Supabase
-   account that is not staff is signed out again with an explanation instead of being
-   handed a scanner.
+1. **Sign in as staff.** `/admin/login` is Supabase Auth email + password, and the
+   account must also be on the `admin_users` allow-list with an active `super_admin`,
+   `admin` or `staff` role — checked against the database on every request
+   (`src/lib/auth/staff.ts`). See [Admin authentication and roles](#admin-authentication-and-roles).
 2. **Scan with the phone.** `/admin/scanner` opens the rear camera (`getUserMedia`,
    `facingMode: environment`), decodes frames with `jsqr` and keeps only codes that are
    **our own** verification URLs — a code pointing at another site, or at plain text, is
@@ -243,6 +298,7 @@ rule: **the door is decided by the database, never by the browser.**
 | **✕ PAYMENT NOT VERIFIED** | The booking is not (or is no longer) paid | Send the guest to the ticket desk |
 | **✕ INVALID PASS** | Unknown, cancelled, refunded, or for another night — with the reason underneath | Do not admit |
 | **✕ NOT AUTHORISED** | The signed-in account is not active staff any more | Sign in again, or fetch a supervisor |
+| **403 FORBIDDEN** | Signed in, but this role may not work the gate | Ask an admin to change the role |
 
 `/api/staff/scan` and `/api/staff/check-in` answer `401` to anybody without a staff
 session, so the endpoint is not a public check-in API; `check_ins` and
@@ -269,6 +325,9 @@ Supabase directly.
 | A booking's passes and their QR codes | `digital_passes` through `get_booking_passes(public_token)` (booking page) and `get_pass_by_token(qr_token)` (ticket and gate view) — pass id, state, night and event, never a mobile number or an email address |
 | The gate verdict for a scanned token | `scan_pass()` — one transaction, `service_role` only, and the caller must present a staff user id |
 | A check-in record | `check_in_pass()` — the same verdict plus a compare-and-swap on the pass row and one `check_ins` row |
+| An admin booking lookup | `admin_lookup_bookings()` — the search runs in Postgres, and the contact columns come back null for a role without `bookings:view_contact` |
+| The dashboard numbers | `admin_dashboard_stats()` — counted in the database, for the venue's today |
+| The signed-in role, at the edge | `current_staff_role()` — the caller's own role and nothing else, so the request hook can refuse before a page renders |
 
 Availability is never computed in the browser: `get_event_night_availability()` is a
 `SECURITY DEFINER` function returning counts per night, so a visitor can see that a
@@ -285,7 +344,8 @@ produces a 500 — verified by `npm run verify:web`.
 src/
 ├── app/                        # App Router routes (routing + composition only)
 │   ├── about/ book/ contact/ events/ gallery/ passes/   # page.tsx (+ loading.tsx skeleton)
-│   ├── admin/                  # login + scanner (staff only: session checked server-side)
+│   ├── admin/(auth)/login/     # staff sign-in — no admin chrome, no session needed
+│   ├── admin/(shell)/          # dashboard, scanner, bookings, settings, staff (session + role required)
 │   ├── api/bookings/route.ts   # POST only: create a pending booking (no-key fallback)
 │   ├── api/payment/            # create-order, verify, webhook, status — all POST/GET server routes
 │   ├── api/staff/              # scan + check-in: staff session required, gate night decided server-side
@@ -297,7 +357,7 @@ src/
 │   └── globals.css             # Tailwind entry + @theme design tokens
 ├── assets/images/              # Original generated artwork (no stock, no faces)
 ├── components/
-│   ├── admin/                  # scanner panel (camera + jsQR) and the scan verdict card
+│   ├── admin/                  # admin header/nav, scanner panel (camera + jsQR), scan verdict card
 │   ├── booking/                # checkout wizard: steps, pass choice, summary, confirmation panel
 │   ├── brand/logo.tsx          # Inline brand mark (no image request)
 │   ├── contact/contact-card.tsx
@@ -309,11 +369,11 @@ src/
 ├── config/                     # env.ts (only reader of process.env), site.ts, contact.ts
 ├── lib/
 │   ├── admin/                  # verdict.ts: the outcome → what the scanner says
-│   ├── auth/                   # staff.ts: Supabase session + admin_users allow-list
+│   ├── auth/                   # permissions.ts (roles + capabilities), guard.ts, staff.ts
 │   ├── booking/                # shared validation, idempotency keys (browser + server)
 │   ├── gate/                   # night.ts: which night the gate is working, in the venue's timezone
 │   ├── pass/                   # links, status, QR rendering (server) and QR decoding (browser)
-│   ├── services/               # events.ts, gallery.ts, bookings.ts, payments.ts, passes.ts, check-in.ts, result.ts
+│   ├── services/               # events.ts, gallery.ts, bookings.ts, payments.ts, passes.ts, check-in.ts, admin.ts, result.ts
 │   ├── supabase/               # browser / server / admin clients + public.ts (memoised anon client)
 │   ├── payments/               # razorpay.ts (orders + signatures), mode.ts (test/live guard), checkout.ts (browser loader)
 │   ├── format.ts               # INR, dates, times — UTC-anchored, composed from Intl parts
@@ -385,7 +445,7 @@ for the full table reference, roles and setup steps.
 | `digital_passes` | QR passes issued after payment | ❌ staff only |
 | `check_ins` | Gate scan log (one row per pass, ever) | ❌ staff only |
 | `gallery` | Photo/video metadata (files in Storage) | ✅ published only |
-| `admin_users` | Auth users allow-listed as staff | ❌ admins only |
+| `admin_users` | Auth users allow-listed as staff: `super_admin` / `admin` / `staff` | ❌ super admins only |
 
 Seeded: one published Jaipur event (My Village Garden), nine nights
 11–19 October 2026, and five pass categories (₹399 / ₹499 / ₹599 / ₹799 / ₹1099).
@@ -395,6 +455,12 @@ whose `execute` privilege is granted to `service_role` alone: `anon` and
 `authenticated` cannot call it, and no role can insert a booking through the API.
 Each row also carries a unique `idempotency_key`, so a retried request returns the
 booking that already exists instead of creating a second one.
+
+Authorization is a database question too, not only an app question. `is_staff()`,
+`is_admin()` and `is_super_admin()` are the RLS helpers the policies use, `admin_users`
+is readable only by a super admin (a regular admin cannot promote themselves), and
+`current_staff_role()` returns the caller's own role so the request hook can answer
+before a page renders.
 
 Gate entry is the same shape: `scan_pass(qr_token, gate_date, staff_user_id)` returns a
 verdict without writing, `check_in_pass(...)` returns the same verdict and admits the
@@ -466,8 +532,10 @@ production. `src/config/env.ts` is the only module that reads `process.env`.
   mode is one more `npm run verify:web` away, so keep it until a real payment has been
   made end to end.
 - Create the first admin: insert a row in `admin_users` for an existing Auth user with
-  `role = 'owner'` (see supabase/README.md).
+  `role = 'super_admin'` (see supabase/README.md).
 - Create one staff account per person working the gate (a Supabase Auth user plus an
-  `admin_users` row with `role = 'scanner'`), and test the scanner **on the phones that
+  `admin_users` row with `role = 'staff'`), and test the scanner **on the phones that
   will actually be used**, over HTTPS — browsers only hand a camera to a secure origin,
   so `http://` on a laptop's LAN address will not open one.
+- Give at least one person `super_admin` — the staff list and any future role changes
+  are behind that role, and it is the only one that can restore somebody's access.

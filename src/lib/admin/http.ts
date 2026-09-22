@@ -22,6 +22,7 @@ import type { ScanApiError, ScanApiResponse } from "@/types/admin";
 const STATUS_BY_KIND: Record<ScanApiError["kind"], number> = {
   "invalid-input": 400,
   "not-authorized": 401,
+  forbidden: 403,
   "not-configured": 503,
   "server-error": 500,
 };

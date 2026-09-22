@@ -171,6 +171,8 @@ const FAMILY_PASS = "c0000000-0000-4000-8000-000000000005";
 const STAFF_USER_ID = "aaaa0000-0000-4000-8000-0000000000b1";
 const SUSPENDED_USER_ID = "aaaa0000-0000-4000-8000-0000000000b2";
 const GUEST_USER_ID = "aaaa0000-0000-4000-8000-0000000000b3";
+const ADMIN_USER_ID = "aaaa0000-0000-4000-8000-0000000000b4";
+const SUPER_USER_ID = "aaaa0000-0000-4000-8000-0000000000b5";
 const STAFF_PASSWORD = "Gate-Pass-2026";
 
 const db = createVerificationDb();
@@ -374,6 +376,8 @@ async function main() {
       { id: STAFF_USER_ID, email: "scanner@example.com", password: STAFF_PASSWORD },
       { id: SUSPENDED_USER_ID, email: "suspended@example.com", password: STAFF_PASSWORD },
       { id: GUEST_USER_ID, email: "guest@example.com", password: STAFF_PASSWORD },
+      { id: ADMIN_USER_ID, email: "admin@example.com", password: STAFF_PASSWORD },
+      { id: SUPER_USER_ID, email: "owner@example.com", password: STAFF_PASSWORD },
     ],
   });
 
@@ -1787,11 +1791,15 @@ async function main() {
     insert into auth.users (id, email) values
       ('${STAFF_USER_ID}', 'scanner@example.com'),
       ('${SUSPENDED_USER_ID}', 'suspended@example.com'),
-      ('${GUEST_USER_ID}', 'guest@example.com');
+      ('${GUEST_USER_ID}', 'guest@example.com'),
+      ('${ADMIN_USER_ID}', 'admin@example.com'),
+      ('${SUPER_USER_ID}', 'owner@example.com');
     insert into public.admin_users (user_id, email, full_name, role, is_active)
     values
-      ('${STAFF_USER_ID}', 'scanner@example.com', 'Gate Night Scanner', 'scanner', true),
-      ('${SUSPENDED_USER_ID}', 'suspended@example.com', 'Suspended Scanner', 'scanner', false);
+      ('${STAFF_USER_ID}', 'scanner@example.com', 'Gate Night Scanner', 'staff', true),
+      ('${SUSPENDED_USER_ID}', 'suspended@example.com', 'Suspended Scanner', 'staff', false),
+      ('${ADMIN_USER_ID}', 'admin@example.com', 'Meera Admin', 'admin', true),
+      ('${SUPER_USER_ID}', 'owner@example.com', 'Owner Super', 'super_admin', true);
   `);
 
   const staffRowId = (await dbQuery(`select id from public.admin_users where user_id = $1`, [STAFF_USER_ID]))[0].id;
@@ -1944,7 +1952,9 @@ async function main() {
   const loginPage = visibleText(loginHtml);
   check(
     "the sign-in screen asks for a staff email and password",
-    loginPage.includes("Sign in to the gate") && /name="email"/.test(loginHtml) && /name="password"/.test(loginHtml),
+    loginPage.includes("Sign in to the staff area") &&
+      /name="email"/.test(loginHtml) &&
+      /name="password"/.test(loginHtml),
   );
   check("the sign-in screen is not indexable", /noindex/.test(loginHtml));
 
@@ -2182,6 +2192,438 @@ async function main() {
   check(
     "no pass token ever ships inside the client bundle",
     !gateChunks.includes(tonightPasses[0].qr_token) && !gateChunks.includes(futurePasses[0].qr_token),
+  );
+
+  // ---------------------------------------------------------------------------
+  section("Admin authentication and role-based access");
+  // ---------------------------------------------------------------------------
+  // Four kinds of visitor, one rule: an unauthorised one never receives an admin
+  // page. Requests carry real session cookies, so the session handling, the proxy,
+  // the guards and the pages are all exercised as a browser would exercise them.
+  const fetchWith = (path, cookie, method = "GET") =>
+    fetch(api(path), { method, redirect: "manual", headers: cookie ? { cookie } : {} });
+
+  const adminHtml = async (path, cookie) => {
+    const response = await fetchWith(path, cookie);
+    const html = await response.text();
+
+    return {
+      status: response.status,
+      location: response.headers.get("location"),
+      html,
+      // React separates interpolated text with comment markers, so anything that
+      // asserts on *prose* reads this instead of the markup.
+      text: visibleText(html),
+    };
+  };
+
+  const requiresSignIn = (result, path) =>
+    result.status === 307 && String(result.location ?? "").includes(`/admin/login?next=${encodeURIComponent(path)}`);
+
+  // ---- the signed-out visitor ---------------------------------------------------
+  for (const path of ["/admin", "/admin/scanner", "/admin/bookings", "/admin/settings", "/admin/staff"]) {
+    const anonymous = await adminHtml(path);
+
+    check(`a signed-out visitor is sent to the sign-in screen from ${path}`, requiresSignIn(anonymous, path), `${anonymous.status} ${anonymous.location ?? ""}`);
+    check(`the redirect from ${path} carries no admin content`, !anonymous.html.includes("Staff area"), anonymous.html.slice(0, 80));
+  }
+
+  const loginForVisitor = await adminHtml("/admin/login", null);
+  check("the sign-in screen is public", loginForVisitor.status === 200);
+  check(
+    "the signed-out sign-in screen shows the form, not the staff list",
+    loginForVisitor.html.includes("Sign in to the staff area") &&
+      loginForVisitor.html.includes('name="password"') &&
+      !loginForVisitor.html.includes("staff:manage"),
+  );
+
+  // ---- an ordinary Supabase account (not on the allow-list) ---------------------
+  const ordinarySession = await signIn("guest@example.com", STAFF_PASSWORD);
+  const ordinaryAdmin = await adminHtml("/admin", ordinarySession.cookie);
+  check(
+    "a normal signed-in user cannot reach the admin area",
+    requiresSignIn(ordinaryAdmin, "/admin"),
+    `${ordinaryAdmin.status} ${ordinaryAdmin.location ?? ""}`,
+  );
+  check(
+    "the refusal comes from the request hook, before any page renders",
+    Boolean(ordinaryAdmin.location) && !ordinaryAdmin.html.includes("Staff area"),
+    `location=${ordinaryAdmin.location ?? "none"} cookie=${Boolean(ordinarySession.cookie)}`,
+  );
+
+  const ordinaryDeep = await adminHtml("/admin/bookings", ordinarySession.cookie);
+  check(
+    "and cannot reach a protected section either",
+    requiresSignIn(ordinaryDeep, "/admin/bookings"),
+    `${ordinaryDeep.status} ${ordinaryDeep.location ?? ""}`,
+  );
+
+  const ordinaryLogin = await adminHtml("/admin/login", ordinarySession.cookie);
+  check(
+    "the sign-in screen explains that the account is not staff",
+    ordinaryLogin.status === 200 &&
+      ordinaryLogin.html.includes("Not a staff account") &&
+      ordinaryLogin.html.includes("guest@example.com"),
+    `${ordinaryLogin.status}`,
+  );
+  check(
+    "and offers a way to sign out of that account",
+    ordinaryLogin.html.includes("/api/staff/logout"),
+  );
+
+  const ordinaryApi = await gateApi("/api/staff/scan", {
+    body: { token: "a".repeat(64) },
+    cookie: ordinarySession.cookie,
+  });
+  check(
+    "the staff APIs refuse a non-staff session",
+    ordinaryApi.status === 401,
+    `${ordinaryApi.status}`,
+  );
+
+  // ---- staff --------------------------------------------------------------------
+  const staffSession2 = await signIn("scanner@example.com", STAFF_PASSWORD);
+  const staffHome = await adminHtml("/admin", staffSession2.cookie);
+  check("a staff member reaches the dashboard", staffHome.status === 200, `${staffHome.status}`);
+  check(
+    "the dashboard offers a staff member the gate and the booking lookup",
+    staffHome.text.includes("Gate scanner") && staffHome.text.includes("Bookings"),
+    staffHome.text.includes("What you can open") ? "sections shown" : "no sections",
+  );
+  check(
+    "and offers nothing else: no settings, no staff list, not even as a dead link",
+    !staffHome.text.includes("Event settings") &&
+      !staffHome.text.includes("Staff accounts") &&
+      !staffHome.html.includes('href="/admin/settings"') &&
+      !staffHome.html.includes('href="/admin/staff"'),
+  );
+  check(
+    "the dashboard names the account and the role the database holds",
+    staffHome.text.includes("Staff · scanner@example.com"),
+    staffHome.text.includes("scanner@example.com") ? staffHome.text.slice(0, 120) : "email absent",
+  );
+  check(
+    "a staff member is not shown sales or staffing figures",
+    !staffHome.text.includes("Paid bookings") &&
+      !staffHome.text.includes("Refunded") &&
+      !staffHome.text.includes("Staff accounts in total"),
+    staffHome.text.slice(0, 160),
+  );
+  check(
+    "and is shown the two numbers a door needs",
+    staffHome.text.includes("Checked in tonight") && staffHome.text.includes("Passes not yet used"),
+  );
+
+
+  const staffScanner = await adminHtml("/admin/scanner", staffSession2.cookie);
+  check("a staff member reaches the scanner", staffScanner.status === 200 && staffScanner.text.includes("Pass scanner"));
+
+  const staffSettings = await adminHtml("/admin/settings", staffSession2.cookie);
+  check(
+    "a staff member is refused the settings page",
+    staffSettings.status === 307 && String(staffSettings.location ?? "").includes("/admin?denied=settings"),
+    `${staffSettings.status} ${staffSettings.location ?? ""}`,
+  );
+  check("the refusal serves no settings content", !staffSettings.text.includes("Event settings"));
+
+  const staffStaffPage = await adminHtml("/admin/staff", staffSession2.cookie);
+  check(
+    "a staff member is refused the staff list",
+    staffStaffPage.status === 307 && String(staffStaffPage.location ?? "").includes("/admin?denied=staff"),
+    `${staffStaffPage.status} ${staffStaffPage.location ?? ""}`,
+  );
+
+  const deniedBanner = await adminHtml("/admin?denied=settings:view", staffSession2.cookie);
+  check(
+    "the dashboard explains a refused section in words",
+    deniedBanner.status === 200 && deniedBanner.text.includes("Event settings is not available to your role"),
+    deniedBanner.text.includes("is not available to your role") ? "shown" : "missing",
+  );
+
+  // ---- the booking lookup is the same page with a different answer ---------------
+  const lookupReference = (
+    await dbQuery(`select booking_id, customer_mobile, customer_email, total_amount from public.bookings where customer_mobile = $1`, [
+      "+919800000401",
+    ])
+  )[0];
+
+  const staffLookup = await adminHtml(`/admin/bookings?q=${lookupReference.booking_id}`, staffSession2.cookie);
+  check(
+    "a staff member can look a booking up",
+    staffLookup.status === 200 && staffLookup.html.includes(lookupReference.booking_id),
+    `${staffLookup.status}`,
+  );
+  check(
+    "the staff view shows the guest and the pass, and no contact details or money",
+    staffLookup.html.includes("Nisha Rao") &&
+      !staffLookup.html.includes(lookupReference.customer_mobile) &&
+      !staffLookup.html.includes(lookupReference.customer_email) &&
+      !staffLookup.html.includes(`₹${lookupReference.total_amount}`),
+    `mobile=${staffLookup.html.includes(lookupReference.customer_mobile)} amount=${staffLookup.html.includes(`₹${lookupReference.total_amount}`)}`,
+  );
+  check(
+    "the page says which fields are withheld, rather than looking broken",
+    staffLookup.text.includes("Contact details and amounts are hidden for your role"),
+  );
+
+  const staffLookupMiss = await adminHtml("/admin/bookings?q=DND000000000", staffSession2.cookie);
+  check(
+    "an unknown reference gets an honest empty state",
+    staffLookupMiss.status === 200 && staffLookupMiss.text.includes("No booking found"),
+  );
+
+  const staffLookupShort = await adminHtml("/admin/bookings?q=Ni", staffSession2.cookie);
+  check(
+    "a two-letter search asks for more input instead of returning the whole event",
+    staffLookupShort.status === 200 && staffLookupShort.text.includes("Keep typing"),
+  );
+
+  // The short search must not have queried the database at all: a staff member's
+  // query for "Ni" cannot return other guests' bookings.
+  check(
+    "and returns none of the event's bookings",
+    !staffLookupShort.html.includes(lookupReference.booking_id),
+  );
+
+  // ---- admin --------------------------------------------------------------------
+  const adminSession = await signIn("admin@example.com", STAFF_PASSWORD);
+  const adminHome = await adminHtml("/admin", adminSession.cookie);
+  check(
+    "an admin reaches the dashboard and sees the operational sections",
+    adminHome.status === 200 &&
+      adminHome.html.includes("Gate scanner") &&
+      adminHome.html.includes("Event settings"),
+    `${adminHome.status}`,
+  );
+  check(
+    "the dashboard counts are rendered for an admin",
+    adminHome.text.includes("Paid bookings") && adminHome.text.includes("Passes not yet used"),
+  );
+  check(
+    "the sections that are not built yet say so instead of linking nowhere",
+    adminHome.text.includes("Not built yet") &&
+      adminHome.text.includes("Payments") &&
+      !adminHome.html.includes('href="/admin/payments"') &&
+      !adminHome.html.includes('href="/admin/gallery"'),
+  );
+
+  const adminSettings = await adminHtml("/admin/settings", adminSession.cookie);
+  check(
+    "an admin reaches the settings page",
+    adminSettings.status === 200 && adminSettings.html.includes("Event settings"),
+    `${adminSettings.status}`,
+  );
+  check(
+    "the settings page shows the event the public site reads",
+    adminSettings.text.includes("Garba Nights") && adminSettings.text.includes("Jaipur"),
+  );
+
+  const adminStaffPage = await adminHtml("/admin/staff", adminSession.cookie);
+  check(
+    "an admin is refused the staff list — that is the super admin's job",
+    adminStaffPage.status === 307 && String(adminStaffPage.location ?? "").includes("/admin?denied=staff"),
+    `${adminStaffPage.status} ${adminStaffPage.location ?? ""}`,
+  );
+
+  const adminLookup = await adminHtml(`/admin/bookings?q=${lookupReference.booking_id}`, adminSession.cookie);
+  check(
+    "an admin's lookup shows the contact details and the amount",
+    adminLookup.status === 200 &&
+      adminLookup.html.includes(lookupReference.customer_mobile) &&
+      adminLookup.html.includes(lookupReference.customer_email) &&
+      adminLookup.html.includes(`₹${lookupReference.total_amount}`),
+    `${adminLookup.status}`,
+  );
+  check(
+    "and says so, so the two views are not confusable",
+    adminLookup.text.includes("You can see contact details and amounts"),
+  );
+
+  const adminScanner = await adminHtml("/admin/scanner", adminSession.cookie);
+  check("an admin can still work the gate", adminScanner.status === 200 && adminScanner.text.includes("Pass scanner"));
+
+  // ---- super admin ---------------------------------------------------------------
+  const superSession = await signIn("owner@example.com", STAFF_PASSWORD);
+  const superStaffPage = await adminHtml("/admin/staff", superSession.cookie);
+  check(
+    "a super admin reaches the staff list",
+    superStaffPage.status === 200 && superStaffPage.text.includes("Staff accounts"),
+    `${superStaffPage.status}`,
+  );
+  check(
+    "the staff list names every role and shows who is suspended",
+    superStaffPage.text.includes("scanner@example.com") &&
+      superStaffPage.text.includes("admin@example.com") &&
+      superStaffPage.text.includes("owner@example.com") &&
+      superStaffPage.text.includes("Super admin") &&
+      superStaffPage.text.includes("Suspended"),
+  );
+  check(
+    "the super admin is marked as themselves in the list",
+    superStaffPage.text.includes("(you)"),
+  );
+  check(
+    "the staff page does not pretend to be an editor yet",
+    superStaffPage.text.includes("Adding somebody") &&
+      !superStaffPage.text.includes("Save changes"),
+  );
+
+  const superSettings = await adminHtml("/admin/settings", superSession.cookie);
+  check("a super admin reaches the settings page too", superSettings.status === 200);
+
+  // ---- no service-role key, ever --------------------------------------------------
+  const serviceKey = serverEnv.SUPABASE_SERVICE_ROLE_KEY;
+  for (const [path, cookie] of [
+    ["/admin", superSession.cookie],
+    ["/admin/bookings", superSession.cookie],
+    ["/admin/staff", superSession.cookie],
+    ["/admin/settings", superSession.cookie],
+    ["/admin/scanner", staffSession2.cookie],
+  ]) {
+    const page = await adminHtml(path, cookie);
+
+    check(
+      `the service-role key is not in the HTML of ${path}`,
+      !page.html.includes(serviceKey) && !/service_role/i.test(page.html),
+      page.html.slice(0, 80),
+    );
+  }
+
+  // ---- logging out ----------------------------------------------------------------
+  const logoutResponse = await fetch(api("/api/staff/logout"), {
+    method: "POST",
+    redirect: "manual",
+    headers: { cookie: staffSession2.cookie },
+  });
+  check(
+    "signing out answers with a redirect to the sign-in screen",
+    logoutResponse.status === 303 && String(logoutResponse.headers.get("location") ?? "").includes("/admin/login"),
+    `${logoutResponse.status} ${logoutResponse.headers.get("location") ?? ""}`,
+  );
+
+  const clearedCookies = logoutResponse.headers.getSetCookie?.() ?? [];
+  check(
+    "signing out deletes the session cookies on the way out",
+    clearedCookies.some(
+      (cookie) =>
+        cookie.startsWith("sb-") &&
+        (/(^|;)\s*max-age=0/i.test(cookie) || /expires=thu, 01 jan 1970/i.test(cookie) || /=\s*(;|$)/.test(cookie)),
+    ),
+    clearedCookies.join(" | ") || "no cookies cleared",
+  );
+
+  // Follow the browser: apply what the response said, then ask for an admin page.
+  const afterLogout = new Map();
+  for (const cookie of clearedCookies) {
+    const [pair] = cookie.split(";");
+    const [name, ...rest] = pair.split("=");
+    afterLogout.set(name.trim(), rest.join("=").trim());
+  }
+  const jarAfterLogout = [...afterLogout.entries()]
+    .filter(([, value]) => value !== "")
+    .map(([name, value]) => `${name}=${value}`)
+    .join("; ");
+
+  const afterLogoutPage = await adminHtml("/admin", jarAfterLogout || null);
+  check(
+    "the browser that just signed out cannot reach the admin area",
+    requiresSignIn(afterLogoutPage, "/admin"),
+    `${afterLogoutPage.status} ${afterLogoutPage.location ?? ""}`,
+  );
+
+  // The real question a shared gate phone asks: does a cookie copied from before the
+  // sign-out still work? Session revocation is what makes the answer no.
+  const staleCookiePage = await adminHtml("/admin", staffSession2.cookie);
+  check(
+    "the session cookie from before the sign-out is dead",
+    requiresSignIn(staleCookiePage, "/admin"),
+    `${staleCookiePage.status} ${staleCookiePage.location ?? ""}`,
+  );
+  check(
+    "and it cannot be used to scan either",
+    (await gateApi("/api/staff/scan", { body: { token: "a".repeat(64) }, cookie: staffSession2.cookie })).status === 401,
+  );
+  check(
+    "the auth double recorded the session as revoked",
+    authStub.revokedSessions.size >= 1,
+    `${authStub.revokedSessions.size} revoked`,
+  );
+
+  const logoutWithoutSession = await fetch(api("/api/staff/logout"), { method: "POST", redirect: "manual" });
+  check(
+    "signing out when already signed out is harmless",
+    logoutWithoutSession.status === 303,
+    `${logoutWithoutSession.status}`,
+  );
+
+  const logoutViaGet = await fetch(api("/api/staff/logout"), { redirect: "manual" });
+  check(
+    "signing out by loading a link does nothing (no GET logout)",
+    logoutViaGet.status === 405,
+    `${logoutViaGet.status}`,
+  );
+
+  // ---- the permission model itself --------------------------------------------------
+  const {
+    can,
+    sectionsFor,
+    permissionsFor,
+    STAFF_ROLES,
+  } = await import("../src/lib/auth/permissions.ts");
+
+  check("there are exactly three staff roles", STAFF_ROLES.length === 3 && STAFF_ROLES.includes("staff"));
+
+  const withoutAccess = [
+    { role: "staff", permission: "settings:view" },
+    { role: "staff", permission: "bookings:view_contact" },
+    { role: "staff", permission: "staff:manage" },
+    { role: "staff", permission: "payments:view" },
+    { role: "admin", permission: "staff:manage" },
+  ];
+  check(
+    "every role is refused what it should be",
+    withoutAccess.every(({ role, permission }) => can(role, permission) === false),
+    withoutAccess.filter(({ role, permission }) => can(role, permission)).map(({ role, permission }) => `${role}:${permission}`).join(", "),
+  );
+
+  const withAccess = [
+    { role: "staff", permission: "scanner:use" },
+    { role: "staff", permission: "bookings:view" },
+    { role: "admin", permission: "settings:view" },
+    { role: "admin", permission: "bookings:view_contact" },
+    { role: "admin", permission: "gallery:view" },
+    { role: "super_admin", permission: "staff:manage" },
+    { role: "super_admin", permission: "bookings:view_contact" },
+  ];
+  check(
+    "every role holds what it should",
+    withAccess.every(({ role, permission }) => can(role, permission) === true),
+    withAccess.filter(({ role, permission }) => !can(role, permission)).map(({ role, permission }) => `${role}:${permission}`).join(", "),
+  );
+
+  check(
+    "the super admin holds every capability in the model",
+    permissionsFor("super_admin").length === new Set(permissionsFor("super_admin")).size &&
+      permissionsFor("admin").every((permission) => can("super_admin", permission)),
+  );
+  check(
+    "an admin holds everything a staff member does",
+    permissionsFor("staff").every((permission) => can("admin", permission)),
+  );
+  check(
+    "a staff member's dashboard lists only scanned and lookup sections",
+    sectionsFor("staff").every((section) => ["scanner", "bookings"].includes(section.key)),
+    sectionsFor("staff").map((section) => section.key).join(", "),
+  );
+  check(
+    "only the super admin's dashboard offers staff management",
+    sectionsFor("admin").every((section) => section.key !== "staff") &&
+      sectionsFor("super_admin").some((section) => section.key === "staff"),
+  );
+  check(
+    "every section is gated by a permission that some role holds",
+    sectionsFor("super_admin").length === sectionsFor("admin").length + 1,
+    `${sectionsFor("super_admin").length} vs ${sectionsFor("admin").length}`,
   );
 
   // ---- 10. the key secret never reaches the browser -----------------------

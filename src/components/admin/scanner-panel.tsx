@@ -179,7 +179,7 @@ export function ScannerPanel({ gateNightLabel }: ScannerPanelProps) {
         if (!payload.ok) {
           tokenRef.current = null;
           setMessage(payload.error.message);
-          setUnauthorized(payload.error.kind === "not-authorized");
+          setUnauthorized(payload.error.kind === "not-authorized" || payload.error.kind === "forbidden");
           setPhase("error");
 
           return;
@@ -289,7 +289,7 @@ export function ScannerPanel({ gateNightLabel }: ScannerPanelProps) {
 
       if (!payload.ok) {
         setMessage(payload.error.message);
-        setUnauthorized(payload.error.kind === "not-authorized");
+        setUnauthorized(payload.error.kind === "not-authorized" || payload.error.kind === "forbidden");
         setPhase("error");
 
         return;

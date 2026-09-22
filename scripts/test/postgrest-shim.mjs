@@ -16,9 +16,10 @@
  *   shim cannot model shows up as a visible warning in the test output.
  *
  * Supports: GET /rest/v1/<table> with select, eq/in/gte/lte/is filters, order,
- * limit; POST /rest/v1/rpc/<function> with JSON arguments; anon/authenticated/
- * service_role derived from the Authorization header, so RLS is exercised for
- * real. Raised exceptions keep their SQLSTATE/detail, which is how the booking
+ * limit; POST /rest/v1/rpc/<function> with JSON arguments — a set-returning
+ * function answers with an array, a scalar-returning one with a bare value, as
+ * PostgREST does; anon/authenticated/service_role derived from the Authorization
+ * header, so RLS is exercised for real. Raised exceptions keep their SQLSTATE/detail, which is how the booking
  * API tells capacity failures from duplicate submissions.
  *
  * It can also carry `/auth/v1/*` for the Supabase Auth double
@@ -166,6 +167,28 @@ function buildSelect(raw) {
     .join(", ");
 }
 
+/**
+ * `true` when the function returns a single value rather than a set.
+ *
+ * PostgREST serialises a scalar-returning function as a bare JSON value and a
+ * set-returning one as an array, and the app sees that difference, so the shim has to
+ * answer the same question the same way: by asking the catalog.
+ */
+function scalarFunctionSql(fnName) {
+  const safe = fnName.replace(/'/g, "''");
+
+  return `
+    select (not p.proretset
+            and p.prorettype not in ('pg_catalog.record'::regtype, 'pg_catalog.void'::regtype)
+            and p.prorettype <> 'pg_catalog.trigger'::regtype) as is_scalar
+      from pg_catalog.pg_proc p
+      join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public'
+       and p.proname = '${safe}'
+     limit 1;
+  `;
+}
+
 export async function startShim({ db, port = 0, log = false, auth = null }) {
   // PGlite is single-connection; serialise every statement through one chain.
   let queue = Promise.resolve();
@@ -232,6 +255,18 @@ export async function startShim({ db, port = 0, log = false, auth = null }) {
           `select * from ${quoteIdent(fnName)}(${args.join(", ")})`,
           keys.map((key) => body[key]),
         );
+
+        // Scalar or set-returning? PostgREST asks the catalog and shapes the response
+        // accordingly, and supabase-js gives the app whatever comes back — so the
+        // difference is visible to the app and has to be modelled here too.
+        const scalar = await runAs(role, sub, scalarFunctionSql(fnName));
+
+        if (scalar.rows[0]?.is_scalar) {
+          const [first] = rows;
+          const value = first ? Object.values(first)[0] ?? null : null;
+
+          return respond(res, 200, value);
+        }
 
         return respond(res, 200, rows);
       }

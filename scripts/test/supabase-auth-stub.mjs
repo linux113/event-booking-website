@@ -14,7 +14,7 @@
  *     POST /auth/v1/token?grant_type=password        email + password → session
  *     POST /auth/v1/token?grant_type=refresh_token   refresh token → session
  *     GET  /auth/v1/user                             access token → user
- *     POST /auth/v1/logout                           ends the session
+ *     POST /auth/v1/logout                           revokes the session
  *
  * WHAT THIS IS NOT
  *   It is not GoTrue, and it is not a security control. It never checks a password
@@ -66,6 +66,16 @@ function bearerToken(headers) {
 export function createAuthStub({ accounts = [], log = false } = {}) {
   const byEmail = new Map(accounts.map((account) => [account.email.toLowerCase(), account]));
   const byId = new Map(accounts.map((account) => [account.id, account]));
+
+  /**
+   * Sessions that have been signed out of.
+   *
+   * GoTrue revokes a session's refresh token on logout, so the access token stops
+   * being accepted. That is the security property a shared device depends on — a
+   * cookie copied off a gate phone must die when the shift ends — so the stub models
+   * it rather than pretending every token lives until it expires.
+   */
+  const revokedSessions = new Set();
 
   const now = () => Math.floor(Date.now() / 1000);
   const iso = () => new Date().toISOString();
@@ -123,6 +133,8 @@ export function createAuthStub({ accounts = [], log = false } = {}) {
   return {
     /** The accounts this stub will accept, for the harness to echo in its output. */
     accounts,
+    /** Sessions ended by a sign-out — used by the harness to assert a cookie died. */
+    revokedSessions,
 
     /**
      * @returns {Promise<{ status: number, body: unknown }>}
@@ -152,7 +164,7 @@ export function createAuthStub({ accounts = [], log = false } = {}) {
           const claims = decode(body?.refresh_token);
           const account = claims?.sub ? byId.get(claims.sub) : null;
 
-          if (!account) {
+          if (!account || revokedSessions.has(claims.session_id)) {
             return unauthorized();
           }
 
@@ -166,7 +178,12 @@ export function createAuthStub({ accounts = [], log = false } = {}) {
         const claims = bearerToken(headers);
         const account = claims?.sub ? byId.get(claims.sub) : null;
 
-        if (!account || (claims.exp ?? 0) < now() || claims.type !== "access") {
+        if (
+          !account ||
+          (claims.exp ?? 0) < now() ||
+          claims.type !== "access" ||
+          revokedSessions.has(claims.session_id)
+        ) {
           return unauthorized();
         }
 
@@ -174,6 +191,12 @@ export function createAuthStub({ accounts = [], log = false } = {}) {
       }
 
       if (pathname === "/auth/v1/logout" && method === "POST") {
+        const claims = bearerToken(headers);
+
+        if (claims?.session_id) {
+          revokedSessions.add(claims.session_id);
+        }
+
         return { status: 204, body: null };
       }
 
