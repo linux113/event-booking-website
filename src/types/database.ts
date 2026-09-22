@@ -248,6 +248,7 @@ export interface Database {
           payment_status: PaymentStatus;
           razorpay_order_id: string | null;
           razorpay_payment_id: string | null;
+          idempotency_key: string | null;
           notes: string | null;
           created_at: string;
           updated_at: string;
@@ -274,6 +275,7 @@ export interface Database {
           payment_status?: PaymentStatus;
           razorpay_order_id?: string | null;
           razorpay_payment_id?: string | null;
+          idempotency_key?: string | null;
           notes?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -294,6 +296,7 @@ export interface Database {
           payment_status?: PaymentStatus;
           razorpay_order_id?: string | null;
           razorpay_payment_id?: string | null;
+          idempotency_key?: string | null;
           notes?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -485,6 +488,40 @@ export interface Database {
       generate_pass_id: {
         Args: Record<string, never>;
         Returns: string;
+      };
+      create_pending_booking: {
+        Args: {
+          p_event_id: string;
+          p_event_date_id: string;
+          p_pass_category_id: string;
+          p_customer_name: string;
+          p_customer_mobile: string;
+          p_customer_email: string;
+          p_quantity: number;
+          p_number_of_people: number;
+          p_idempotency_key?: string | null;
+        };
+        Returns: {
+          booking_uuid: string;
+          booking_reference: string;
+          booking_status: string;
+          payment_status: string;
+          quantity: number;
+          number_of_people: number;
+          subtotal: number;
+          total_amount: number;
+          event_id: string;
+          event_date_id: string;
+          event_date: string;
+          start_time: string | null;
+          end_time: string | null;
+          pass_category_id: string;
+          pass_name: string;
+          pass_composition: string | null;
+          currency: string;
+          created_at: string;
+          was_existing: boolean;
+        }[];
       };
       get_event_night_availability: {
         Args: { p_event_id: string };

@@ -9,7 +9,8 @@ supabase/
 │   ├── 20260922090000_init_schema.sql            # tables, constraints, indexes, triggers, grants
 │   ├── 20260922090100_rls_policies.sql           # Row Level Security + role helper functions
 │   ├── 20260922090200_public_data_api.sql        # per-night availability RPC, highlights, features
-│   └── 20260922090300_pass_catalogue_visibility.sql  # disabled passes stay visible to the site
+│   ├── 20260922090300_pass_catalogue_visibility.sql  # disabled passes stay visible to the site
+│   └── 20260922090400_booking_flow.sql           # DND reference, idempotency key, atomic booking RPC
 └── seed.sql                                      # event, 9 nights, 5 passes, features, highlights
 ```
 
@@ -43,6 +44,28 @@ without seeing anybody's data:
   visible to visitors as "Not on sale". `is_active` is enforced where it matters — the
   booking step, which runs with the service role.
 
+Booking creation never happens through a table. The only write path is
+`create_pending_booking(...)`, a `SECURITY DEFINER` function whose `execute` privilege
+belongs to `service_role` alone (`anon` and `authenticated` are explicitly revoked, and
+so is `PUBLIC`). It locks the night row, re-reads occupancy from paid bookings,
+multiplies `pass_categories.price_inr` by the quantity itself — it has no parameter for a
+price, subtotal or total, so a tampered request cannot change what a booking costs — and
+always writes `booking_status = 'pending'` with `payment_status = 'unpaid'`.
+
+`bookings.idempotency_key` carries a per-attempt key with a unique index: a double click,
+a retry or a page reload returns the booking that already exists instead of creating a
+second one. The customer-facing reference comes from `generate_booking_id()`
+(`DND<year><5 digits>`, e.g. `DND202600001`).
+
+| SQLSTATE | Meaning | `detail` |
+| -------- | ------- | -------- |
+| `PB001` | Not enough capacity left | places remaining |
+| `PB002` | Night is cancelled, sold out or not open | — |
+| `PB003` | Pass category is off sale or from another event | — |
+| `PB004` | Quantity outside `max_per_booking` | the limit |
+| `PB005` | Head count contradicts the pass composition | the required head count |
+| `PB006` | Night not found / belongs to another event | — |
+
 Everything else public (events, nights, features, highlights, gallery) is a plain RLS
 read on tables that hold no personal data.
 
@@ -59,6 +82,11 @@ read on tables that hold no personal data.
 - **`updated_at` is server-owned** via the `set_updated_at()` trigger.
 - **Money is stored in whole rupees** (`integer`). Razorpay amounts are derived as
   `price_inr * 100` paise at order-creation time.
+- **A pending booking does not hold capacity.** Capacity counts `payment_status = 'paid'`
+  rows only, so an abandoned checkout never blocks a place — the same rule the public
+  availability function uses.
+- **No digital pass is issued before payment.** Passes are created after a verified
+  payment, so nothing in the booking flow can produce a scannable pass.
 
 ## Applying the schema
 
@@ -88,7 +116,7 @@ Supabase **SQL editor**.
 | ---- | -------------- |
 | `anon` | Read published events, their nights, their pass categories (active or not), features, highlights and published gallery rows, plus per-night availability counts through `get_event_night_availability()`. Nothing else — no read or write access to bookings, passes, check-ins or admin users. |
 | `authenticated` | Same public reads. Gains admin powers only when present in `admin_users` with an active role (`is_admin()` for owner/admin/manager, `is_staff()` to also include scanners). |
-| `service_role` | Bypasses RLS. Server-only: booking writes and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
+| `service_role` | Bypasses RLS. Server-only: booking creation (through `create_pending_booking`) and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
 
 There is deliberately **no INSERT policy on `bookings`**: bookings are created by
 server code after recalculating the amount from `pass_categories`, so the browser

@@ -29,6 +29,20 @@ const SEED_FILE = join(REPO_ROOT, "supabase", "seed.sql");
 const WEB_PORT = 3210;
 const DIST_DIR = ".next-verify";
 
+/**
+ * A fake service-role key: the shim reads the role from the JWT claims, exactly
+ * like PostgREST does, so the booking endpoint runs as service_role (the only
+ * role allowed to execute create_pending_booking) while everything else uses the
+ * anon key.
+ */
+function fakeKey(role) {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+
+  return `${encode({ alg: "HS256", typ: "JWT" })}.${encode({ role, iss: "verify-web" })}.harness`;
+}
+
+const SERVICE_ROLE_KEY = fakeKey("service_role");
+
 const GREEN = "\u001b[32m";
 const RED = "\u001b[31m";
 const BOLD = "\u001b[1m";
@@ -86,6 +100,23 @@ function contextAround(source, needle, span = 70) {
   }
 
   return source.slice(Math.max(0, index - span), index + span).replace(/\s+/g, " ").trim();
+}
+
+/** Every `.js` file under a directory, recursively (client chunks nest per route). */
+function readChunks(dir) {
+  const files = [];
+
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+
+    if (entry.isDirectory()) {
+      files.push(...readChunks(path));
+    } else if (entry.name.endsWith(".js")) {
+      files.push(readFileSync(path, "utf8"));
+    }
+  }
+
+  return files;
 }
 
 function section(title) {
@@ -308,6 +339,67 @@ async function main() {
     !bundleJson.includes("customer_") && !bundleJson.includes("razorpay") && !bundleJson.includes("paid@example.com"),
   );
 
+
+  // ---------------------------------------------------------------------------
+  section("Shared validation rules (client + server)");
+  // ---------------------------------------------------------------------------
+  const validation = await import("../src/lib/booking/validation.ts");
+
+  check("mobile with spaces normalises to +91", validation.normaliseMobile("98123 45678") === "+919812345678");
+  check("mobile with +91 normalises", validation.normaliseMobile("+91 98123 45678") === "+919812345678");
+  check("mobile with a leading zero normalises", validation.normaliseMobile("09812345678") === "+919812345678");
+  check("a mobile starting below 6 is rejected", validation.normaliseMobile("5812345678") === null);
+  check("a nine-digit mobile is rejected", validation.normaliseMobile("981234567") === null);
+  check("a twelve-digit mobile is rejected", validation.normaliseMobile("981234567890") === null);
+  check("a valid name passes", validation.validateName("Asha Patel") === null);
+  check("an empty name is rejected", validation.validateName("   ") !== null);
+  check("a single-character name is rejected", validation.validateName("A") !== null);
+  check("a digits-only name is rejected", validation.validateName("12345") !== null);
+  check("a valid email passes", validation.validateEmail("asha@example.com") === null);
+  check("an email without a domain is rejected", validation.validateEmail("asha@example") !== null);
+  check("an email with spaces is rejected", validation.validateEmail("asha patel@example.com") !== null);
+  check("quantity 1 is accepted", validation.validateQuantity("1", 10) === null);
+  check("quantity 0 is rejected", validation.validateQuantity("0", 10) !== null);
+  check("a fractional quantity is rejected", validation.validateQuantity("1.5", 10) !== null);
+  check("quantity above the pass limit is rejected", validation.validateQuantity("11", 10) !== null);
+  check("people must match quantity x people per pass", validation.validatePeople("3", 2, 2) !== null);
+  check("the matching head count passes", validation.validatePeople("4", 2, 2) === null);
+  check("a fractional head count is rejected", validation.validatePeople("2.5", 1, 2) !== null);
+
+  const dirtyPayload = {
+    eventId: EVENT_ID,
+    eventDateId: NIGHT_1,
+    passCategoryId: COUPLE_PASS,
+    customerName: " Asha Patel ",
+    customerMobile: "9812345678",
+    customerEmail: " ASHA@Example.com ",
+    quantity: 2,
+    numberOfPeople: 4,
+    idempotencyKey: "unit-key",
+    // never part of the contract — must be dropped, not trusted
+    subtotal: 1,
+    totalAmount: 1,
+    priceInr: 1,
+    bookingStatus: "paid",
+    paymentStatus: "paid",
+  };
+  const parsed = validation.validateBookingRequest(dirtyPayload);
+  const parsedKeys = parsed.ok ? Object.keys(parsed.value) : [];
+  check("a valid payload parses", parsed.ok === true, parsed.ok ? "" : JSON.stringify(parsed.fieldErrors));
+  check(
+    "normalisation happens server-side too",
+    parsed.ok && parsed.value.customerName === "Asha Patel" && parsed.value.customerMobile === "+919812345678" && parsed.value.customerEmail === "asha@example.com",
+  );
+  check(
+    "client-supplied amounts and statuses are dropped",
+    parsed.ok && !parsedKeys.some((key) => /price|amount|subtotal|status/i.test(key)),
+    parsedKeys.join(","),
+  );
+  check(
+    "a payload without an idempotency key is refused",
+    validation.validateBookingRequest({ ...dirtyPayload, idempotencyKey: "" }).ok === false,
+  );
+
   // ---------------------------------------------------------------------------
   section("Next.js pages render database data");
   // ---------------------------------------------------------------------------
@@ -319,6 +411,7 @@ async function main() {
     NEXT_PUBLIC_SUPABASE_URL: shim.url,
     NEXT_PUBLIC_SUPABASE_ANON_KEY: "test-anon-key",
     NEXT_PUBLIC_SITE_URL: `http://127.0.0.1:${WEB_PORT}`,
+    SUPABASE_SERVICE_ROLE_KEY: SERVICE_ROLE_KEY,
   };
 
   const build = spawn("npm", ["run", "build"], { cwd: REPO_ROOT, env: serverEnv, stdio: ["ignore", "pipe", "pipe"] });
@@ -425,10 +518,263 @@ async function main() {
     contextAround(book, "cannot be selected"),
   );
   check("book page shows remaining capacity", book.includes("places left"));
-  check("book page still refuses to take payment", book.includes("Checkout is not open yet"));
+  check(
+    "book page says no payment is taken yet",
+    book.includes("No payment is taken here yet") && book.includes("not paid"),
+  );
+  check(
+    "book page renders the four-step stepper",
+    ["Night", "Pass", "Details", "Review"].every((label) => book.includes(label)) &&
+      book.includes("Step 1 of 4"),
+    contextAround(book, "Step 1 of 4"),
+  );
+  check(
+    "book page opens on the night step with a continue action",
+    book.includes("Choose your night") && book.includes("Continue"),
+  );
 
   check("gallery page renders published items", galleryPage.includes("Garba circle at full spin"));
   check("gallery page excludes draft rows", !galleryPage.includes("must never"));
+
+
+
+  // The wizard is a client component: its strings have to reach the browser, or
+  // the steps could never advance. (No headless browser is available here, so the
+  // built client bundles are inspected directly.)
+  const chunkDir = join(REPO_ROOT, DIST_DIR, "static", "chunks");
+  const chunkSources = readChunks(chunkDir).join("\n");
+
+  check(
+    "the checkout flow ships to the browser",
+    ["Confirm booking", "Creating your booking", "Review and confirm", "Choose your night"].every((text) =>
+      chunkSources.includes(text),
+    ),
+    "the wizard's own copy must be in a client chunk",
+  );
+
+  // ---------------------------------------------------------------------------
+  section("Booking API (POST /api/bookings)");
+  // ---------------------------------------------------------------------------
+  const API_URL = `http://127.0.0.1:${WEB_PORT}/api/bookings`;
+  const FREE_NIGHT = "d0000000-0000-4000-8000-000000000004"; // untouched by the fixtures
+
+  async function postBooking(body) {
+    const response = await fetch(API_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+    let payload = null;
+
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+
+    return { status: response.status, payload };
+  }
+
+  const [couplePass] = await dbQuery(
+    `select id, name, price_inr, number_of_people, max_per_booking from public.pass_categories where id = $1`,
+    [COUPLE_PASS],
+  );
+  const [freeNightRow] = await dbQuery(`select event_date from public.event_dates where id = $1`, [FREE_NIGHT]);
+  const availabilityBefore = await dbQuery(
+    `select booked_people, remaining from public.get_event_night_availability($1) where event_date_id = $2`,
+    [EVENT_ID, FREE_NIGHT],
+  );
+
+  const validBody = {
+    eventId: EVENT_ID,
+    eventDateId: FREE_NIGHT,
+    passCategoryId: COUPLE_PASS,
+    customerName: "  Asha Patel ",
+    customerMobile: "098123 45678",
+    customerEmail: "  Asha@Example.COM ",
+    quantity: 2,
+    numberOfPeople: 2 * couplePass.number_of_people,
+    idempotencyKey: "web-attempt-1",
+  };
+
+  const created = await postBooking(validBody);
+  check("a valid booking returns 201", created.status === 201, `${created.status} ${JSON.stringify(created.payload)?.slice(0, 160)}`);
+
+  const booking = created.payload?.ok ? created.payload.booking : null;
+  check("the response contains the booking", booking !== null);
+  check("booking reference looks like DND202600001", /^DND\d{9}$/.test(booking?.reference ?? ""), booking?.reference ?? "");
+  check("booking is pending", booking?.status === "pending", booking?.status ?? "");
+  check("payment is not paid", booking?.paymentStatus === "unpaid", booking?.paymentStatus ?? "");
+  check(
+    "the server computed the price from the database",
+    booking?.subtotal === couplePass.price_inr * 2 && booking?.totalAmount === couplePass.price_inr * 2,
+    `${booking?.subtotal} / ${booking?.totalAmount}`,
+  );
+  check(
+    "the server derived the head count from the pass",
+    booking?.numberOfPeople === 2 * couplePass.number_of_people,
+    `${booking?.numberOfPeople}`,
+  );
+  check("the booking names the pass from the database", booking?.passName === couplePass.name, booking?.passName ?? "");
+  check("the booking carries the night it was made for", booking?.eventDate === freeNightRow.event_date, `${booking?.eventDate}`);
+  check("a new attempt is not flagged as reused", booking?.reusedExisting === false);
+  check(
+    "the response exposes no payment or key material",
+    !JSON.stringify(created.payload).includes("service_role") &&
+      !JSON.stringify(created.payload).includes("web-attempt-1"),
+  );
+
+  const [storedBooking] = await dbQuery(
+    `select booking_status, payment_status, subtotal, total_amount, number_of_people, quantity,
+            customer_name, customer_mobile, customer_email, idempotency_key,
+            razorpay_order_id, razorpay_payment_id, booking_id
+     from public.bookings where booking_id = $1`,
+    [booking?.reference],
+  );
+  check("the booking row is in the database", Boolean(storedBooking));
+  check(
+    "the stored row is pending and unpaid",
+    storedBooking?.booking_status === "pending" && storedBooking?.payment_status === "unpaid",
+    `${storedBooking?.booking_status}/${storedBooking?.payment_status}`,
+  );
+  check(
+    "the stored amounts match the database price",
+    storedBooking?.subtotal === couplePass.price_inr * 2 && storedBooking?.total_amount === couplePass.price_inr * 2,
+    `${storedBooking?.subtotal}`,
+  );
+  check("the stored row has no payment identifiers", storedBooking?.razorpay_order_id === null && storedBooking?.razorpay_payment_id === null);
+  check("the stored row kept the idempotency key", storedBooking?.idempotency_key === "web-attempt-1");
+  check("the name is stored trimmed", storedBooking?.customer_name === "Asha Patel", storedBooking?.customer_name ?? "");
+  check("the mobile is stored in +91 form", storedBooking?.customer_mobile === "+919812345678", storedBooking?.customer_mobile ?? "");
+  check("the email is stored lower-cased", storedBooking?.customer_email === "asha@example.com", storedBooking?.customer_email ?? "");
+  check(
+    "no digital pass is issued before payment",
+    (
+      await dbQuery(`select count(*)::int as n from public.digital_passes d join public.bookings b on b.id = d.booking_id where b.booking_id = $1`, [booking?.reference])
+    )[0].n === 0,
+  );
+
+  // Tampering: amounts in the body must be ignored (they are not part of the API).
+  const tampered = await postBooking({ ...validBody, quantity: 1, numberOfPeople: couplePass.number_of_people, idempotencyKey: "web-attempt-2", subtotal: 1, totalAmount: 1, priceInr: 1 });
+  check("a tampered body is still accepted as a booking", tampered.status === 201, `${tampered.status}`);
+  check(
+    "a price sent by the browser is ignored",
+    tampered.payload?.ok &&
+      tampered.payload.booking.subtotal === couplePass.price_inr &&
+      tampered.payload.booking.totalAmount === couplePass.price_inr,
+    `${tampered.payload?.booking?.subtotal}`,
+  );
+
+  // Duplicate submission: the same attempt re-sent.
+  const replayed = await postBooking(validBody);
+  check("re-sending the same attempt returns 201", replayed.status === 201, `${replayed.status}`);
+  check("the retry returns the original reference", replayed.payload?.booking?.reference === booking?.reference);
+  check("the retry is flagged as reused", replayed.payload?.booking?.reusedExisting === true);
+  check(
+    "the retry created no second row",
+    (await dbQuery(`select count(*)::int as n from public.bookings where idempotency_key = $1`, ["web-attempt-1"]))[0].n === 1,
+  );
+
+  // Duplicate submission: reload, new key, identical content.
+  const reloaded = await postBooking({ ...validBody, idempotencyKey: "web-attempt-3" });
+  check("a reloaded attempt reuses the booking", reloaded.payload?.booking?.reference === booking?.reference);
+  check(
+    "the reloaded attempt added no row",
+    (
+      await dbQuery(
+        `select count(*)::int as n from public.bookings where event_date_id = $1 and customer_mobile = $2 and pass_category_id = $3`,
+        [FREE_NIGHT, "+919812345678", COUPLE_PASS],
+      )
+    )[0].n === 2,
+    "expected 2 rows for this mobile/night/pass: the reload must not add a third",
+  );
+
+  // Validation.
+  const badName = await postBooking({ ...validBody, customerName: "  ", idempotencyKey: "web-attempt-4" });
+  check("an empty name is rejected with 400", badName.status === 400, `${badName.status}`);
+  check("the name error is attached to the field", Boolean(badName.payload?.error?.fieldErrors?.customerName));
+
+  const badMobile = await postBooking({ ...validBody, customerMobile: "12345", idempotencyKey: "web-attempt-5" });
+  check("an invalid mobile is rejected with 400", badMobile.status === 400, `${badMobile.status}`);
+  check(
+    "the mobile error is attached to the field",
+    Boolean(badMobile.payload?.error?.fieldErrors?.customerMobile),
+    JSON.stringify(badMobile.payload?.error?.fieldErrors ?? {}),
+  );
+
+  const badEmail = await postBooking({ ...validBody, customerEmail: "not-an-email", idempotencyKey: "web-attempt-6" });
+  check("an invalid email is rejected with 400", badEmail.status === 400, `${badEmail.status}`);
+  check("the email error is attached to the field", Boolean(badEmail.payload?.error?.fieldErrors?.customerEmail));
+
+  const badQuantity = await postBooking({ ...validBody, quantity: 0, numberOfPeople: 0, idempotencyKey: "web-attempt-7" });
+  check("a quantity of zero is rejected with 400", badQuantity.status === 400, `${badQuantity.status}`);
+  check("the quantity error is attached to the field", Boolean(badQuantity.payload?.error?.fieldErrors?.quantity));
+
+  const noKey = await postBooking({ ...validBody, idempotencyKey: undefined });
+  check("a missing idempotency key is rejected", noKey.status === 400, `${noKey.status}`);
+
+  const overLimit = await postBooking({ ...validBody, quantity: couplePass.max_per_booking + 1, numberOfPeople: (couplePass.max_per_booking + 1) * couplePass.number_of_people, idempotencyKey: "web-attempt-8" });
+  check("a quantity above the pass limit is rejected", overLimit.status === 400, `${overLimit.status}`);
+  check(
+    "the limit comes from the pass category",
+    Boolean(overLimit.payload?.error?.fieldErrors?.quantity),
+    overLimit.payload?.error?.message ?? "",
+  );
+
+  const wrongPeople = await postBooking({ ...validBody, quantity: 2, numberOfPeople: 3, idempotencyKey: "web-attempt-9" });
+  check("a head count that contradicts the pass is rejected", wrongPeople.status === 400, `${wrongPeople.status}`);
+  check(
+    "the head-count error is attached to the field",
+    Boolean(wrongPeople.payload?.error?.fieldErrors?.numberOfPeople),
+    wrongPeople.payload?.error?.message ?? "",
+  );
+
+  const malformed = await postBooking("{not json");
+  check("malformed JSON is rejected with 400", malformed.status === 400, `${malformed.status}`);
+
+  // Capacity and availability.
+  const fullNight = await postBooking({ ...validBody, eventDateId: NIGHT_1, idempotencyKey: "web-attempt-10" });
+  check("a fully booked night is refused with 409", fullNight.status === 409, `${fullNight.status} ${fullNight.payload?.error?.message ?? ""}`);
+  check(
+    "the refusal explains the remaining places",
+    /place/i.test(fullNight.payload?.error?.message ?? ""),
+    fullNight.payload?.error?.message ?? "",
+  );
+
+  const cancelledNight = await postBooking({ ...validBody, eventDateId: NIGHT_2, idempotencyKey: "web-attempt-11" });
+  check("a cancelled night is refused with 409", cancelledNight.status === 409, `${cancelledNight.status}`);
+
+  const soldOutNight = await postBooking({ ...validBody, eventDateId: NIGHT_3, idempotencyKey: "web-attempt-12" });
+  check("a sold-out night is refused with 409", soldOutNight.status === 409, `${soldOutNight.status}`);
+
+  const offSalePass = await postBooking({ ...validBody, passCategoryId: FAMILY_PASS, quantity: 1, numberOfPeople: 4, idempotencyKey: "web-attempt-13" });
+  check("a pass that is off sale is refused with 409", offSalePass.status === 409, `${offSalePass.status}`);
+  check(
+    "the off-sale refusal is attached to the pass field",
+    Boolean(offSalePass.payload?.error?.fieldErrors?.passCategoryId),
+    JSON.stringify(offSalePass.payload?.error?.fieldErrors ?? {}),
+  );
+
+  // Nothing above may have taken money or booked over capacity.
+  check(
+    "no booking created through the API is marked paid",
+    (await dbQuery(`select count(*)::int as n from public.bookings where payment_status = 'paid' and customer_mobile = $1`, ["+919812345678"]))[0].n === 0,
+  );
+  check(
+    "a pending booking does not consume capacity",
+    JSON.stringify(
+      await dbQuery(`select booked_people, remaining from public.get_event_night_availability($1) where event_date_id = $2`, [EVENT_ID, FREE_NIGHT]),
+    ) === JSON.stringify(availabilityBefore),
+  );
+  check(
+    "the fully booked night still reports no places left",
+    (await dbQuery(`select remaining from public.get_event_night_availability($1) where event_date_id = $2`, [EVENT_ID, NIGHT_1]))[0].remaining === 0,
+  );
+
+  // No endpoint reads bookings back out.
+  const getBookings = await fetch(API_URL);
+  check("bookings cannot be read back through the API", getBookings.status === 405, `${getBookings.status}`);
 
   // ---------------------------------------------------------------------------
   section("Result");

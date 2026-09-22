@@ -94,7 +94,7 @@ export function PassCard({ pass, bookHref = "/book", variant = "full", popular, 
               Book this pass
             </Button>
             <p className="text-muted/80 text-center text-xs">
-              Checkout opens with Razorpay in a later step.
+              Reserve now — online payment is not live yet.
             </p>
           </>
         ) : (

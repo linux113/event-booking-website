@@ -316,7 +316,7 @@ async function main() {
     await q(`select * from public.bookings where customer_email = 'test@example.com';`)
   )[0];
 
-  check("booking_id auto-generated", /^BK\d{4}-\d{5}$/.test(booking.booking_id), booking.booking_id);
+  check("booking_id auto-generated (DND202600001 style)", /^DND\d{9}$/.test(booking.booking_id), booking.booking_id);
   check("subtotal computed from the DB price (499 × 2)", booking.subtotal === 998, `got ${booking.subtotal}`);
   check(
     "client-supplied subtotal and total ignored on insert",
@@ -568,6 +568,237 @@ async function main() {
   check("scanner cannot edit events", scannerEdit <= 0, `affected rows: ${scannerEdit}`);
 
   await run("reset request.jwt.claim.sub;");
+
+
+  // ---------------------------------------------------------------------------
+  section("Booking flow: reference, duplicate protection, atomic create");
+  // ---------------------------------------------------------------------------
+  const EVENT = "e0000000-0000-4000-8000-000000000001";
+  const COUPLE = "c0000000-0000-4000-8000-000000000002"; // 499 INR, 2 people, max 10
+  const FAMILY = "c0000000-0000-4000-8000-000000000005"; // 1099 INR, 4 people, max 5
+  const NIGHT_FREE = "d0000000-0000-4000-8000-000000000004";
+  const NIGHT_CANCEL = "d0000000-0000-4000-8000-000000000005";
+  const NIGHT_FULL = "d0000000-0000-4000-8000-000000000006";
+  const BOOKING_FN =
+    "public.create_pending_booking(uuid, uuid, uuid, text, text, text, integer, integer, text)";
+
+  async function createBooking(overrides = {}) {
+    const args = {
+      p_event_id: EVENT,
+      p_event_date_id: NIGHT_FREE,
+      p_pass_category_id: COUPLE,
+      p_customer_name: "Asha Patel",
+      p_customer_mobile: "+919812345678",
+      p_customer_email: "asha@example.com",
+      p_quantity: 2,
+      p_number_of_people: 4,
+      p_idempotency_key: null,
+      ...overrides,
+    };
+
+    const names = Object.keys(args);
+    const placeholders = names.map((name, index) => `${name} => $${index + 1}`).join(", ");
+    const rows = await q(`select * from public.create_pending_booking(${placeholders})`, Object.values(args));
+
+    return rows[0];
+  }
+
+  /** Runs a booking expected to be rejected and returns the Postgres error. */
+  async function createBookingError(overrides = {}) {
+    try {
+      await createBooking(overrides);
+      return null;
+    } catch (error) {
+      return error;
+    }
+  }
+
+  const bookingRef = (await q("select public.generate_booking_id() as ref;"))[0].ref;
+  check("booking reference uses the DND<year><5 digits> format", /^DND\d{4}\d{5}$/.test(bookingRef), bookingRef);
+
+  const idempotencyIndex = await q(`
+    select indexdef from pg_indexes
+    where schemaname = 'public' and tablename = 'bookings' and indexname = 'bookings_idempotency_key_idx';
+  `);
+  check(
+    "idempotency keys are unique at the database level",
+    idempotencyIndex.length === 1 && /unique/i.test(idempotencyIndex[0].indexdef),
+  );
+
+  const [fnSecurity] = await q(`
+    select p.prosecdef as is_definer,
+           coalesce(array_to_string(p.proconfig, ','), '') as config,
+           pg_get_function_arguments(p.oid) as args
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.proname = 'create_pending_booking';
+  `);
+  check("booking function is SECURITY DEFINER", fnSecurity?.is_definer === true);
+  check(
+    "booking function pins search_path",
+    (fnSecurity?.config ?? "").includes("search_path=public"),
+    fnSecurity?.config ?? "",
+  );
+  check(
+    "booking function accepts no amount from the caller",
+    !/price|subtotal|total|amount/i.test(fnSecurity?.args ?? ""),
+    fnSecurity?.args ?? "",
+  );
+
+  const [fnGrants] = await q(`
+    select
+      has_function_privilege('anon', '${BOOKING_FN}', 'execute') as anon_can,
+      has_function_privilege('authenticated', '${BOOKING_FN}', 'execute') as authenticated_can,
+      has_function_privilege('service_role', '${BOOKING_FN}', 'execute') as service_can;
+  `);
+  check("anon cannot execute the booking function", fnGrants.anon_can === false);
+  check("authenticated cannot execute the booking function", fnGrants.authenticated_can === false);
+  check("service_role can execute the booking function", fnGrants.service_can === true);
+
+  const anonDirectInsert = await (async () => {
+    await run("set role anon;");
+    try {
+      await q(`
+        insert into public.bookings (customer_name, customer_mobile, customer_email,
+                                     event_date_id, pass_category_id, quantity)
+        values ('Rogue', '+919812345678', 'rogue@example.com', '${NIGHT_FREE}', '${COUPLE}', 1);
+      `);
+      return null;
+    } catch (error) {
+      return error;
+    } finally {
+      await run("reset role;");
+    }
+  })();
+  check(
+    "anon still cannot insert a booking directly",
+    anonDirectInsert !== null,
+    anonDirectInsert?.code ?? "insert succeeded",
+  );
+
+  // A valid booking: price and head count must come from the database.
+  const created = await createBooking({ p_idempotency_key: "test-key-1" });
+  check("booking is created with status pending", created.booking_status === "pending", created.booking_status);
+  check("booking is created unpaid", created.payment_status === "unpaid", created.payment_status);
+  check("booking reference matches the generator", /^DND\d{9}$/.test(created.booking_reference), created.booking_reference);
+  check("subtotal is quantity x database price", created.subtotal === 2 * 499, `${created.subtotal}`);
+  check("total equals the subtotal", created.total_amount === created.subtotal);
+  check("people are derived from the pass category", created.number_of_people === 4, `${created.number_of_people}`);
+  check("first attempt is not flagged as reused", created.was_existing === false);
+
+  const [stored] = await q(`select * from public.bookings where id = '${created.booking_uuid}';`);
+  check("booking row is persisted", Boolean(stored));
+  check("booking row stores the idempotency key", stored.idempotency_key === "test-key-1");
+  check("no payment identifiers are set", stored.razorpay_order_id === null && stored.razorpay_payment_id === null);
+  check(
+    "no digital pass is issued before payment",
+    (await q(`select count(*)::int as n from public.digital_passes where booking_id = '${created.booking_uuid}';`))[0].n === 0,
+  );
+
+  // Duplicate submission: same key.
+  const replay = await createBooking({ p_idempotency_key: "test-key-1" });
+  check("replaying the same key returns the same booking", replay.booking_reference === created.booking_reference);
+  check("the replay is flagged as reused", replay.was_existing === true);
+  check(
+    "the replay created no second row",
+    (await q(`select count(*)::int as n from public.bookings where idempotency_key = 'test-key-1';`))[0].n === 1,
+  );
+
+  // Duplicate submission: new key, identical content (page reload).
+  const contentDuplicate = await createBooking({ p_idempotency_key: "test-key-2" });
+  check("an identical booking attempt is reused, not duplicated", contentDuplicate.was_existing === true);
+  check(
+    "identical content did not add a row",
+    (
+      await q(
+        `select count(*)::int as n from public.bookings where event_date_id = '${NIGHT_FREE}' and customer_mobile = '+919812345678';`,
+      )
+    )[0].n === 1,
+  );
+
+  // A genuinely different booking is still allowed.
+  const different = await createBooking({ p_quantity: 1, p_number_of_people: 2, p_idempotency_key: "test-key-3" });
+  check("a different booking is still created", different.was_existing === false);
+
+  // Rejections.
+  const tooMany = await createBookingError({
+    p_pass_category_id: FAMILY,
+    p_quantity: 6,
+    p_number_of_people: 24,
+    p_idempotency_key: "test-key-4",
+  });
+  check("quantity above max_per_booking is rejected", tooMany?.code === "PB004", tooMany?.code ?? "no error");
+
+  const wrongPeople = await createBookingError({
+    p_quantity: 2,
+    p_number_of_people: 3,
+    p_idempotency_key: "test-key-5",
+  });
+  check("a head count that contradicts the pass is rejected", wrongPeople?.code === "PB005", wrongPeople?.code ?? "no error");
+  check("the rejection reports the expected head count", wrongPeople?.detail === "4", wrongPeople?.detail ?? "");
+
+  await run(`update public.pass_categories set is_active = false where id = '${FAMILY}';`);
+  const disabledPass = await createBookingError({
+    p_pass_category_id: FAMILY,
+    p_quantity: 1,
+    p_number_of_people: 4,
+    p_idempotency_key: "test-key-6",
+  });
+  check("a pass that is off sale cannot be booked", disabledPass?.code === "PB003", disabledPass?.code ?? "no error");
+  await run(`update public.pass_categories set is_active = true where id = '${FAMILY}';`);
+
+  await run(`update public.event_dates set status = 'cancelled' where id = '${NIGHT_CANCEL}';`);
+  const cancelled = await createBookingError({
+    p_event_date_id: NIGHT_CANCEL,
+    p_idempotency_key: "test-key-7",
+  });
+  check("a cancelled night cannot be booked", cancelled?.code === "PB002", cancelled?.code ?? "no error");
+  await run(`update public.event_dates set status = 'scheduled' where id = '${NIGHT_CANCEL}';`);
+
+  const unknownNight = await createBookingError({
+    p_event_date_id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    p_idempotency_key: "test-key-8",
+  });
+  check("an unknown night is rejected", unknownNight?.code === "PB006", unknownNight?.code ?? "no error");
+
+  const wrongEvent = await createBookingError({
+    p_event_id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    p_idempotency_key: "test-key-9",
+  });
+  check("a night that belongs to another event is rejected", wrongEvent?.code === "PB006", wrongEvent?.code ?? "no error");
+
+  // Capacity: 4 places, 4 already paid for.
+  await run(`update public.event_dates set capacity = 4 where id = '${NIGHT_FULL}';`);
+  await run(`
+    insert into public.bookings (customer_name, customer_mobile, customer_email, event_date_id,
+                                 pass_category_id, quantity, booking_status, payment_status)
+    values ('Paid Guest', '+919800000001', 'paid@example.com', '${NIGHT_FULL}', '${COUPLE}', 2, 'confirmed', 'paid');
+  `);
+  const overCapacity = await createBookingError({
+    p_event_date_id: NIGHT_FULL,
+    p_quantity: 1,
+    p_number_of_people: 2,
+    p_idempotency_key: "test-key-10",
+  });
+  check("a full night cannot take another booking", overCapacity?.code === "PB001", overCapacity?.code ?? "no error");
+  check("the capacity error reports 0 places left", overCapacity?.detail === "0", overCapacity?.detail ?? "");
+
+  // A pending booking must not consume capacity (nothing is paid yet).
+  const availability = await q(`select * from public.get_event_night_availability('${EVENT}');`);
+  const freeNight = availability.find((row) => row.event_date_id === NIGHT_FREE);
+  check(
+    "pending bookings do not consume capacity",
+    freeNight.booked_people === 0 && freeNight.is_bookable === true,
+    `booked ${freeNight.booked_people}`,
+  );
+  const fullNight = availability.find((row) => row.event_date_id === NIGHT_FULL);
+  check(
+    "paid bookings do fill a night",
+    fullNight.is_fully_booked === true && fullNight.remaining === 0,
+    `remaining ${fullNight.remaining}`,
+  );
+
+  await run(`update public.event_dates set capacity = 1500 where id = '${NIGHT_FULL}';`);
 
   // ---------------------------------------------------------------------------
   section("Result");

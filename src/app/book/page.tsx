@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 
-import { NightSelector } from "@/components/booking/night-selector";
-import { PassCard } from "@/components/events/pass-card";
+import { BookingWizard } from "@/components/booking/booking-wizard";
 import { CalendarIcon, CheckIcon, MapPinIcon, SparkleIcon } from "@/components/icons";
 import { PageHero } from "@/components/layout/page-hero";
 import { WhatsAppButton } from "@/components/layout/whatsapp-button";
@@ -9,23 +8,28 @@ import { Button } from "@/components/ui/button";
 import { Container, Section } from "@/components/ui/container";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
-import { SectionHeading } from "@/components/ui/section-heading";
 import { formatDateRange, formatTimeRange } from "@/lib/format";
 import { getFeaturedEventBundle } from "@/lib/services/events";
 
 export const metadata: Metadata = {
   title: "Book Now",
   description:
-    "Choose your night and passes for the Navratri and Dandiya festival. Online checkout opens with Razorpay in the next build step.",
+    "Reserve passes for the Navratri and Dandiya festival in four steps: choose your night, choose your pass, add your details and review. The booking is created as pending — no payment is collected yet.",
 };
 
 // Availability must be current on every request.
 export const dynamic = "force-dynamic";
 
+const AFTER_CONFIRMING = [
+  "A booking reference like DND202600001 is created and shown on screen.",
+  "The booking is stored as pending with payment not yet made — nothing is charged on this site.",
+  "The organiser confirms your booking on WhatsApp, and your QR pass is issued once payment is received.",
+] as const;
+
 const WHAT_YOU_NEED = [
   "A mobile number that can receive the booking confirmation",
-  "A UPI app, card or netbanking account for the Razorpay checkout",
-  "One lead name per pass group for the entry register",
+  "The lead guest's full name for the entry register",
+  "One email address for the confirmation",
   "Photo ID for the lead guest, checked at the gate",
 ] as const;
 
@@ -63,8 +67,6 @@ export default async function BookPage() {
   }
 
   const { event, nights, passes } = bundle;
-  const bookableNights = nights.filter((night) => night.isBookable);
-  const bookablePasses = passes.filter((pass) => pass.availability.enabled);
   const firstNight = nights[0];
   const timeRange = firstNight ? formatTimeRange(firstNight.startTime, firstNight.endTime) : null;
 
@@ -73,16 +75,17 @@ export default async function BookPage() {
       <PageHero
         eyebrow="Book now"
         title="Reserve your pass"
-        description="Pick your night and pass below. Checkout is not live yet — this page collects nothing and takes no payment until Razorpay is wired up in the next step."
+        description="Four steps: night, pass, your details, review. Availability and prices are read from the database, and your total is calculated on the server when you confirm."
       >
         <div className="flex flex-col gap-3 sm:flex-row">
-          <Button href="/passes" size="lg" className="w-full sm:w-auto">
-            View Passes
+          <Button href="#checkout" size="lg" className="w-full sm:w-auto">
+            Start booking
           </Button>
           <WhatsAppButton
             variant="full"
             size="lg"
             className="w-full sm:w-auto"
+            number={event.contactPhone?.replace(/[^0-9]/g, "")}
             message="Hi! I'd like help booking passes for the Navratri event."
           />
         </div>
@@ -93,12 +96,14 @@ export default async function BookPage() {
           <div className="border-marigold/40 bg-marigold/8 flex flex-col gap-3 rounded-2xl border p-6">
             <h2 className="flex items-center gap-2.5 text-lg font-semibold tracking-tight">
               <SparkleIcon className="text-marigold size-5" />
-              Checkout is not open yet
+              No payment is taken here yet
             </h2>
             <p className="text-muted text-sm/7">
-              Choosing a night and a pass below does not reserve anything: the booking and payment
-              steps arrive with Razorpay. For group or corporate bookings, message the organiser on
-              WhatsApp and availability will be confirmed manually.
+              Confirming creates a real booking with a reference number, stored as{" "}
+              <strong className="font-semibold">pending</strong> and{" "}
+              <strong className="font-semibold">not paid</strong>. Online payment (Razorpay) arrives in
+              the next step — until then nothing is charged, and no card or UPI details are collected on
+              this website.
             </p>
             <div className="flex flex-wrap gap-3 pt-1">
               <WhatsAppButton
@@ -115,19 +120,9 @@ export default async function BookPage() {
         </Container>
       </Section>
 
-      <Section className="pt-0">
-        <Container className="grid gap-6 lg:grid-cols-[1fr_0.85fr]">
-          <div className="border-border bg-surface/50 flex flex-col gap-5 rounded-2xl border p-6">
-            <div className="flex flex-col gap-1">
-              <h2 className="text-lg font-semibold tracking-tight">Available nights</h2>
-              <p className="text-muted text-sm/6">
-                {bookableNights.length} of {nights.length} nights can be booked right now. Fully
-                booked and cancelled nights are shown but cannot be selected.
-              </p>
-            </div>
-
-            <NightSelector nights={nights} />
-          </div>
+      <Section className="pt-0" id="checkout">
+        <Container className="grid gap-6 lg:grid-cols-[1fr_0.8fr]">
+          <BookingWizard event={event} nights={nights} passes={passes} />
 
           <div className="flex flex-col gap-6">
             <div className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-6">
@@ -165,41 +160,21 @@ export default async function BookPage() {
                   </li>
                 ))}
               </ul>
+            </div>
+
+            <div className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-6">
+              <h2 className="text-lg font-semibold tracking-tight">After you confirm</h2>
+              <ol className="text-muted flex list-decimal flex-col gap-2.5 pl-5 text-sm/6">
+                {AFTER_CONFIRMING.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ol>
               <p className="text-muted/80 border-border/70 border-t pt-4 text-xs">
-                Refunds, transfers and cancellations are governed by the organiser&apos;s policy,
-                which will be published here alongside the checkout.
+                Refunds, transfers and cancellations follow the organiser&apos;s policy, which will be
+                published here alongside the checkout.
               </p>
             </div>
           </div>
-        </Container>
-      </Section>
-
-      <Section className="pt-0">
-        <Container className="flex flex-col gap-8">
-          <SectionHeading
-            eyebrow="Choose a pass"
-            title="Passes on sale"
-            description={
-              bookablePasses.length === passes.length
-                ? "Every pass type is currently on sale."
-                : `${bookablePasses.length} of ${passes.length} pass types are on sale. Disabled passes cannot be booked.`
-            }
-          />
-
-          {passes.length > 0 ? (
-            <ul className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-              {passes.map((pass) => (
-                <li key={pass.id} className="h-full">
-                  <PassCard pass={pass} variant="preview" />
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <EmptyState
-              title="No passes on sale"
-              description="This event has no pass categories yet."
-            />
-          )}
         </Container>
       </Section>
     </>

@@ -1,7 +1,5 @@
 "use client";
 
-import { useState } from "react";
-
 import { ClockIcon, UsersIcon } from "@/components/icons";
 import { Badge } from "@/components/ui/badge";
 import { formatEventDate, formatTimeRange } from "@/lib/format";
@@ -10,20 +8,22 @@ import type { EventNight } from "@/types";
 
 type NightSelectorProps = {
   nights: readonly EventNight[];
+  /** Currently selected night id, or null. Controlled by the checkout wizard. */
+  value: string | null;
+  onChange: (nightId: string) => void;
+  /** Disabled while a booking request is in flight. */
+  disabled?: boolean;
 };
 
 /**
- * Night picker for the booking page.
+ * Night picker for the checkout wizard.
  *
- * Selection is local only: there is no checkout yet, so choosing a night does
- * not create a booking or take a payment. Nights that are fully booked,
- * cancelled or finished are rendered as disabled inputs — they cannot be
- * selected — with the reason shown next to them.
+ * Fully controlled: the wizard owns the selection so it can validate it, send it
+ * to the server and keep it when the visitor steps back and forth. Fully booked,
+ * cancelled and finished nights are disabled inputs with the reason attached —
+ * they can never be selected, and the server checks availability again anyway.
  */
-export function NightSelector({ nights }: NightSelectorProps) {
-  const firstBookable = nights.find((night) => night.isBookable);
-  const [selectedId, setSelectedId] = useState<string | null>(firstBookable?.id ?? null);
-
+export function NightSelector({ nights, value, onChange, disabled }: NightSelectorProps) {
   if (nights.length === 0) {
     return (
       <p className="text-muted text-sm">
@@ -32,10 +32,8 @@ export function NightSelector({ nights }: NightSelectorProps) {
     );
   }
 
-  const selected = nights.find((night) => night.id === selectedId) ?? null;
-
   return (
-    <fieldset className="flex flex-col gap-4">
+    <fieldset className="flex flex-col gap-4" disabled={disabled}>
       <legend className="text-muted/80 text-[0.6875rem] font-semibold tracking-widest uppercase">
         Choose your night
       </legend>
@@ -45,18 +43,12 @@ export function NightSelector({ nights }: NightSelectorProps) {
           <li key={night.id}>
             <NightOption
               night={night}
-              selected={night.id === selectedId}
-              onSelect={() => setSelectedId(night.id)}
+              selected={night.id === value}
+              onSelect={() => onChange(night.id)}
             />
           </li>
         ))}
       </ul>
-
-      <p aria-live="polite" className="text-muted text-sm">
-        {selected
-          ? `${formatEventDate(selected.date)} selected — checkout opens in the next step.`
-          : "Every night is currently unavailable. Message the organiser on WhatsApp for help."}
-      </p>
     </fieldset>
   );
 }

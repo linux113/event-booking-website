@@ -16,8 +16,10 @@
  *   shim cannot model shows up as a visible warning in the test output.
  *
  * Supports: GET /rest/v1/<table> with select, eq/in/gte/lte/is filters, order,
- * limit; POST /rest/v1/rpc/<function> with JSON arguments; anon/authenticated
- * roles derived from the Authorization header, so RLS is exercised for real.
+ * limit; POST /rest/v1/rpc/<function> with JSON arguments; anon/authenticated/
+ * service_role derived from the Authorization header, so RLS is exercised for
+ * real. Raised exceptions keep their SQLSTATE/detail, which is how the booking
+ * API tells capacity failures from duplicate submissions.
  */
 import { createServer } from "node:http";
 
@@ -236,8 +238,22 @@ export async function startShim({ db, port = 0, log = false }) {
 
       respond(res, 404, { message: "Not found" });
     })().catch((error) => {
-      console.error("  shim error:", error.message);
-      respond(res, 400, { message: error.message, code: "SHIM_ERROR" });
+      // PostgREST hands the client the real SQLSTATE, message and detail. The app
+      // branches on the code (capacity, pass not on sale, duplicate key), so the
+      // shim must not flatten them into a generic error.
+      const code = typeof error?.code === "string" && error.code.length === 5 ? error.code : "SHIM_ERROR";
+      const status = code === "23505" ? 409 : 400;
+
+      if (code === "SHIM_ERROR") {
+        console.error("  shim error:", error.message);
+      }
+
+      respond(res, status, {
+        message: error?.message ?? "shim error",
+        code,
+        details: error?.detail ?? null,
+        hint: error?.hint ?? null,
+      });
     });
   });
 
