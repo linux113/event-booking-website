@@ -214,17 +214,38 @@ word on what they mean:
   (`owner → super_admin`, `manager → admin`, `scanner → staff`), and `is_owner()` was
   dropped rather than kept as a second name for one question.
 
-### Admin lookups
+### Admin reads
 
-Two `service_role`-only functions back the admin area, so that the app never counts or
+Five `service_role`-only functions back the admin area, so that the app never counts or
 filters rows by pulling a table into Node:
 
 | Function | What it does |
 | -------- | ------------ |
 | `admin_lookup_bookings(p_query, p_include_contact, p_limit)` | Finds bookings by reference, mobile number (however it was typed) or guest name. **The contact columns — mobile, email, amount, Razorpay order id — come back `null` when `p_include_contact` is false**, which is the limited view a `staff` role gets. The withholding happens in the query, not in the UI |
-| `admin_dashboard_stats(p_today)` | One row of live counts: bookings by payment state, passes issued/active/used, check-ins for `p_today`, nights, gallery state and staff accounts. `p_today` is the *venue's* date, so "tonight" means the venue's tonight |
+| `admin_dashboard_stats(p_today, p_tz, p_include_revenue)` | One row of 28 live counts: bookings by status and payment state, today's bookings, total/today's/refunded revenue, check-ins, passes issued/active/used, people on paid bookings, capacity total/taken/available over the scheduled nights still to come, tonight's own capacity figures, nights, gallery state and staff accounts |
+| `admin_booking_series(p_today, p_days, p_tz, p_include_revenue)` | One row per day over the last `p_days` (1–90, default 14), **including the days with nothing in them** — a chart with gaps in it tells a different story than the data does. Per day: bookings, confirmed bookings, and paid revenue |
+| `admin_pass_breakdown(p_include_revenue)` | Every pass category — including the ones nobody bought — with its bookings, paid bookings, passes issued, people and takings, ordered biggest first |
+| `admin_recent_bookings(p_limit, p_include_contact)` | The newest bookings (1–50, default 8), joined to their night and pass. **The mobile number, email address and amount are `null` when `p_include_contact` is false** |
 
-Both are revoked from `PUBLIC`, `anon` and `authenticated` and granted only to
+Three conventions run through the dashboard functions:
+
+- **Days are the venue's days.** Every date calculation takes `p_tz` (the app passes
+  `siteConfig.timezone`) rather than assuming UTC, so a booking taken at 1am in Jaipur is
+  counted on the night it was taken. `p_today` is the venue's date, so "tonight" means
+  the venue's tonight.
+- **Money is withheld, never zeroed.** When `p_include_revenue` is false the revenue
+  columns return `NULL`, so a role without `payments:view` receives no figure to render —
+  the app cannot accidentally show a number it was not given, and "no revenue" stays
+  distinguishable from "not your business".
+- **Revenue means paid.** `payment_status = 'paid'` is the only definition used; a
+  refunded booking stops counting the moment it is refunded, which is why the tests can
+  refund one and watch the total move.
+
+`admin_dashboard_stats` replaced the one-argument version from the step-8 migration
+rather than sitting beside it: two functions answering the same question is how a
+dashboard ends up disagreeing with itself.
+
+All five are revoked from `PUBLIC`, `anon` and `authenticated` and granted only to
 `service_role`: a leaked anon key cannot enumerate bookings or read the day's takings.
 
 ### Integrity rules worth knowing

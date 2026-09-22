@@ -18,8 +18,9 @@ fits within free tiers for development and small-scale launch.
 | 6 | Digital pass + QR code — issued only after a verified payment, printable ticket, gate view | ✅ done |
 | 7 | QR verification and entry — staff sign-in, mobile camera scanner, server-side check-in | ✅ done |
 | 8 | Admin authentication — staff sign-in, three roles, protected routes, logout, booking lookup | ✅ done |
-| 9 | Admin dashboard — publish events, capacity, gallery and staff management screens | ⏳ next |
-| 10 | Hardening — rate limiting, analytics, perf budget | ⏳ |
+| 9 | Admin dashboard — eight live statistics, charts, recent bookings, loading skeletons and error states | ✅ done |
+| 10 | Operations screens — publish events, capacity and dates, gallery, payments and passes | ⏳ next |
+| 11 | Hardening — rate limiting, analytics, perf budget | ⏳ |
 
 Step 3 is two halves of one job — the Supabase schema/RLS layer, then replacing every
 hard-coded value in the UI with database reads. Both are done and verified against real
@@ -48,7 +49,7 @@ signature — never by the browser saying so.
 | `/pass/[passId]/download` | The pass as a standalone SVG ticket, or just the QR code as a PNG (`?format=png`). Token-guarded and never cached |
 | `/verify/[token]` | What the QR code opens — the gate view: `VALID`, `ALREADY CHECKED IN`, `CANCELLED`, `EXPIRED` or `NOT A VALID PASS`. Read-only |
 | `/admin/login` | Staff sign-in: Supabase Auth email + password, then the `admin_users` allow-list. A valid account that is not staff is signed back out with an explanation |
-| `/admin` | Staff dashboard: the live numbers, plus exactly the sections the signed-in role may open |
+| `/admin` | The dashboard: eight statistics (bookings, revenue, check-ins, capacity), bookings and revenue by date, the pass-category distribution, the newest bookings, plus exactly the sections the signed-in role may open |
 | `/admin/scanner` | The gate: camera QR scanner, the verdict for the pass that was scanned, and the CHECK IN button that burns it. Every role; the page itself never writes |
 | `/admin/bookings` | Booking lookup by reference, mobile number or guest name. One page, two views: an admin sees contact details and amounts, a staff member sees the guest and the pass |
 | `/admin/settings` | The event, venue and deployment values the public site reads. Admin and super admin |
@@ -256,6 +257,54 @@ not just clearing a cookie — and deletes the session cookies on the way out. A
 copied from a gate phone before the shift ends no longer works afterwards; the harness
 tests exactly that.
 
+## The dashboard (`/admin`)
+
+The dashboard answers one question — *how is the event doing right now?* — and it is
+built so that the answer can be trusted at 9pm on a Saturday.
+
+| Statistic | Comes from |
+| --------- | ---------- |
+| Total bookings, confirmed, awaiting payment, today's bookings | `bookings` + `booking_status` / `payment_status`, `created_at` in the venue's timezone |
+| Total revenue, today's revenue | `sum(total_amount)` where `payment_status = 'paid'` — **a refunded booking stops counting the moment it is refunded** |
+| Checked-in visitors | `check_ins` (all time), with tonight's entries beside it |
+| Available capacity | `sum(event_dates.capacity) − sum(paid bookings' people)` over the nights still to come, floored at zero |
+| Bookings by date, revenue by date | `admin_booking_series()` — one row per day in the window, quiet days included as zeros |
+| Pass category distribution | `admin_pass_breakdown()` — bookings, people, passes and takings per pass category, biggest first |
+| Recent bookings | `admin_recent_bookings()` — newest first, with the night and pass each one holds |
+
+**Every number is counted in Postgres.** Four `service_role`-only functions do the
+aggregating (see `supabase/README.md`), and `src/lib/services/admin.ts` fetches them in
+one parallel round trip. Nothing is summed in the browser, and nothing is summed in
+Node either: the page receives figures, not rows it must add up. That is also why the
+charts need no data-fetching client component — they are drawn from what the server
+already knows.
+
+**Days are the venue's days.** `p_tz` is `siteConfig.timezone`, so a booking taken at
+1am in Jaipur lands on the night it was actually taken, not on yesterday in UTC.
+
+**Money and contact details are withheld by returning `NULL`, not by hiding them.**
+The page passes the signed-in role's capabilities down as `p_include_revenue` and
+`p_include_contact`; a staff session's dashboard therefore arrives with no amounts and
+no guest mobile numbers in it at all, and says so in words where the figures would be:
+*"Visible to admins"*. The database is the thing saying no.
+
+**Capacity is summed over nights, not over bookings.** Summing `capacity` across a
+booking join multiplies a busy night's capacity once per booking — the sort of wrong
+number that looks plausible on a dashboard — so the nights and the people are aggregated
+separately and subtracted. Only *paid* people take capacity.
+
+**The charts are drawn with elements, not a charting library.** Fourteen bars of
+percentages, an axis rounded up to a readable maximum, and the same series rendered
+again as a visually hidden table so the chart is readable by a screen reader and by
+`curl`. Adding 40kB of JavaScript to draw fourteen bars would have made the dashboard
+slower than the thing it describes.
+
+**Every state is honest.** `loading.tsx` streams a skeleton shaped like the finished
+page; `error.tsx` catches anything the page's own error branch misses and offers a
+retry that keeps the session; and a failure is never rendered as a zero. The dashboard
+holds no cached summary and no placeholder figures — if the database is unreachable, the
+page says so.
+
 ## Gate check-in (`/admin/scanner`)
 
 The scanner is the only part of the site that *changes* a pass, so it is built around one
@@ -327,6 +376,7 @@ Supabase directly.
 | A check-in record | `check_in_pass()` — the same verdict plus a compare-and-swap on the pass row and one `check_ins` row |
 | An admin booking lookup | `admin_lookup_bookings()` — the search runs in Postgres, and the contact columns come back null for a role without `bookings:view_contact` |
 | The dashboard numbers | `admin_dashboard_stats()` — counted in the database, for the venue's today |
+| The dashboard's charts | `admin_booking_series()` (a row per day, quiet days included) and `admin_pass_breakdown()` (per pass category) — both aggregated in SQL |
 | The signed-in role, at the edge | `current_staff_role()` — the caller's own role and nothing else, so the request hook can refuse before a page renders |
 
 Availability is never computed in the browser: `get_event_night_availability()` is a
@@ -539,3 +589,7 @@ production. `src/config/env.ts` is the only module that reads `process.env`.
   so `http://` on a laptop's LAN address will not open one.
 - Give at least one person `super_admin` — the staff list and any future role changes
   are behind that role, and it is the only one that can restore somebody's access.
+- Check `/admin` on the night the first real booking lands: the dashboard's figures are
+  live queries, so what it shows is what the tables hold — but "available capacity" only
+  means something once `event_dates.capacity` has been set to the venue's real ceiling
+  rather than the seed value.

@@ -1949,9 +1949,9 @@ async function main() {
 
   const statsGrants = await q(`
     select
-      has_function_privilege('anon', 'public.admin_dashboard_stats(date)', 'execute') as anon,
-      has_function_privilege('authenticated', 'public.admin_dashboard_stats(date)', 'execute') as authenticated,
-      has_function_privilege('service_role', 'public.admin_dashboard_stats(date)', 'execute') as service;
+      has_function_privilege('anon', 'public.admin_dashboard_stats(date, text, boolean)', 'execute') as anon,
+      has_function_privilege('authenticated', 'public.admin_dashboard_stats(date, text, boolean)', 'execute') as authenticated,
+      has_function_privilege('service_role', 'public.admin_dashboard_stats(date, text, boolean)', 'execute') as service;
   `);
   check(
     "only the service role may read the dashboard counts",
@@ -1963,8 +1963,12 @@ async function main() {
     select ((now() at time zone 'UTC')::date)::text as today,
            (((now() at time zone 'UTC')::date) - 1)::text as yesterday;
   `);
-  const statsForToday = (await rpc("admin_dashboard_stats", { p_today: statsToday.today }))[0];
-  const statsForYesterday = (await rpc("admin_dashboard_stats", { p_today: statsToday.yesterday }))[0];
+  const venueTz = "Asia/Kolkata";
+  const statsForToday = (await rpc("admin_dashboard_stats", { p_today: statsToday.today, p_tz: venueTz }))[0];
+  const statsForYesterday = (await rpc("admin_dashboard_stats", {
+    p_today: statsToday.yesterday,
+    p_tz: venueTz,
+  }))[0];
 
   check(
     "the dashboard counts bookings, passes and staff",
@@ -1980,10 +1984,19 @@ async function main() {
     statsForToday.check_ins_today >= 1 && statsForYesterday.check_ins_today === 0,
     `today ${statsForToday.check_ins_today} / yesterday ${statsForYesterday.check_ins_today}`,
   );
+  // `passes_active` counts passes that are active and unused; `passes_used` counts
+  // passes that have been through the gate. They are subsets of what was issued, not
+  // two halves of it — a hand-edited fixture can be both — so each is bounded.
   check(
-    "the counts add up: every pass is either used or not",
-    statsForToday.passes_used + statsForToday.passes_active <= statsForToday.passes_issued,
-    `${statsForToday.passes_used} + ${statsForToday.passes_active} / ${statsForToday.passes_issued}`,
+    "issued passes bound both the used and the unused counts",
+    statsForToday.passes_used <= statsForToday.passes_issued &&
+      statsForToday.passes_active <= statsForToday.passes_issued,
+    `${statsForToday.passes_used} used + ${statsForToday.passes_active} unused / ${statsForToday.passes_issued} issued`,
+  );
+  check(
+    "a check-in never outnumbers the passes in existence",
+    statsForToday.check_ins_total <= statsForToday.passes_issued,
+    `${statsForToday.check_ins_total} entries / ${statsForToday.passes_issued} passes`,
   );
   check(
     "paid bookings never exceed all bookings",
@@ -2005,6 +2018,751 @@ async function main() {
     ownerFunction !== null,
     ownerFunction ?? "is_owner() still callable",
   );
+
+  // ---------------------------------------------------------------------------
+  section("Admin dashboard: statistics against the rows they count");
+  // ---------------------------------------------------------------------------
+  // A dashboard is only as trustworthy as the arithmetic under it, so the numbers
+  // are checked two ways. First as deltas: a fixture is inserted whose effect on
+  // every counter is known by hand, including a refund and a check-in. Then against
+  // a second, separately written query over the same tables, so a statistic that
+  // quietly stops matching its own rows fails here rather than on the wall chart.
+  const DASH_TZ = "Asia/Kolkata";
+  const DASH_NIGHT = "d0000000-0000-4000-8000-0000000000d9";
+  const DASH_ORDER_1 = "order_DASH000000000001";
+  const DASH_ORDER_2 = "order_DASH000000000002";
+  const DASH_PAYMENT_1 = "pay_DASH000000000001";
+  const DASH_PAYMENT_2 = "pay_DASH000000000002";
+  const dashToday = (await q(`select (now() at time zone '${DASH_TZ}')::date::text as today;`))[0].today;
+  const utcToday = (await q(`select (now() at time zone 'UTC')::date::text as today;`))[0].today;
+  const dayString = (value) => new Date(value).toISOString().slice(0, 10);
+
+  const dashStats = async (overrides = {}) =>
+    (
+      await rpc("admin_dashboard_stats", {
+        p_today: dashToday,
+        p_tz: DASH_TZ,
+        p_include_revenue: true,
+        ...overrides,
+      })
+    )[0];
+  const dashSeries = async (overrides = {}) =>
+    rpc("admin_booking_series", {
+      p_today: dashToday,
+      p_days: 14,
+      p_tz: DASH_TZ,
+      p_include_revenue: true,
+      ...overrides,
+    });
+  const dashBreakdown = async (overrides = {}) =>
+    rpc("admin_pass_breakdown", { p_include_revenue: true, ...overrides });
+  const dashRecent = async (overrides = {}) =>
+    rpc("admin_recent_bookings", { p_limit: 8, p_include_contact: true, ...overrides });
+
+  const before = await dashStats();
+
+  // ---- the fixture: one more night, four bookings, one refund, one check-in ---
+  await run(`
+    insert into public.event_dates (id, event_id, event_date, start_time, capacity, status)
+    values ('${DASH_NIGHT}', '${EVENT}', '${dashToday}'::date + 40, '19:00', 40, 'scheduled');
+  `);
+
+  const paidToday = await createBooking({
+    p_event_date_id: DASH_NIGHT,
+    p_pass_category_id: COUPLE,
+    p_customer_name: "Dashboard Paid Today",
+    p_customer_mobile: "+919800000911",
+    p_quantity: 1,
+    p_number_of_people: 2, // one Couple Pass is two people
+    p_idempotency_key: "dash-1",
+  });
+  await rpc("attach_razorpay_order", { p_booking_id: paidToday.booking_uuid, p_razorpay_order_id: DASH_ORDER_1 });
+  await rpc("confirm_booking_payment", {
+    p_razorpay_order_id: DASH_ORDER_1,
+    p_razorpay_payment_id: DASH_PAYMENT_1,
+    p_amount_paise: paidToday.total_amount * 100,
+  });
+
+  const unpaidFuture = await createBooking({
+    p_event_date_id: DASH_NIGHT,
+    p_pass_category_id: FAMILY,
+    p_customer_name: "Dashboard Unpaid",
+    p_customer_mobile: "+919800000912",
+    p_quantity: 1,
+    p_number_of_people: 4, // one Family Pass is four people
+    p_idempotency_key: "dash-2",
+  });
+
+  const paidYesterday = await createBooking({
+    p_event_date_id: DASH_NIGHT,
+    p_pass_category_id: COUPLE,
+    p_customer_name: "Dashboard Paid Yesterday",
+    p_customer_mobile: "+919800000913",
+    p_quantity: 2,
+    p_number_of_people: 4, // two Couple Passes, two people each
+    p_idempotency_key: "dash-3",
+  });
+  await rpc("attach_razorpay_order", { p_booking_id: paidYesterday.booking_uuid, p_razorpay_order_id: DASH_ORDER_2 });
+  await rpc("confirm_booking_payment", {
+    p_razorpay_order_id: DASH_ORDER_2,
+    p_razorpay_payment_id: DASH_PAYMENT_2,
+    p_amount_paise: paidYesterday.total_amount * 100,
+  });
+  // Booked on an earlier venue day, so its money belongs to that day's figures.
+  await run(`
+    update public.bookings
+       set created_at = (('${dashToday}'::date - 1)::timestamp at time zone '${DASH_TZ}')
+     where id = '${paidYesterday.booking_uuid}';
+  `);
+
+  const afterBookings = await dashStats();
+  const moved = (field) => Number(afterBookings[field]) - Number(before[field]);
+
+  check(
+    "three bookings move the booking counters by exactly three",
+    moved("bookings_total") === 3 &&
+      moved("bookings_confirmed") === 2 &&
+      moved("bookings_paid") === 2 &&
+      moved("bookings_pending") === 1 &&
+      moved("bookings_refunded") === 0,
+    JSON.stringify({
+      total: moved("bookings_total"),
+      confirmed: moved("bookings_confirmed"),
+      paid: moved("bookings_paid"),
+      pending: moved("bookings_pending"),
+    }),
+  );
+  check(
+    "today's bookings count the two made today and not the one made yesterday",
+    moved("bookings_today") === 2,
+    `${moved("bookings_today")}`,
+  );
+  // COUPLE is 499 for two people; the quantity-2 booking is 998. Only paid money counts,
+  // and only money taken today is today's.
+  check(
+    "revenue adds up to what the paid bookings were worth",
+    moved("revenue_total") === 1497 && moved("revenue_today") === 499 && moved("revenue_refunded") === 0,
+    `total ${moved("revenue_total")} / today ${moved("revenue_today")} / refunded ${moved("revenue_refunded")}`,
+  );
+  check(
+    "the unpaid booking contributes no money and no capacity",
+    moved("revenue_total") === 1497 && moved("capacity_taken") === 6,
+    `capacity taken ${moved("capacity_taken")} for 2 + 4 paid people`,
+  );
+  check(
+    "a new night adds its capacity to the venue, and paid people reduce what is left",
+    moved("capacity_total") === 40 &&
+      moved("capacity_taken") === 6 &&
+      moved("capacity_available") === 34 &&
+      moved("nights_total") === 1 &&
+      moved("nights_upcoming") === 1,
+    JSON.stringify({
+      total: moved("capacity_total"),
+      taken: moved("capacity_taken"),
+      available: moved("capacity_available"),
+    }),
+  );
+  const unpaidState = (
+    await q(`
+      select b.payment_status, b.booking_status,
+             (select count(*)::int from public.digital_passes d where d.booking_id = b.id) as passes
+        from public.bookings b
+       where b.id = '${unpaidFuture.booking_uuid}';
+    `)
+  )[0];
+  check(
+    "the unpaid fixture really is unpaid: no verified payment, no pass issued",
+    unpaidState.payment_status === "unpaid" && unpaidState.booking_status === "pending" && unpaidState.passes === 0,
+    JSON.stringify(unpaidState),
+  );
+
+  check(
+    "passes are issued per purchased pass: one for quantity 1, two for quantity 2",
+    moved("passes_issued") === 3 && moved("passes_active") === 3 && moved("passes_used") === 0,
+    JSON.stringify({
+      issued: moved("passes_issued"),
+      active: moved("passes_active"),
+      used: moved("passes_used"),
+    }),
+  );
+
+  // ---- the gate ---------------------------------------------------------------
+  const [dashPass] = await q(
+    `select id from public.digital_passes where booking_id = '${paidToday.booking_uuid}' limit 1;`,
+  );
+  await run(`
+    update public.digital_passes
+       set checked_in = true, checked_in_at = now(), status = 'used'
+     where id = '${dashPass.id}';
+    insert into public.check_ins (digital_pass_id, event_date_id, checked_in_at, gate)
+    values ('${dashPass.id}', '${DASH_NIGHT}', now(), 'Dashboard Test Gate');
+  `);
+  const afterCheckIn = await dashStats();
+  const movedIn = (field) => Number(afterCheckIn[field]) - Number(before[field]);
+  check(
+    "a check-in lands in both the total and today's check-ins",
+    movedIn("check_ins_total") === 1 && movedIn("check_ins_today") === 1,
+    `total ${movedIn("check_ins_total")} / today ${movedIn("check_ins_today")}`,
+  );
+  check(
+    "the pass that went through the gate stops counting as unused",
+    movedIn("passes_used") === 1 && movedIn("passes_active") === 2 && movedIn("passes_issued") === 3,
+    JSON.stringify({
+      used: movedIn("passes_used"),
+      active: movedIn("passes_active"),
+      issued: movedIn("passes_issued"),
+    }),
+  );
+  check(
+    "a check-in is not a booking and a booking is not a check-in",
+    movedIn("bookings_total") === 3 && movedIn("capacity_taken") === 6,
+    JSON.stringify({ bookings: movedIn("bookings_total"), taken: movedIn("capacity_taken") }),
+  );
+
+  // ---- the refund -------------------------------------------------------------
+  const refundOutcome = await rpc("refund_booking_payment", { p_razorpay_payment_id: DASH_PAYMENT_2 });
+  check(
+    "the refund fixture really refunded the booking",
+    JSON.stringify(refundOutcome).includes("refunded"),
+    JSON.stringify(refundOutcome),
+  );
+  const afterRefund = await dashStats();
+  const movedBack = (field) => Number(afterRefund[field]) - Number(before[field]);
+  check(
+    "a refunded booking stops counting as revenue the moment it is refunded",
+    movedBack("revenue_total") === 499 &&
+      movedBack("revenue_today") === 499 &&
+      movedBack("revenue_refunded") === 998,
+    JSON.stringify({
+      total: movedBack("revenue_total"),
+      today: movedBack("revenue_today"),
+      refunded: movedBack("revenue_refunded"),
+    }),
+  );
+  check(
+    "a refunded booking stops counting as paid and starts counting as refunded",
+    movedBack("bookings_paid") === 1 &&
+      movedBack("bookings_refunded") === 1 &&
+      movedBack("bookings_confirmed") === 1 &&
+      movedBack("bookings_total") === 3,
+    JSON.stringify({
+      paid: movedBack("bookings_paid"),
+      refunded: movedBack("bookings_refunded"),
+      confirmed: movedBack("bookings_confirmed"),
+    }),
+  );
+  check(
+    "refunded people release the capacity they were holding",
+    movedBack("capacity_taken") === 2 && movedBack("capacity_available") === 38 && movedBack("people_paid") === 2,
+    JSON.stringify({
+      taken: movedBack("capacity_taken"),
+      available: movedBack("capacity_available"),
+      people: movedBack("people_paid"),
+    }),
+  );
+  check(
+    "the refunded booking's passes are cancelled, not still active",
+    movedBack("passes_active") === 0 && movedBack("passes_used") === 1 && movedBack("passes_issued") === 3,
+    JSON.stringify({
+      active: movedBack("passes_active"),
+      used: movedBack("passes_used"),
+      issued: movedBack("passes_issued"),
+    }),
+  );
+
+  // ---- the venue's day, not the server's --------------------------------------
+  const paidEarly = await createBooking({
+    p_event_date_id: DASH_NIGHT,
+    p_pass_category_id: FAMILY,
+    p_customer_name: "Dashboard Just After Midnight",
+    p_customer_mobile: "+919800000914",
+    p_quantity: 1,
+    p_number_of_people: 4,
+    p_idempotency_key: "dash-4",
+  });
+  await rpc("attach_razorpay_order", { p_booking_id: paidEarly.booking_uuid, p_razorpay_order_id: "order_DASH000000000003" });
+  await rpc("confirm_booking_payment", {
+    p_razorpay_order_id: "order_DASH000000000003",
+    p_razorpay_payment_id: "pay_DASH000000000003",
+    p_amount_paise: paidEarly.total_amount * 100,
+  });
+  // Half past midnight in Jaipur is the previous evening in UTC. The booking belongs
+  // to the venue's day, and the dashboard has to agree.
+  await run(`
+    update public.bookings
+       set created_at = (('${dashToday}'::date)::timestamp + interval '30 minutes') at time zone '${DASH_TZ}'
+     where id = '${paidEarly.booking_uuid}';
+  `);
+  const [earlyDays] = await q(`
+    select (created_at at time zone '${DASH_TZ}')::date::text as venue_day,
+           (created_at at time zone 'UTC')::date::text as utc_day,
+           to_char(created_at at time zone 'UTC', 'HH24:MI') as utc_clock,
+           to_char(created_at at time zone '${DASH_TZ}', 'HH24:MI') as venue_clock
+      from public.bookings where id = '${paidEarly.booking_uuid}';
+  `);
+  check(
+    "the midnight fixture really sits on two different calendar days",
+    earlyDays.venue_day !== earlyDays.utc_day,
+    JSON.stringify(earlyDays),
+  );
+
+  const venueNow = await dashStats();
+  const utcNow = (
+    await rpc("admin_dashboard_stats", { p_today: utcToday, p_tz: "UTC", p_include_revenue: true })
+  )[0];
+  check(
+    "today's bookings are the venue's today, not the server's today",
+    Number(venueNow.bookings_today) !== Number(utcNow.bookings_today),
+    `venue ${venueNow.bookings_today} / utc ${utcNow.bookings_today}`,
+  );
+  check(
+    "the booking made after midnight in Jaipur counts towards the venue's day",
+    Number(venueNow.bookings_today) - Number(utcNow.bookings_today) === 1,
+    `${earlyDays.venue_clock} Jaipur / ${earlyDays.utc_clock} UTC`,
+  );
+
+  // ---- the same numbers, counted a second way ---------------------------------
+  // Written out by hand from the tables rather than reused from the migration: if the
+  // two ever disagree, one of them is wrong and the dashboard is the one showing it.
+  const dashLedger = async (today, tz) => {
+    const [row] = await q(
+      `
+      select
+        (select count(*)::int from public.bookings) as bookings_total,
+        (select count(*)::int from public.bookings b where b.booking_status = 'confirmed') as bookings_confirmed,
+        (select count(*)::int from public.bookings b where b.payment_status = 'paid') as bookings_paid,
+        (select count(*)::int from public.bookings b where b.payment_status = 'unpaid') as bookings_pending,
+        (select count(*)::int from public.bookings b where b.payment_status = 'refunded') as bookings_refunded,
+        (select count(*)::int from public.bookings b
+          where (b.created_at at time zone $2::text)::date = $1::date) as bookings_today,
+        (select coalesce(sum(b.total_amount), 0)::int from public.bookings b
+          where b.payment_status = 'paid') as revenue_total,
+        (select coalesce(sum(b.total_amount), 0)::int from public.bookings b
+          where b.payment_status = 'paid'
+            and (b.created_at at time zone $2::text)::date = $1::date) as revenue_today,
+        (select coalesce(sum(b.total_amount), 0)::int from public.bookings b
+          where b.payment_status = 'refunded') as revenue_refunded,
+        (select count(*)::int from public.check_ins) as check_ins_total,
+        (select count(*)::int from public.check_ins c
+          where (c.checked_in_at at time zone $2::text)::date = $1::date) as check_ins_today,
+        (select coalesce(sum(b.number_of_people), 0)::int from public.bookings b
+          where b.payment_status = 'paid') as people_paid,
+        (select count(*)::int from public.digital_passes) as passes_issued,
+        (select count(*)::int from public.digital_passes p
+          where p.status = 'active' and not p.checked_in) as passes_active,
+        (select count(*)::int from public.digital_passes p where p.checked_in) as passes_used,
+        (select coalesce(sum(d.capacity), 0)::int from public.event_dates d
+          where d.status = 'scheduled' and d.event_date >= $1::date) as capacity_total,
+        (select coalesce(sum(b.number_of_people), 0)::int from public.bookings b
+           join public.event_dates d on d.id = b.event_date_id
+          where b.payment_status = 'paid' and d.status = 'scheduled'
+            and d.event_date >= $1::date) as capacity_taken,
+        (select coalesce(sum(d.capacity), 0)::int from public.event_dates d
+          where d.status = 'scheduled' and d.event_date = $1::date) as tonight_capacity,
+        (select coalesce(sum(b.number_of_people), 0)::int from public.bookings b
+           join public.event_dates d on d.id = b.event_date_id
+          where b.payment_status = 'paid' and d.status = 'scheduled'
+            and d.event_date = $1::date) as tonight_taken,
+        (select count(*)::int from public.event_dates) as nights_total,
+        (select count(*)::int from public.event_dates d
+          where d.event_date >= $1::date and d.status = 'scheduled') as nights_upcoming,
+        (select count(*)::int from public.gallery g where g.status = 'published') as gallery_published,
+        (select count(*)::int from public.gallery g where g.status <> 'published') as gallery_draft,
+        (select count(*)::int from public.admin_users a where a.is_active) as staff_active,
+        (select count(*)::int from public.admin_users a) as staff_total;
+    `,
+      [today, tz],
+    );
+    return row;
+  };
+
+  const DASH_FIELDS = [
+    "bookings_total",
+    "bookings_confirmed",
+    "bookings_paid",
+    "bookings_pending",
+    "bookings_refunded",
+    "bookings_today",
+    "revenue_total",
+    "revenue_today",
+    "revenue_refunded",
+    "check_ins_total",
+    "check_ins_today",
+    "people_paid",
+    "passes_issued",
+    "passes_active",
+    "passes_used",
+    "capacity_total",
+    "capacity_taken",
+    "capacity_available",
+    "tonight_date",
+    "tonight_capacity",
+    "tonight_taken",
+    "tonight_available",
+    "nights_total",
+    "nights_upcoming",
+    "gallery_published",
+    "gallery_draft",
+    "staff_active",
+    "staff_total",
+  ];
+
+  const ledgerFor = async (today, tz) => {
+    const raw = await dashLedger(today, tz);
+    return {
+      ...raw,
+      // Derived rather than counted twice, exactly as the migration derives them.
+      capacity_available: Math.max(0, Number(raw.capacity_total) - Number(raw.capacity_taken)),
+      tonight_available: Math.max(0, Number(raw.tonight_capacity) - Number(raw.tonight_taken)),
+      tonight_date: raw.tonight_capacity > 0 || raw.tonight_taken > 0 ? today : null,
+    };
+  };
+
+  const compareFields = (label, stats, ledger) => {
+    const wrong = DASH_FIELDS.filter((field) => {
+      const reported = stats[field];
+      const expected = ledger[field];
+      if (reported === null || reported === undefined) return !(expected === null || expected === undefined);
+      return Number(reported) !== Number(expected);
+    });
+    check(
+      label,
+      wrong.length === 0,
+      wrong.length === 0 ? "all 28 fields match" : wrong.map((f) => `${f}: ${stats[f]} vs ${ledger[f]}`).join(", "),
+    );
+  };
+
+  compareFields(
+    "every headline number matches the bookings table, counted by hand in Jaipur's days",
+    venueNow,
+    await ledgerFor(dashToday, DASH_TZ),
+  );
+  compareFields(
+    "and the same holds when the caller asks in UTC",
+    utcNow,
+    await ledgerFor(utcToday, "UTC"),
+  );
+  check(
+    "capacity left is the capacity there is minus the people it holds",
+    Number(venueNow.capacity_available) === Math.max(0, Number(venueNow.capacity_total) - Number(venueNow.capacity_taken)),
+    `${venueNow.capacity_available} / ${venueNow.capacity_total} - ${venueNow.capacity_taken}`,
+  );
+
+  // ---- money is withheld, not merely hidden -----------------------------------
+  const withheldMoney = await dashStats({ p_include_revenue: false });
+  check(
+    "a caller who may not see money receives no money, only nulls",
+    withheldMoney.revenue_total === null &&
+      withheldMoney.revenue_today === null &&
+      withheldMoney.revenue_refunded === null,
+    JSON.stringify({
+      total: withheldMoney.revenue_total,
+      today: withheldMoney.revenue_today,
+      refunded: withheldMoney.revenue_refunded,
+    }),
+  );
+  const nonMoney = DASH_FIELDS.filter((field) => !field.startsWith("revenue_"));
+  check(
+    "withholding the money changes nothing else on the dashboard",
+    nonMoney.every((field) => String(withheldMoney[field]) === String(venueNow[field])),
+    nonMoney
+      .filter((field) => String(withheldMoney[field]) !== String(venueNow[field]))
+      .map((f) => `${f}: ${withheldMoney[f]} vs ${venueNow[f]}`)
+      .join(", ") || "identical",
+  );
+
+  // ---- the charts' data -------------------------------------------------------
+  const series = await dashSeries();
+  const seriesDays = series.map((row) => dayString(row.day));
+  check(
+    "the series covers the requested window, ending on the day asked about",
+    series.length === 14 && seriesDays.at(-1) === dashToday,
+    `${series.length} days, ${seriesDays[0]} to ${seriesDays.at(-1)}`,
+  );
+  check(
+    "the window starts thirteen days before today",
+    (() => {
+      const expected = new Date(`${dashToday}T00:00:00Z`);
+      expected.setUTCDate(expected.getUTCDate() - 13);
+      return seriesDays[0] === expected.toISOString().slice(0, 10);
+    })(),
+    `${seriesDays[0]} (expected 13 days before ${dashToday})`,
+  );
+  check(
+    "there are no gaps: a quiet night is a zero, not a missing row",
+    seriesDays.every((day, index) => {
+      if (index === 0) return true;
+      const previous = new Date(`${seriesDays[index - 1]}T00:00:00Z`);
+      previous.setUTCDate(previous.getUTCDate() + 1);
+      return previous.toISOString().slice(0, 10) === day;
+    }),
+    seriesDays.join(" "),
+  );
+
+  const seriesLedger = await q(
+    `
+    select to_char(s.day, 'YYYY-MM-DD') as day,
+      (select count(*)::int from public.bookings b
+        where (b.created_at at time zone $3::text)::date = s.day) as bookings,
+      (select count(*)::int from public.bookings b
+        where (b.created_at at time zone $3::text)::date = s.day
+          and b.booking_status = 'confirmed') as confirmed,
+      (select coalesce(sum(b.total_amount), 0)::int from public.bookings b
+        where (b.created_at at time zone $3::text)::date = s.day
+          and b.payment_status = 'paid') as revenue
+    from generate_series($1::date, $2::date, interval '1 day') as s(day)
+    order by s.day;
+  `,
+    [seriesDays[0], seriesDays.at(-1), DASH_TZ],
+  );
+  const seriesWrong = seriesLedger.filter((row, index) => {
+    const reported = series[index];
+    return (
+      dayString(reported.day) !== row.day ||
+      Number(reported.bookings) !== Number(row.bookings) ||
+      Number(reported.confirmed) !== Number(row.confirmed) ||
+      Number(reported.revenue) !== Number(row.revenue)
+    );
+  });
+  check(
+    "every day of the series matches the bookings made that day",
+    seriesWrong.length === 0,
+    seriesWrong
+      .map((row) => `${row.day}: reported ${JSON.stringify(series[seriesLedger.indexOf(row)])} vs ${JSON.stringify(row)}`)
+      .join(" | ") || `${series.length} days agree`,
+  );
+  check(
+    "the series totals reconcile with the headline revenue for the window",
+    Number(series.reduce((sum, row) => sum + Number(row.revenue), 0)) ===
+      Number((await q(
+        `select coalesce(sum(b.total_amount), 0)::int as revenue from public.bookings b
+          where b.payment_status = 'paid'
+            and (b.created_at at time zone '${DASH_TZ}')::date between $1::date and $2::date;`,
+        [seriesDays[0], seriesDays.at(-1)],
+      ))[0].revenue),
+    `${series.reduce((sum, row) => sum + Number(row.revenue), 0)}`,
+  );
+
+  const shortSeries = await dashSeries({ p_days: 0 });
+  check("a series of zero days is still a series of one", shortSeries.length === 1, `${shortSeries.length} days`);
+  const longSeries = await dashSeries({ p_days: 3650 });
+  check("a decade of days is clamped to a chart that fits", longSeries.length === 90, `${longSeries.length} days`);
+  const seriesNoMoney = await dashSeries({ p_include_revenue: false });
+  check(
+    "a series without money returns no money at all",
+    seriesNoMoney.every((row) => row.revenue === null) &&
+      seriesNoMoney.every((row, index) => Number(row.bookings) === Number(series[index].bookings)),
+    JSON.stringify(seriesNoMoney.filter((row) => row.revenue !== null).slice(0, 2)),
+  );
+
+  // ---- the pass-category distribution -----------------------------------------
+  const breakdown = await dashBreakdown();
+  check(
+    "every pass category is on the chart, including the ones nobody bought",
+    breakdown.length === Number((await q(`select count(*)::int as n from public.pass_categories;`))[0].n),
+    `${breakdown.length} rows`,
+  );
+  check(
+    "the biggest category is first",
+    breakdown.every((row, index) => index === 0 || Number(breakdown[index - 1].bookings) >= Number(row.bookings)),
+    breakdown.map((row) => `${row.pass_name}:${row.bookings}`).join(" "),
+  );
+
+  const breakdownLedger = await q(`
+    select p.id::text as pass_category_id,
+      (select count(*)::int from public.bookings b where b.pass_category_id = p.id) as bookings,
+      (select count(*)::int from public.bookings b
+        where b.pass_category_id = p.id and b.payment_status = 'paid') as paid_bookings,
+      (select count(*)::int from public.digital_passes d
+         join public.bookings b on b.id = d.booking_id
+        where b.pass_category_id = p.id) as passes_issued,
+      (select coalesce(sum(b.number_of_people), 0)::int from public.bookings b
+        where b.pass_category_id = p.id and b.payment_status = 'paid') as people,
+      (select coalesce(sum(b.total_amount), 0)::int from public.bookings b
+        where b.pass_category_id = p.id and b.payment_status = 'paid') as revenue
+    from public.pass_categories p;
+  `);
+  const breakdownWrong = breakdown.filter((row) => {
+    const ledger = breakdownLedger.find((candidate) => candidate.pass_category_id === row.pass_category_id);
+    if (!ledger) return true;
+    return (
+      Number(row.bookings) !== Number(ledger.bookings) ||
+      Number(row.paid_bookings) !== Number(ledger.paid_bookings) ||
+      Number(row.passes_issued) !== Number(ledger.passes_issued) ||
+      Number(row.people) !== Number(ledger.people) ||
+      Number(row.revenue) !== Number(ledger.revenue)
+    );
+  });
+  check(
+    "each category reports the bookings, people and money it actually has",
+    breakdownWrong.length === 0,
+    breakdownWrong
+      .map((row) => `${row.pass_name}: reported ${row.bookings}/${row.people}/${row.revenue} vs ${JSON.stringify(breakdownLedger.find((c) => c.pass_category_id === row.pass_category_id))}`)
+      .join(" | ") || `${breakdown.length} categories agree`,
+  );
+  // Joining bookings to their passes in one query multiplies every booking by its pass
+  // count, and a category holding a multi-pass booking is where that shows up. This is
+  // the regression test for exactly that mistake.
+  const [fanOut] = await q(`
+    select b.pass_category_id::text as pass_category_id, b.id::text as booking_uuid,
+           count(*)::int as passes_on_one_booking
+      from public.digital_passes d
+      join public.bookings b on b.id = d.booking_id
+     group by b.pass_category_id, b.id
+    having count(*) > 1
+     limit 1;
+  `);
+  check(
+    "the fixture really contains a booking holding more than one pass",
+    Number(fanOut?.passes_on_one_booking) > 1,
+    JSON.stringify(fanOut ?? null),
+  );
+  const fanOutRow = breakdown.find((row) => row.pass_category_id === fanOut.pass_category_id);
+  const fanOutLedger = breakdownLedger.find((row) => row.pass_category_id === fanOut.pass_category_id);
+  check(
+    "a multi-pass booking does not multiply its category's people or money",
+    Number(fanOutRow.people) === Number(fanOutLedger.people) &&
+      Number(fanOutRow.revenue) === Number(fanOutLedger.revenue) &&
+      Number(fanOutRow.bookings) === Number(fanOutLedger.bookings),
+    JSON.stringify({ reported: fanOutRow, counted: fanOutLedger }),
+  );
+  const breakdownNoMoney = await dashBreakdown({ p_include_revenue: false });
+  check(
+    "the distribution still shows its shape without the money",
+    breakdownNoMoney.every((row) => row.revenue === null) &&
+      breakdownNoMoney.length === breakdown.length &&
+      breakdownNoMoney.every((row, index) => Number(row.bookings) === Number(breakdown[index].bookings)),
+    JSON.stringify(breakdownNoMoney.filter((row) => row.revenue !== null).slice(0, 2)),
+  );
+
+  // ---- the recent bookings table ----------------------------------------------
+  const recent = await dashRecent();
+  check("the recent list is a short list, not the whole ledger", recent.length === 8, `${recent.length} rows`);
+  const recentLedger = await q(`
+    select b.id::text as id, b.booking_id, b.customer_name, b.customer_mobile, b.customer_email,
+           b.total_amount, b.quantity, b.number_of_people, b.booking_status, b.payment_status,
+           b.created_at, d.event_date, p.name as pass_name
+      from public.bookings b
+      join public.event_dates d on d.id = b.event_date_id
+      join public.pass_categories p on p.id = b.pass_category_id
+     order by b.created_at desc, b.id desc
+     limit ${recent.length};
+  `);
+  const recentWrong = recent.filter((row, index) => {
+    const ledger = recentLedger[index];
+    if (!ledger) return true;
+    return (
+      row.booking_uuid !== ledger.id ||
+      row.customer_mobile !== ledger.customer_mobile ||
+      row.customer_email !== ledger.customer_email ||
+      Number(row.total_amount) !== Number(ledger.total_amount) ||
+      Number(row.quantity) !== Number(ledger.quantity) ||
+      Number(row.number_of_people) !== Number(ledger.number_of_people) ||
+      row.booking_status !== ledger.booking_status ||
+      row.payment_status !== ledger.payment_status ||
+      row.pass_name !== ledger.pass_name ||
+      dayString(row.event_date) !== dayString(ledger.event_date)
+    );
+  });
+  check(
+    "the table is the newest bookings first, with each row's own night and pass",
+    recentWrong.length === 0,
+    recentWrong.map((row) => `${row.booking_id} vs ledger`).join(", ") || `${recent.length} rows agree`,
+  );
+  check(
+    "the newest row really is the newest booking",
+    recent[0].booking_uuid ===
+      (await q(`select id::text as id from public.bookings order by created_at desc, id desc limit 1;`))[0].id,
+    `${recent[0]?.booking_id ?? "none"}`,
+  );
+  check(
+    "both figures on a row are the ones stored on the booking",
+    recent.every(
+      (row, index) =>
+        Number(row.total_amount) === Number(recentLedger[index].total_amount) && row.pass_name === recentLedger[index].pass_name,
+    ),
+    `${recent.length} rows`,
+  );
+
+  const recentSmall = await dashRecent({ p_limit: 0 });
+  check("a list of zero bookings is still a list, never an empty query", recentSmall.length === 1, `${recentSmall.length} rows`);
+  const recentHuge = await dashRecent({ p_limit: 10000 });
+  check("an enormous page is clamped to something a page can show", recentHuge.length <= 50, `${recentHuge.length} rows`);
+
+  const recentHidden = await dashRecent({ p_include_contact: false });
+  check(
+    "a staff member's recent list has no contact details and no amounts",
+    recentHidden.every((row) => row.customer_mobile === null && row.customer_email === null && row.total_amount === null),
+    JSON.stringify(recentHidden.filter((row) => row.customer_mobile !== null || row.total_amount !== null).slice(0, 2)),
+  );
+  check(
+    "and it still names the guest, the night and the pass",
+    recentHidden.length === recent.length &&
+      recentHidden.every(
+        (row, index) =>
+          row.customer_name === recent[index].customer_name &&
+          row.pass_name === recent[index].pass_name &&
+          dayString(row.event_date) === dayString(recent[index].event_date),
+      ),
+    `${recentHidden.length} rows`,
+  );
+
+  // ---- one function per question, and only the service role may ask ------------
+  const statsOverloads = await q(`
+    select count(*)::int as n from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public' and p.proname = 'admin_dashboard_stats';
+  `);
+  check(
+    "there is exactly one dashboard statistics function, not two that can disagree",
+    statsOverloads[0].n === 1,
+    `${statsOverloads[0].n} overloads`,
+  );
+
+  const dashboardGrants = await q(`
+    select
+      has_function_privilege('anon', 'public.admin_booking_series(date, integer, text, boolean)', 'execute') as series_anon,
+      has_function_privilege('authenticated', 'public.admin_booking_series(date, integer, text, boolean)', 'execute') as series_auth,
+      has_function_privilege('service_role', 'public.admin_booking_series(date, integer, text, boolean)', 'execute') as series_service,
+      has_function_privilege('anon', 'public.admin_pass_breakdown(boolean)', 'execute') as breakdown_anon,
+      has_function_privilege('authenticated', 'public.admin_pass_breakdown(boolean)', 'execute') as breakdown_auth,
+      has_function_privilege('service_role', 'public.admin_pass_breakdown(boolean)', 'execute') as breakdown_service,
+      has_function_privilege('anon', 'public.admin_recent_bookings(integer, boolean)', 'execute') as recent_anon,
+      has_function_privilege('authenticated', 'public.admin_recent_bookings(integer, boolean)', 'execute') as recent_auth,
+      has_function_privilege('service_role', 'public.admin_recent_bookings(integer, boolean)', 'execute') as recent_service;
+  `);
+  const grants = dashboardGrants[0];
+  check(
+    "only the service role may read the charts or the recent bookings",
+    grants.series_anon === false &&
+      grants.series_auth === false &&
+      grants.series_service === true &&
+      grants.breakdown_anon === false &&
+      grants.breakdown_auth === false &&
+      grants.breakdown_service === true &&
+      grants.recent_anon === false &&
+      grants.recent_auth === false &&
+      grants.recent_service === true,
+    JSON.stringify(grants),
+  );
+
+  const anonSeries = await expectError(
+    `set role anon; select * from public.admin_booking_series('${dashToday}'::date, 7, '${DASH_TZ}', true);`,
+  );
+  check("an anon session cannot read the series", anonSeries !== null, anonSeries ?? "the call succeeded");
+  await run("reset role;");
+  const anonRecent = await expectError(`set role anon; select * from public.admin_recent_bookings(5, true);`);
+  check("an anon session cannot read the recent bookings", anonRecent !== null, anonRecent ?? "the call succeeded");
+  await run("reset role;");
+  const authedBreakdown = await expectError(
+    `set role authenticated; select * from public.admin_pass_breakdown(true);`,
+  );
+  check(
+    "a signed-in visitor is not staff either: the aggregates stay closed",
+    authedBreakdown !== null,
+    authedBreakdown ?? "the call succeeded",
+  );
+  await run("reset role;");
 
   // ---------------------------------------------------------------------------
   section("Result");

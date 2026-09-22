@@ -1,15 +1,21 @@
 import type { Metadata, Route } from "next";
 import Link from "next/link";
 
-import { getDashboardStats } from "@/lib/services/admin";
+import { siteConfig } from "@/config/site";
+import { DailyBarChart } from "@/components/admin/bar-chart";
+import { PassBreakdownChart } from "@/components/admin/pass-breakdown-chart";
+import { RecentBookingsTable } from "@/components/admin/recent-bookings-table";
+import { StatCard, StatGrid, type StatTone } from "@/components/admin/stat-card";
+import { EmptyState } from "@/components/ui/empty-state";
+import { ErrorState } from "@/components/ui/error-state";
 import { deniedMessage, requireStaff } from "@/lib/auth/guard";
 import { can, ROLE_LABELS, sectionsFor } from "@/lib/auth/permissions";
-import { formatEventDate, formatTimestamp } from "@/lib/format";
-import { gateNight } from "@/lib/gate/night";
+import { formatEventDate, formatInr, formatTimestamp } from "@/lib/format";
+import { getDashboardSnapshot, type DashboardStats } from "@/lib/services/admin";
 
 export const metadata: Metadata = {
-  title: "Staff area",
-  description: "The staff area: gate scanner, booking lookup and event operations.",
+  title: "Dashboard",
+  description: "Live bookings, revenue, gate activity and capacity for the event.",
   robots: { index: false, follow: false },
 };
 
@@ -20,16 +26,27 @@ type AdminHomeProps = {
 };
 
 /**
- * The way in, and the map of the admin area.
+ * The dashboard.
  *
- * Two jobs: tell a staff member what is happening *tonight* (the number that changes
- * during an event), and show exactly which sections their role may open. The numbers
- * come from `admin_dashboard_stats()`, counted in the database — the dashboard never
- * pulls bookings into Node to add them up.
+ * Every figure on this page is counted by Postgres, in the four functions in the
+ * step-9 migration, and every one of them is requested with the *role's* capabilities
+ * attached:
  *
- * A `?denied=` parameter is how a refused page sends somebody here, with the reason
- * spelled out. It is not a security event (nothing was disclosed), so it is a plain
- * explanation rather than an error.
+ *   * `p_include_revenue` — false without `payments:view`, and the database then
+ *     returns NULL for each money column rather than a number to hide;
+ *   * `p_include_contact` — false without `bookings:view_contact`, so a staff session
+ *     never receives a guest's mobile number or amount in the first place.
+ *
+ * That is why this page does not add anything up, filter anything out, or blank a
+ * figure before rendering: a number that should not be seen never arrives. The role
+ * does change the *layout* too — a staff member's dashboard is the operational half
+ * of this one, because a door does not need a sales chart — but the difference is a
+ * consequence of the data, not a substitute for guarding it.
+ *
+ * The page has three states and each one is honest about itself: real numbers from
+ * the database, a named error when the read fails (with the shape of the error, not a
+ * stack trace), or an empty state when the schema has not been applied yet. It never
+ * falls back to placeholder figures.
  */
 export default async function AdminHomePage({ searchParams }: AdminHomeProps) {
   const staff = await requireStaff();
@@ -37,74 +54,223 @@ export default async function AdminHomePage({ searchParams }: AdminHomeProps) {
   const denied = Array.isArray(params.denied) ? params.denied[0] : params.denied;
   const message = deniedMessage(denied);
 
-  const today = gateNight();
-  const statsResult = await getDashboardStats(today);
-  const stats = statsResult.ok ? statsResult.data : null;
+  const result = await getDashboardSnapshot(staff.role);
+  const dashboard = result.ok ? result.data : null;
 
   const sections = sectionsFor(staff.role);
   const built = sections.filter((section) => section.built && section.href);
   const planned = sections.filter((section) => !section.built);
 
-  // What is on screen depends on the role, and it is decided here rather than by
-  // hiding elements with CSS. A staff member's page carries the two numbers a person
-  // at a door needs; sales figures, gallery state and how many colleagues there are
-  // belong to the roles that manage them.
-  const showOperations = can(staff.role, "payments:view");
+  const deniedBanner = message ? (
+    <p role="alert" className="border-marigold/40 bg-marigold/10 text-marigold-soft rounded-2xl border px-4 py-3 text-sm/6">
+      {message} Ask a super admin if you need access.
+    </p>
+  ) : null;
 
-  const tonight = showOperations
-    ? [
-        { label: "Checked in tonight", value: stats?.check_ins_today, hint: formatEventDate(today) },
-        { label: "Passes not yet used", value: stats?.passes_active, hint: "Issued, valid, still to come" },
-        {
-          label: "Paid bookings",
-          value: stats?.bookings_paid,
-          hint: `${stats?.people_admitted ?? 0} people admitted`,
-        },
-        { label: "Nights still open", value: stats?.nights_upcoming, hint: "Scheduled, today or later" },
-      ]
-    : [
-        { label: "Checked in tonight", value: stats?.check_ins_today, hint: formatEventDate(today) },
-        { label: "Passes not yet used", value: stats?.passes_active, hint: "Still to come through the gate" },
-      ];
+  const heading = (
+    <div className="flex flex-col gap-1">
+      <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
+        {staff.role === "staff" ? "Your shift" : `${ROLE_LABELS[staff.role]} dashboard`}
+      </h1>
+      <p className="text-muted text-sm/6">
+        Signed in as {staff.displayName}
+        {dashboard ? (
+          <>
+            {" · "}
+            tonight is {formatEventDate(dashboard.today)} at the venue
+          </>
+        ) : null}
+        {dashboard && !dashboard.includeRevenue ? " · revenue figures are for admins" : null}
+      </p>
+    </div>
+  );
+
+  if (!result.ok) {
+    return (
+      <>
+        {deniedBanner}
+        {heading}
+        <ErrorState
+          error={result.error}
+          title="The dashboard is unavailable"
+          action={
+            <p className="text-muted text-xs/5">
+              The numbers come straight from the database. Nothing on this page has been estimated or cached.
+            </p>
+          }
+        />
+      </>
+    );
+  }
+
+  if (!dashboard) {
+    return (
+      <>
+        {deniedBanner}
+        {heading}
+        <EmptyState
+          title="There is nothing to count yet"
+          description="This dashboard reads its numbers from Postgres. Apply the migrations in supabase/migrations and the seed file, then reload."
+        />
+      </>
+    );
+  }
+
+  const { stats, series, breakdown, recent, includeRevenue, includeContact, timezone, windowDays } = dashboard;
+  // The currency is the event's, read from the bookings themselves rather than assumed:
+  // a dashboard in rupees against a booking in another currency would be a lie.
+  const currency = recent[0]?.currency ?? siteConfig.currency;
+  const money = (value: number | null) => (value === null ? null : formatInr(value, currency));
+  const withheld = "Visible to admins";
+
+  type DashboardCard = {
+    label: string;
+    value: string | null;
+    hint: string;
+    tone?: StatTone;
+    withheldNote?: string;
+  };
+
+  // The eight statistics the dashboard is built around. Staff keep the operational
+  // half: everything a door needs, nothing about money.
+  const bookingCards: DashboardCard[] = [
+    {
+      label: "Total bookings",
+      value: String(stats.bookings_total),
+      hint: `${stats.bookings_confirmed} confirmed · ${stats.bookings_pending} awaiting payment`,
+    },
+    {
+      label: "Confirmed bookings",
+      value: String(stats.bookings_confirmed),
+      hint: "Payment verified and passes issued",
+      tone: "positive" as const,
+    },
+    {
+      label: "Pending payments",
+      value: String(stats.bookings_pending),
+      hint: stats.bookings_pending > 0 ? "Checkout started, no verified payment yet" : "Nothing waiting on a payment",
+      tone: stats.bookings_pending > 0 ? ("attention" as const) : ("default" as const),
+    },
+    {
+      label: "Today's bookings",
+      value: String(stats.bookings_today),
+      hint: formatEventDate(stats.tonight_date ?? dashboard.today),
+    },
+  ];
+
+  const moneyCards: DashboardCard[] = [
+    {
+      label: "Total revenue",
+      value: money(stats.revenue_total),
+      hint:
+        stats.revenue_refunded !== null && stats.revenue_refunded > 0
+          ? `${formatInr(stats.revenue_refunded, currency)} refunded — refunds stop counting`
+          : "Paid bookings only, refunds excluded",
+      withheldNote: withheld,
+    },
+    {
+      label: "Today's revenue",
+      value: money(stats.revenue_today),
+      hint: `Taken on ${formatEventDate(dashboard.today)}`,
+      withheldNote: withheld,
+    },
+  ];
+
+  const operationalCards: DashboardCard[] = [
+    {
+      label: "Checked-in visitors",
+      value: String(stats.check_ins_total),
+      hint: `${stats.check_ins_today} tonight · ${stats.people_paid} people on paid bookings`,
+    },
+    {
+      label: "Available capacity",
+      value: String(stats.capacity_available),
+      hint:
+        stats.nights_upcoming > 0
+          ? `${stats.capacity_taken} of ${stats.capacity_total} places taken across ${stats.nights_upcoming} nights still to come`
+          : "No nights still to come on the calendar",
+      tone:
+        stats.capacity_total > 0 && stats.capacity_available === 0 ? ("attention" as const) : ("default" as const),
+    },
+  ];
+
+  const cards: DashboardCard[] = [...bookingCards, ...moneyCards, ...operationalCards];
+  const windowLabel = `The last ${windowDays} days, ending ${formatEventDate(dashboard.today)} — the venue's own days in ${timezone}.`;
 
   return (
     <>
-      {message ? (
-        <p
-          role="alert"
-          className="border-marigold/40 bg-marigold/10 text-marigold-soft rounded-2xl border px-4 py-3 text-sm/6"
-        >
-          {message} Ask a super admin if you need access.
-        </p>
-      ) : null}
+      {deniedBanner}
+      {heading}
 
-      <div className="flex flex-col gap-1">
-        <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
-          {staff.role === "staff" ? "Your shift" : `${ROLE_LABELS[staff.role]} overview`}
-        </h1>
-        <p className="text-muted text-sm/6">
-          Signed in as {staff.displayName}
-          {staff.lastLoginAt ? ` · last signed in ${formatTimestamp(staff.lastLoginAt)}` : null}
-        </p>
+      <StatGrid>
+        {cards.map((card) => (
+          <StatCard
+            key={card.label}
+            label={card.label}
+            value={card.value}
+            hint={card.hint}
+            tone={card.tone}
+            withheldNote={card.withheldNote}
+          />
+        ))}
+      </StatGrid>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        <DailyBarChart
+          id="bookings-by-date"
+          title="Bookings by date"
+          description="Bookings placed each day, with the part of them already confirmed."
+          points={series.map((point) => ({
+            day: point.day,
+            value: point.bookings,
+            secondary: point.confirmed,
+          }))}
+          formatValue={(value) => String(value)}
+          primaryLabel="Bookings"
+          secondaryLabel="Confirmed"
+          tone="rani"
+          footer={windowLabel}
+        />
+
+        <DailyBarChart
+          id="revenue-by-date"
+          title="Revenue by date"
+          description="Money taken each day, counted when the payment was verified."
+          points={series.map((point) => ({ day: point.day, value: point.revenue ?? 0 }))}
+          formatValue={(value) => formatInr(value, currency)}
+          primaryLabel="Revenue"
+          tone="marigold"
+          withheldNote={
+            includeRevenue
+              ? undefined
+              : "Revenue is counted per day in the database and only returned to roles with access to payments."
+          }
+          footer={windowLabel}
+        />
+
+        <PassBreakdownChart
+          items={breakdown.map((row) => ({
+            id: row.pass_category_id,
+            name: row.pass_name,
+            composition: row.pass_composition,
+            price: row.price_inr,
+            isActive: row.is_active,
+            bookings: row.bookings,
+            paidBookings: row.paid_bookings,
+            passesIssued: row.passes_issued,
+            people: row.people,
+            revenue: row.revenue,
+            currency,
+          }))}
+          includeRevenue={includeRevenue}
+          description="Every pass category, biggest first, with the share of bookings each one holds."
+          withheldNote={withheld.toLowerCase()}
+        />
+
+        <TonightPanel stats={stats} today={dashboard.today} />
       </div>
 
-      {statsResult.ok === false && statsResult.error.kind === "not-configured" ? (
-        <p className="border-border bg-surface/50 text-muted rounded-2xl border px-4 py-3 text-sm/6">
-          {statsResult.error.message}
-        </p>
-      ) : (
-        <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {tonight.map((item) => (
-            <div key={item.label} className="border-border bg-surface/50 flex flex-col gap-1 rounded-2xl border p-4">
-              <dt className="text-muted/80 text-[0.6875rem] font-semibold tracking-widest uppercase">{item.label}</dt>
-              <dd className="text-2xl font-bold tracking-tight">
-                {item.value ?? "—"}
-              </dd>
-              <p className="text-muted text-xs">{item.hint}</p>
-            </div>
-          ))}
-        </dl>
-      )}
+      <RecentBookingsTable rows={recent} includeContact={includeContact} currency={currency} limit={recent.length || 8} />
 
       <section className="flex flex-col gap-3">
         <h2 className="text-sm font-semibold tracking-tight">What you can open</h2>
@@ -149,7 +315,7 @@ export default async function AdminHomePage({ searchParams }: AdminHomeProps) {
         </section>
       ) : null}
 
-      {stats && showOperations ? (
+      {can(staff.role, "payments:view") ? (
         <section className="border-border bg-surface/40 flex flex-col gap-2 rounded-2xl border p-4">
           <h2 className="text-sm font-semibold tracking-tight">Behind the scenes</h2>
           <dl className="text-muted grid gap-x-6 gap-y-1.5 text-xs/5 sm:grid-cols-2 lg:grid-cols-3">
@@ -179,15 +345,76 @@ export default async function AdminHomePage({ searchParams }: AdminHomeProps) {
           ) : null}
         </section>
       ) : null}
+
+      <p className="text-muted/70 text-xs/5">
+        Counted in the database at {formatTimestamp(new Date().toISOString())} — every figure above is a live query,
+        not a cached summary.
+      </p>
     </>
+  );
+}
+
+/**
+ * Tonight, at a glance.
+ *
+ * The one panel that answers the question somebody actually asks on the night: is
+ * there a night tonight, how full is it, and has the door started? A night that is not
+ * in the calendar says so, rather than showing an empty capacity bar as if the venue
+ * were empty.
+ */
+function TonightPanel({ stats, today }: { stats: DashboardStats; today: string }) {
+  const hasNight = stats.tonight_date !== null;
+
+  return (
+    <section className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-4 sm:p-5">
+      <header className="flex flex-col gap-1">
+        <h3 className="text-sm font-semibold tracking-tight">Tonight</h3>
+        <p className="text-muted text-xs/5">{formatEventDate(today)} — the night the gate is working.</p>
+      </header>
+
+      {hasNight ? (
+        <div className="flex flex-col gap-2">
+          <div className="border-border/50 bg-background/40 h-3 w-full overflow-hidden rounded-full border">
+            <span
+              aria-hidden="true"
+              style={{
+                width: `${stats.tonight_capacity > 0 ? Math.min(100, (stats.tonight_taken / stats.tonight_capacity) * 100) : 0}%`,
+              }}
+              className="from-marigold to-rani block h-full rounded-full bg-gradient-to-r"
+            />
+          </div>
+          <p className="text-muted text-xs">
+            {stats.tonight_taken} of {stats.tonight_capacity} places taken ·{" "}
+            <span className="text-foreground font-semibold">{stats.tonight_available} left</span>
+          </p>
+        </div>
+      ) : (
+        <p className="text-muted border-border/70 bg-background/40 rounded-xl border px-4 py-6 text-sm/6">
+          No event night is scheduled for tonight.{" "}
+          {stats.nights_upcoming > 0
+            ? `${stats.nights_upcoming} ${stats.nights_upcoming === 1 ? "night is" : "nights are"} still to come on the calendar.`
+            : "The calendar has no upcoming nights left."}
+        </p>
+      )}
+
+      {/* The gate numbers stay on the panel whether or not there is a night in the
+          calendar: at a door, "how many have been through" is worth knowing even on a
+          dark evening, and a staff member should not lose them to a scheduling gap. */}
+      <dl className="text-muted grid gap-2 text-xs/5 sm:grid-cols-2">
+        <Fact label="Checked in tonight" value={stats.check_ins_today} />
+        <Fact label="Passes not yet used" value={stats.passes_active} />
+        <Fact label="Passes issued in total" value={stats.passes_issued} />
+        <Fact label="Passes through the gate" value={stats.passes_used} />
+      </dl>
+    </section>
   );
 }
 
 function Fact({ label, value }: { label: string; value: number | string }) {
   return (
-    <div className="flex items-baseline justify-between gap-3 border-border/50 border-b py-1 last:border-b-0">
+    <div className="border-border/50 flex items-baseline justify-between gap-3 border-b py-1 last:border-b-0">
       <dt>{label}</dt>
-      <dd className="text-foreground font-semibold">{value}</dd>
+      <dd className="text-foreground font-semibold tabular-nums">{value}</dd>
     </div>
   );
 }

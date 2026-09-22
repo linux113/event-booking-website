@@ -1,7 +1,9 @@
 import "server-only";
 
 import { isSupabaseConfigured } from "@/config/env";
+import { siteConfig } from "@/config/site";
 import { can, ROLE_LABELS, type StaffRole } from "@/lib/auth/permissions";
+import { gateNight } from "@/lib/gate/night";
 import { fail, ok, type Result, type ServiceError } from "@/lib/services/result";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { Database } from "@/types/database";
@@ -48,31 +50,108 @@ function getAdminClient(): { ok: true; client: SupabaseClient<Database> } | { ok
 // -----------------------------------------------------------------------------
 
 type StatsRow = Database["public"]["Functions"]["admin_dashboard_stats"]["Returns"][number];
+type SeriesRow = Database["public"]["Functions"]["admin_booking_series"]["Returns"][number];
+type BreakdownRow = Database["public"]["Functions"]["admin_pass_breakdown"]["Returns"][number];
+type RecentRow = Database["public"]["Functions"]["admin_recent_bookings"]["Returns"][number];
 
 export type DashboardStats = StatsRow;
+export type DashboardSeriesPoint = SeriesRow;
+export type PassCategoryBreakdown = BreakdownRow;
+export type RecentBooking = RecentRow;
+
+/** How much history the charts cover, and how many bookings the table lists. */
+export const DASHBOARD_WINDOW_DAYS = 14;
+export const DASHBOARD_RECENT_LIMIT = 8;
 
 /**
- * Live counts for the dashboard. `today` is the venue's date, computed on the
- * server, so "tonight" means the venue's tonight rather than UTC's.
+ * Everything the dashboard shows, in the shape the caller's role is allowed to see.
+ *
+ * Four aggregates, fetched together: the headline numbers, the day-by-day series, the
+ * pass-category distribution and the newest bookings. Each one is counted by the
+ * database (`admin_dashboard_stats`, `admin_booking_series`, `admin_pass_breakdown`,
+ * `admin_recent_bookings`) — this function passes the role's two capabilities down to
+ * the queries and never adds anything up itself.
+ *
+ * `includeRevenue` and `includeContact` are decided here from the role, and they are
+ * the *only* thing that differs between a staff dashboard and an admin one: the same
+ * page renders the same components, but a staff session's response carries no amounts
+ * and no contact details because the database never returned them.
+ *
+ * `today` is the venue's date (`gateNight()`), not the server's, so "today" on the
+ * dashboard means the day it is where the event is.
  */
-export async function getDashboardStats(today: string): Promise<Result<DashboardStats | null>> {
+export interface DashboardSnapshot {
+  /** The venue's date, as the figures were counted. */
+  today: string;
+  /** The timezone those days were measured in (`siteConfig.timezone`). */
+  timezone: string;
+  includeRevenue: boolean;
+  includeContact: boolean;
+  windowDays: number;
+  stats: DashboardStats;
+  series: DashboardSeriesPoint[];
+  breakdown: PassCategoryBreakdown[];
+  recent: RecentBooking[];
+}
+
+export async function getDashboardSnapshot(role: StaffRole): Promise<Result<DashboardSnapshot | null>> {
   const client = getAdminClient();
 
   if (!client.ok) {
     return { ok: false, error: client.error };
   }
 
-  const { data, error } = await client.client.rpc("admin_dashboard_stats", { p_today: today });
+  const today = gateNight();
+  const includeRevenue = can(role, "payments:view");
+  const includeContact = can(role, "bookings:view_contact");
 
-  if (error) {
-    console.error("[admin] admin_dashboard_stats failed:", error.message, error.code);
+  // One round trip's worth of latency for the whole page: the four queries are
+  // independent, so they go out together.
+  const [stats, series, breakdown, recent] = await Promise.all([
+    client.client.rpc("admin_dashboard_stats", {
+      p_today: today,
+      p_tz: siteConfig.timezone,
+      p_include_revenue: includeRevenue,
+    }),
+    client.client.rpc("admin_booking_series", {
+      p_today: today,
+      p_days: DASHBOARD_WINDOW_DAYS,
+      p_tz: siteConfig.timezone,
+      p_include_revenue: includeRevenue,
+    }),
+    client.client.rpc("admin_pass_breakdown", { p_include_revenue: includeRevenue }),
+    client.client.rpc("admin_recent_bookings", {
+      p_limit: DASHBOARD_RECENT_LIMIT,
+      p_include_contact: includeContact,
+    }),
+  ]);
+
+  const failure = [stats, series, breakdown, recent].find((response) => response.error);
+
+  if (failure?.error) {
+    console.error("[admin] dashboard read failed:", failure.error.message, failure.error.code);
 
     return fail("query-failed", "We could not load the dashboard numbers right now.");
   }
 
-  const [row] = Array.isArray(data) ? data : [];
+  const statsRow = (Array.isArray(stats.data) ? stats.data : [])[0];
 
-  return ok(row ?? null);
+  if (!statsRow) {
+    // The migrations have not been applied yet: an empty answer, not an error.
+    return ok(null);
+  }
+
+  return ok({
+    today,
+    timezone: siteConfig.timezone,
+    includeRevenue,
+    includeContact,
+    windowDays: DASHBOARD_WINDOW_DAYS,
+    stats: statsRow,
+    series: Array.isArray(series.data) ? series.data : [],
+    breakdown: Array.isArray(breakdown.data) ? breakdown.data : [],
+    recent: Array.isArray(recent.data) ? recent.data : [],
+  });
 }
 
 // -----------------------------------------------------------------------------

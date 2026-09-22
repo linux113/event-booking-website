@@ -727,24 +727,98 @@ export interface Database {
           check_in_times: string[] | null;
         }[];
       };
+      /**
+       * The dashboard's statistics (step 9). Every figure on /admin comes from one of
+       * these four functions, so no statistic is ever summed in the browser or in
+       * Node. Two conventions are visible in the types on purpose:
+       *
+       *   * money columns are `number | null` — the database returns null rather than
+       *     a figure when `p_include_revenue` is false, and a component cannot render
+       *     what it was never given;
+       *   * contact columns on the recent list are `string | null` for the same reason,
+       *     keyed off `p_include_contact`.
+       *
+       * All four are `service_role` only. Days are counted in `p_tz` (the venue's
+       * timezone) so "today" means the venue's today.
+       */
       admin_dashboard_stats: {
-        Args: { p_today: string };
+        Args: { p_today: string; p_tz?: string; p_include_revenue?: boolean };
         Returns: {
           bookings_total: number;
+          bookings_confirmed: number;
           bookings_paid: number;
           bookings_pending: number;
           bookings_refunded: number;
-          people_admitted: number;
+          bookings_today: number;
+          revenue_total: number | null;
+          revenue_today: number | null;
+          revenue_refunded: number | null;
+          check_ins_total: number;
+          check_ins_today: number;
           passes_issued: number;
           passes_active: number;
           passes_used: number;
-          check_ins_today: number;
+          people_paid: number;
+          capacity_total: number;
+          capacity_taken: number;
+          capacity_available: number;
+          tonight_date: string | null;
+          tonight_capacity: number;
+          tonight_taken: number;
+          tonight_available: number;
           nights_total: number;
           nights_upcoming: number;
           gallery_published: number;
           gallery_draft: number;
           staff_active: number;
           staff_total: number;
+        }[];
+      };
+      /** Day-by-day bookings (and revenue) for the dashboard chart. */
+      admin_booking_series: {
+        Args: { p_today: string; p_days?: number; p_tz?: string; p_include_revenue?: boolean };
+        Returns: {
+          day: string;
+          bookings: number;
+          confirmed: number;
+          revenue: number | null;
+        }[];
+      };
+      /** Bookings, passes, people and revenue per pass category. */
+      admin_pass_breakdown: {
+        Args: { p_include_revenue?: boolean };
+        Returns: {
+          pass_category_id: string;
+          pass_name: string;
+          pass_composition: string | null;
+          price_inr: number;
+          is_active: boolean;
+          bookings: number;
+          paid_bookings: number;
+          passes_issued: number;
+          people: number;
+          revenue: number | null;
+        }[];
+      };
+      /** The newest bookings, for the dashboard table. */
+      admin_recent_bookings: {
+        Args: { p_limit?: number; p_include_contact?: boolean };
+        Returns: {
+          booking_uuid: string;
+          booking_id: string;
+          customer_name: string;
+          customer_mobile: string | null;
+          customer_email: string | null;
+          event_date: string;
+          start_time: string | null;
+          pass_name: string;
+          quantity: number;
+          number_of_people: number;
+          total_amount: number | null;
+          currency: string;
+          booking_status: string;
+          payment_status: string;
+          created_at: string;
         }[];
       };
       /**

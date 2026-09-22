@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 
+import { StatusPill, statusTone } from "@/components/admin/status-pill";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { can } from "@/lib/auth/permissions";
@@ -177,30 +178,3 @@ function Fact({ label, value }: { label: string; value: string }) {
   );
 }
 
-function statusTone(status: string): "go" | "warn" | "stop" {
-  if (["confirmed", "paid"].includes(status)) {
-    return "go";
-  }
-
-  if (["pending", "unpaid"].includes(status)) {
-    return "warn";
-  }
-
-  return "stop";
-}
-
-function StatusPill({ label, tone }: { label: string; tone: "go" | "warn" | "stop" }) {
-  const tones = {
-    go: "border-peacock/40 bg-peacock/10 text-peacock-soft",
-    warn: "border-marigold/40 bg-marigold/10 text-marigold-soft",
-    stop: "border-rani/40 bg-rani/10 text-rani-soft",
-  } as const;
-
-  return (
-    <span
-      className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-[0.6875rem] font-semibold tracking-widest uppercase ${tones[tone]}`}
-    >
-      {label}
-    </span>
-  );
-}

@@ -30,6 +30,13 @@ const longDateFormatter = new Intl.DateTimeFormat(siteConfig.locale, {
   timeZone: "UTC",
 });
 
+/** Compact enough for a chart axis: `11 Oct`. */
+const shortDateFormatter = new Intl.DateTimeFormat(siteConfig.locale, {
+  day: "numeric",
+  month: "short",
+  timeZone: "UTC",
+});
+
 /**
  * Parse a Postgres `date` into a UTC-anchored Date (never shifts the calendar
  * day).
@@ -95,6 +102,26 @@ export function formatLongDate(isoDate: string): string {
   const parts = formatParts(longDateFormatter, date);
 
   return `${parts.day} ${parts.month} ${parts.year}`;
+}
+
+/**
+ * `2026-10-11` → `11 Oct`.
+ *
+ * For chart axes and dense tables, where the full date does not fit and the year is
+ * already implied by the range on screen. Same UTC anchoring as every other date
+ * helper here, so a bar labelled `11 Oct` is the night of 11 October and not the
+ * evening of the 10th in some other timezone.
+ */
+export function formatShortDate(isoDate: string): string {
+  const date = parseDate(isoDate);
+
+  if (!date) {
+    return isoDate;
+  }
+
+  const parts = formatParts(shortDateFormatter, date);
+
+  return `${parts.day} ${parts.month}`;
 }
 
 /** `11 October 2026` for a parsed date, without re-parsing the string. */

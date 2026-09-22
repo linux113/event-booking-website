@@ -2306,6 +2306,7 @@ async function main() {
     "a staff member is not shown sales or staffing figures",
     !staffHome.text.includes("Paid bookings") &&
       !staffHome.text.includes("Refunded") &&
+      !staffHome.text.includes("Behind the scenes") &&
       !staffHome.text.includes("Staff accounts in total"),
     staffHome.text.slice(0, 160),
   );
@@ -2397,7 +2398,8 @@ async function main() {
   );
   check(
     "the dashboard counts are rendered for an admin",
-    adminHome.text.includes("Paid bookings") && adminHome.text.includes("Passes not yet used"),
+    adminHome.text.includes("Confirmed bookings") && adminHome.text.includes("Checked-in visitors"),
+    adminHome.text.slice(0, 160),
   );
   check(
     "the sections that are not built yet say so instead of linking nowhere",
@@ -2406,6 +2408,360 @@ async function main() {
       !adminHome.html.includes('href="/admin/payments"') &&
       !adminHome.html.includes('href="/admin/gallery"'),
   );
+
+  // ---------------------------------------------------------------------------
+  section("Admin dashboard: statistics, charts and the recent table");
+  // ---------------------------------------------------------------------------
+  // The dashboard's numbers were checked against the tables in verify-db. What is
+  // checked here is the rest of the journey: that the page renders exactly the figures
+  // the database reports, that the charts are drawn from the series the database
+  // returned, and that a staff session's dashboard carries no money and no contact
+  // details — not hidden, absent.
+  const chartMath = await import("../src/lib/admin/dashboard.ts");
+  const inr = (amount) => format.formatInr(Number(amount));
+
+  const [dashLedger] = await dbQuery(
+    `
+    select
+      (select count(*)::int from public.bookings) as bookings_total,
+      (select count(*)::int from public.bookings b where b.booking_status = 'confirmed') as bookings_confirmed,
+      (select count(*)::int from public.bookings b where b.payment_status = 'unpaid') as bookings_pending,
+      (select count(*)::int from public.bookings b
+        where (b.created_at at time zone 'Asia/Kolkata')::date = $1::date) as bookings_today,
+      (select coalesce(sum(b.total_amount), 0)::int from public.bookings b
+        where b.payment_status = 'paid') as revenue_total,
+      (select coalesce(sum(b.total_amount), 0)::int from public.bookings b
+        where b.payment_status = 'paid'
+          and (b.created_at at time zone 'Asia/Kolkata')::date = $1::date) as revenue_today,
+      (select coalesce(sum(b.total_amount), 0)::int from public.bookings b
+        where b.payment_status = 'refunded') as revenue_refunded,
+      (select count(*)::int from public.check_ins) as check_ins_total,
+      (select coalesce(sum(d.capacity), 0)::int from public.event_dates d
+        where d.status = 'scheduled' and d.event_date >= $1::date) as capacity_total,
+      (select coalesce(sum(b.number_of_people), 0)::int from public.bookings b
+         join public.event_dates d on d.id = b.event_date_id
+        where b.payment_status = 'paid' and d.status = 'scheduled'
+          and d.event_date >= $1::date) as capacity_taken;
+  `,
+    [gateToday],
+  );
+
+  // Fetched now, and read immediately after the ledger above, so the two describe the
+  // same state of the database.
+  const dashAdmin = await adminHtml("/admin", adminSession.cookie);
+  const dashStaff = await adminHtml("/admin", staffSession2.cookie);
+
+  check("the dashboard loads for an admin", dashAdmin.status === 200, `${dashAdmin.status}`);
+  check("and for a staff member", dashStaff.status === 200, `${dashStaff.status}`);
+
+  /**
+   * The visible text of the statistic card whose label starts at `label`, and the first
+   * value in it. Reading the *text* rather than the markup keeps this robust to React's
+   * escaping and to tag order, while still pinning each figure to its own label.
+   */
+  const cardText = (result, label) => {
+    const at = result.text.indexOf(label);
+    return at === -1 ? "" : result.text.slice(at, at + 320);
+  };
+  const cardValue = (result, label) => {
+    const text = cardText(result, label);
+    const at = text.indexOf(label);
+    if (at === -1) return null;
+    const match = text.slice(at + label.length).match(/₹[\d,]+|Visible to admins|\d+/);
+    return match ? match[0] : null;
+  };
+
+  const STATISTIC_LABELS = [
+    "Total bookings",
+    "Confirmed bookings",
+    "Pending payments",
+    "Today's bookings",
+    "Total revenue",
+    "Today's revenue",
+    "Checked-in visitors",
+    "Available capacity",
+  ];
+
+  check(
+    "the dashboard carries all eight statistics the event is run on",
+    STATISTIC_LABELS.every((label) => dashAdmin.text.includes(label)),
+    STATISTIC_LABELS.filter((label) => !dashAdmin.text.includes(label)).join(", ") || "all eight",
+  );
+  check(
+    "the figures are the venue's day, not the server's",
+    dashAdmin.text.includes(`tonight is ${format.formatEventDate(gateToday)}`) &&
+      dashAdmin.text.includes("Asia/Kolkata"),
+    format.formatEventDate(gateToday),
+  );
+
+  // Each card, against the rows it claims to describe. The ledger above is written
+  // from the tables, so a card that drifts from the data fails here.
+  const expectedCards = [
+    ["Total bookings", String(dashLedger.bookings_total)],
+    ["Confirmed bookings", String(dashLedger.bookings_confirmed)],
+    ["Pending payments", String(dashLedger.bookings_pending)],
+    ["Today's bookings", String(dashLedger.bookings_today)],
+    ["Total revenue", inr(dashLedger.revenue_total)],
+    ["Today's revenue", inr(dashLedger.revenue_today)],
+    ["Checked-in visitors", String(dashLedger.check_ins_total)],
+    ["Available capacity", String(dashLedger.capacity_total - dashLedger.capacity_taken)],
+  ];
+
+  for (const [label, expected] of expectedCards) {
+    const rendered = cardValue(dashAdmin, label);
+    check(
+      `the ${label} card shows what the bookings table holds`,
+      rendered === expected,
+      `${label}: rendered ${rendered} / counted ${expected}`,
+    );
+  }
+
+  check(
+    "the revenue card accounts for the money that was refunded",
+    dashLedger.revenue_refunded > 0
+      ? dashAdmin.text.includes(`${inr(dashLedger.revenue_refunded)} refunded — refunds stop counting`)
+      : dashAdmin.text.includes("refunds excluded"),
+    cardText(dashAdmin, "Total revenue").slice(0, 120),
+  );
+
+  // ---- the charts ------------------------------------------------------------
+  const chartSlice = (html, id) => {
+    const at = html.indexOf(`id="${id}"`);
+    if (at === -1) return "";
+    // Charts are figures, so the next one marks the end of this one: a slice that ran
+    // to the end of the document would count the following panels' markup as bars.
+    const end = html.indexOf("<figure", at + 10);
+    return html.slice(at, end === -1 ? at + 60_000 : end);
+  };
+  const barsIn = (chart) => (chart.match(/title="/g) ?? []).length;
+  const bookingsChart = chartSlice(dashAdmin.html, "bookings-by-date");
+  const revenueChart = chartSlice(dashAdmin.html, "revenue-by-date");
+
+  check(
+    "the bookings-by-date chart is on the page",
+    dashAdmin.html.includes('id="bookings-by-date"') && bookingsChart.includes("Bookings by date"),
+  );
+  check(
+    "the revenue-by-date chart is on the page",
+    dashAdmin.html.includes('id="revenue-by-date"') && revenueChart.includes("Revenue by date"),
+  );
+
+  // The series the chart is drawn from, straight from the database.
+  const dashSeries = await dbQuery(
+    `select day::text as day, bookings, confirmed, revenue from public.admin_booking_series($1::date, 14, $2::text, true) order by day;`,
+    [gateToday, "Asia/Kolkata"],
+  );
+  const seriesBookings = dashSeries.map((row) => Number(row.bookings));
+  const seriesTops = chartMath.axisMax(seriesBookings);
+  const barCount = barsIn(bookingsChart);
+
+  check(
+    "the chart has one bar per day in the window, gaps included",
+    barCount === dashSeries.length && barCount === 14,
+    `${barCount} bars for ${dashSeries.length} days`,
+  );
+  check(
+    "the window ends on the venue's today and says so",
+    dashAdmin.text.includes(`The last 14 days, ending ${format.formatEventDate(gateToday)}`),
+  );
+  check(
+    "the busiest day is drawn at its true height on the axis",
+    new RegExp(`height:\\s?${chartMath.barPercent(Math.max(...seriesBookings), seriesTops)}%`).test(bookingsChart),
+    `${Math.max(...seriesBookings)} of ${seriesTops} = ${chartMath.barPercent(Math.max(...seriesBookings), seriesTops)}%`,
+  );
+  check(
+    "the chart's own total is the sum of the series it drew",
+    dashAdmin.text.includes(`${seriesBookings.reduce((sum, value) => sum + value, 0)} 14 days`),
+    `${seriesBookings.reduce((sum, value) => sum + value, 0)} bookings across the window`,
+  );
+  check(
+    "the revenue chart's total is the paid money in the same window",
+    dashAdmin.text.includes(`${inr(dashSeries.reduce((sum, row) => sum + Number(row.revenue), 0))} 14 days`),
+    `${inr(dashSeries.reduce((sum, row) => sum + Number(row.revenue), 0))} across the window`,
+  );
+
+  // The bars carry their day in a title, so a quiet day is still readable on hover.
+  for (const row of [dashSeries[0], dashSeries.at(-1)]) {
+    check(
+      `the bar for ${row.day} is labelled with its own figure`,
+      bookingsChart.includes(
+        `title="${format.formatShortDate(row.day)} · ${Number(row.bookings)}"`,
+      ),
+      contextAround(bookingsChart, "title=", 60),
+    );
+  }
+
+  // ---- the pass category distribution ----------------------------------------
+  const dashBreakdown = await dbQuery(
+    `select pass_name, bookings, paid_bookings, passes_issued, people, revenue from public.admin_pass_breakdown(true) order by bookings desc, pass_name;`,
+  );
+  const breakdownTotal = dashBreakdown.reduce((sum, row) => sum + Number(row.bookings), 0);
+
+  check(
+    "every pass category is on the distribution, including the ones nobody bought",
+    dashBreakdown.every((row) => dashAdmin.text.includes(row.pass_name)),
+    `${dashBreakdown.length} categories`,
+  );
+
+  for (const row of dashBreakdown) {
+    const share = chartMath.sharePercent(Number(row.bookings), breakdownTotal);
+    check(
+      `${row.pass_name} shows its bookings, people and share`,
+      dashAdmin.text.includes(
+        `${Number(row.bookings)} ${Number(row.bookings) === 1 ? "booking" : "bookings"} · ${Number(row.people)} ${
+          Number(row.people) === 1 ? "person" : "people"
+        } · ${share}%`,
+      ),
+      cardText(dashAdmin, row.pass_name).slice(0, 120),
+    );
+  }
+
+  check(
+    "the distribution is ordered biggest first",
+    dashBreakdown.every(
+      (row, index) => index === 0 || Number(dashBreakdown[index - 1].bookings) >= Number(row.bookings),
+    ),
+    dashBreakdown.map((row) => `${row.pass_name}:${row.bookings}`).join(" "),
+  );
+
+  // ---- the recent bookings table ---------------------------------------------
+  const recentRows = await dbQuery(
+    `select booking_id, customer_name, customer_mobile, customer_email, total_amount
+       from public.bookings
+      order by created_at desc, id desc
+      limit 8;`,
+  );
+  const positions = recentRows.map((row) => dashAdmin.html.indexOf(row.booking_id));
+
+  check(
+    "the recent table lists the newest bookings, one row each, in order",
+    positions.every((position, index) => position !== -1 && (index === 0 || position > positions[index - 1])),
+    JSON.stringify(positions),
+  );
+  check(
+    "the table says how many rows it is showing",
+    dashAdmin.text.includes(`${recentRows.length} of ${recentRows.length}`),
+    `${recentRows.length} rows`,
+  );
+  check(
+    "an admin's recent table carries the contact details and the amount",
+    dashAdmin.html.includes(recentRows[0].customer_mobile) &&
+      dashAdmin.text.includes(inr(recentRows[0].total_amount)) &&
+      dashAdmin.text.includes("Amount"),
+    `${recentRows[0].booking_id}`,
+  );
+  check(
+    "and names a column for what each booking was worth rather than a bare figure",
+    dashAdmin.text.includes("Recent bookings") && dashAdmin.text.includes("newest first"),
+  );
+
+  // ---- the same page, as a staff member sees it -------------------------------
+  check(
+    "a staff member's dashboard carries no money: the two revenue cards are withheld",
+    cardValue(dashStaff, "Total revenue") === "Visible to admins" &&
+      cardValue(dashStaff, "Today's revenue") === "Visible to admins",
+    `total: ${cardValue(dashStaff, "Total revenue")} / today: ${cardValue(dashStaff, "Today's revenue")}`,
+  );
+  check(
+    "and no amount the event has taken appears anywhere on it",
+    !dashStaff.text.includes(inr(dashLedger.revenue_total)) &&
+      !dashStaff.text.includes(inr(dashLedger.revenue_today)),
+    `looked for ${inr(dashLedger.revenue_total)}`,
+  );
+  check(
+    "nor does the revenue chart draw a single bar for it",
+    barsIn(chartSlice(dashStaff.html, "revenue-by-date")) === 0 &&
+      dashStaff.text.includes("only returned to roles with access to payments"),
+    `${barsIn(chartSlice(dashStaff.html, "revenue-by-date"))} bars in the withheld chart`,
+  );
+  check(
+    "the distribution says the revenue column is not theirs to see",
+    dashStaff.text.includes("visible to admins"),
+    contextAround(dashStaff.text, "visible to admins", 60),
+  );
+  check(
+    "a staff member's recent table has no contact details and no amount column",
+    !dashStaff.html.includes(recentRows[0].customer_mobile) &&
+      !dashStaff.html.includes(recentRows[0].customer_email) &&
+      !dashStaff.text.includes("Amount") &&
+      dashStaff.html.includes(recentRows[0].customer_name),
+    `${recentRows[0].booking_id}: ${recentRows[0].customer_name}`,
+  );
+  check(
+    "but the staff dashboard still counts the six figures a shift needs",
+    ["Total bookings", "Confirmed bookings", "Pending payments", "Today's bookings", "Checked-in visitors", "Available capacity"].every(
+      (label) => cardValue(dashStaff, label) !== null,
+    ),
+    STATISTIC_LABELS.map((label) => `${label}:${cardValue(dashStaff, label)}`).join(" "),
+  );
+  check(
+    "the staff dashboard shows the same counts as the admin one, minus the money",
+    expectedCards
+      .filter(([label]) => !label.includes("revenue"))
+      .every(([label, expected]) => cardValue(dashStaff, label) === expected),
+    expectedCards.filter(([label]) => !label.includes("revenue")).map(([label]) => `${label}:${cardValue(dashStaff, label)}`).join(" "),
+  );
+
+  // ---- loading and error states ----------------------------------------------
+  const loadingSource = readFileSync(join(REPO_ROOT, "src", "app", "admin", "(shell)", "loading.tsx"), "utf8");
+  const errorSource = readFileSync(join(REPO_ROOT, "src", "app", "admin", "(shell)", "error.tsx"), "utf8");
+
+  check(
+    "the dashboard has a loading skeleton shaped like itself",
+    loadingSource.includes("aria-busy") &&
+      loadingSource.includes("Loading the dashboard") &&
+      loadingSource.includes("<Skeleton") &&
+      loadingSource.includes("sr-only"),
+    `${loadingSource.length} bytes`,
+  );
+  // The shell's skeleton would otherwise be the fallback for every admin route, so a
+  // camera about to open would first show a chart. Each route has its own.
+  const adminRoutes = [
+    ["src", "app", "admin", "(shell)", "scanner"],
+    ["src", "app", "admin", "(shell)", "bookings"],
+    ["src", "app", "admin", "(shell)", "settings"],
+    ["src", "app", "admin", "(shell)", "staff"],
+  ];
+  const missingSkeletons = adminRoutes.filter((parts) => {
+    const source = readFileSync(join(REPO_ROOT, ...parts, "loading.tsx"), "utf8");
+    return !(source.includes("aria-busy") && source.includes("<Skeleton") && source.includes("sr-only"));
+  });
+
+  check(
+    "and every other admin route has a skeleton shaped like its own page",
+    missingSkeletons.length === 0,
+    missingSkeletons.map((parts) => parts.at(-1)).join(", ") || `${adminRoutes.length} routes`,
+  );
+  // A dynamic route streams the fallback first, so both are in the response: the
+  // skeleton, and then the page that replaced it. What matters is that the second one
+  // is there — a page that stopped at the skeleton would be a dashboard with no
+  // numbers on it.
+  check(
+    "the skeleton streams first and the dashboard's own numbers follow it",
+    dashAdmin.text.includes("Loading the dashboard") &&
+      dashAdmin.text.includes("Total bookings") &&
+      dashAdmin.text.indexOf("Loading the dashboard") < dashAdmin.text.indexOf("Total bookings"),
+    contextAround(dashAdmin.text, "Loading the dashboard", 80),
+  );
+  check(
+    "and a staff session gets the same treatment",
+    dashStaff.text.includes("Loading the dashboard") &&
+      dashStaff.text.includes("Available capacity") &&
+      dashStaff.text.indexOf("Loading the dashboard") < dashStaff.text.indexOf("Available capacity"),
+  );
+  check(
+    "the dashboard has an error state with a retry that keeps the session",
+    errorSource.includes('"use client"') &&
+      errorSource.includes("reset") &&
+      errorSource.includes('role="alert"') &&
+      errorSource.includes("Try again"),
+    `${errorSource.length} bytes`,
+  );
+  check(
+    "the error state never prints the raw error, only the digest",
+    !errorSource.includes("error.message") && errorSource.includes("error.digest"),
+  );
+
 
   const adminSettings = await adminHtml("/admin/settings", adminSession.cookie);
   check(
