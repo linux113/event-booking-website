@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { createVerificationDb } from "./test/pglite.mjs";
 import { startRazorpayStub } from "./test/razorpay-stub.mjs";
 import { startShim } from "./test/postgrest-shim.mjs";
+import { createAuthStub } from "./test/supabase-auth-stub.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MIGRATIONS_DIR = join(REPO_ROOT, "supabase", "migrations");
@@ -165,6 +166,13 @@ const NIGHT_3 = "d0000000-0000-4000-8000-000000000003";
 const COUPLE_PASS = "c0000000-0000-4000-8000-000000000002";
 const FAMILY_PASS = "c0000000-0000-4000-8000-000000000005";
 
+// Staff identities for the gate section. The uuid is the *Auth* user id, which is
+// what `admin_users.user_id` points at and what the database checks on every scan.
+const STAFF_USER_ID = "aaaa0000-0000-4000-8000-0000000000b1";
+const SUSPENDED_USER_ID = "aaaa0000-0000-4000-8000-0000000000b2";
+const GUEST_USER_ID = "aaaa0000-0000-4000-8000-0000000000b3";
+const STAFF_PASSWORD = "Gate-Pass-2026";
+
 const db = createVerificationDb();
 let shim;
 let server;
@@ -197,8 +205,8 @@ function isPortInUse(port) {
   });
 }
 
-async function fetchPage(path) {
-  const response = await fetch(`http://127.0.0.1:${WEB_PORT}${path}`);
+async function fetchPage(path, init) {
+  const response = await fetch(`http://127.0.0.1:${WEB_PORT}${path}`, init);
 
   if (!response.ok) {
     throw new Error(`${path} responded ${response.status}`);
@@ -359,7 +367,17 @@ async function main() {
   // ---------------------------------------------------------------------------
   section("Service layer against the database");
   // ---------------------------------------------------------------------------
-  shim = await startShim({ db });
+  // Supabase Auth, doubled: the scanner is protected by a real session, so the
+  // harness needs a `/auth/v1` to sign in against.
+  const authStub = createAuthStub({
+    accounts: [
+      { id: STAFF_USER_ID, email: "scanner@example.com", password: STAFF_PASSWORD },
+      { id: SUSPENDED_USER_ID, email: "suspended@example.com", password: STAFF_PASSWORD },
+      { id: GUEST_USER_ID, email: "guest@example.com", password: STAFF_PASSWORD },
+    ],
+  });
+
+  shim = await startShim({ db, auth: authStub });
 
   process.env.NEXT_PUBLIC_SUPABASE_URL = shim.url;
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "test-anon-key";
@@ -1730,6 +1748,440 @@ async function main() {
     "the built stylesheet prints the ticket and hides the site chrome",
     builtCss.includes("@media print") && builtCss.includes(".pass-ticket"),
     `print rules ${builtCss.includes("@media print") ? "present" : "missing"}`,
+  );
+
+  // ---------------------------------------------------------------------------
+  section("Gate scanner: staff session, verdicts, one admission per pass");
+  // ---------------------------------------------------------------------------
+  // The gate night is "today at the venue" (siteConfig.timezone = Asia/Kolkata), and
+  // the app works that out for itself on every request. The harness must therefore
+  // expect the same date rather than tell the app what to think.
+  const todayParts = {};
+
+  for (const part of new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date())) {
+    todayParts[part.type] = part.value;
+  }
+
+  const gateToday = `${todayParts.year}-${todayParts.month}-${todayParts.day}`;
+  const gatePast = (await dbQuery(`select (($1::date) - 1)::text as d`, [gateToday]))[0].d;
+  const GATE_TONIGHT = "d0000000-0000-4000-8000-0000000000c1";
+  const GATE_YESTERDAY = "d0000000-0000-4000-8000-0000000000c2";
+
+  // Two extra nights: one the gate is working tonight, one that has already happened.
+  await dbRun(`
+    insert into public.event_dates (id, event_id, event_date, start_time, end_time, capacity, status)
+    values
+      ('${GATE_TONIGHT}', '${EVENT_ID}', '${gateToday}', '19:00', '23:30', 200, 'scheduled'),
+      ('${GATE_YESTERDAY}', '${EVENT_ID}', '${gatePast}', '19:00', '23:30', 200, 'scheduled');
+  `);
+
+  // Staff accounts: the Auth user (which the stub signs in) plus the allow-list row
+  // that both the app and the database insist on. The third account deliberately has
+  // no allow-list row at all — a real Auth user who must still get nowhere.
+  await dbRun(`
+    insert into auth.users (id, email) values
+      ('${STAFF_USER_ID}', 'scanner@example.com'),
+      ('${SUSPENDED_USER_ID}', 'suspended@example.com'),
+      ('${GUEST_USER_ID}', 'guest@example.com');
+    insert into public.admin_users (user_id, email, full_name, role, is_active)
+    values
+      ('${STAFF_USER_ID}', 'scanner@example.com', 'Gate Night Scanner', 'scanner', true),
+      ('${SUSPENDED_USER_ID}', 'suspended@example.com', 'Suspended Scanner', 'scanner', false);
+  `);
+
+  const staffRowId = (await dbQuery(`select id from public.admin_users where user_id = $1`, [STAFF_USER_ID]))[0].id;
+
+  /** A booking for one night, through the real database functions. */
+  async function bookingFor({ nightId, mobile, name, key }) {
+    const [created] = await dbQuery(
+      `select * from public.create_pending_booking(
+         p_event_id => $1, p_event_date_id => $2, p_pass_category_id => $3,
+         p_customer_name => $4, p_customer_mobile => $5, p_customer_email => $6,
+         p_quantity => 2, p_number_of_people => $7, p_idempotency_key => $8)`,
+      [EVENT_ID, nightId, COUPLE_PASS, name, mobile, `${key}@example.com`, 2 * couplePass.number_of_people, key],
+    );
+
+    return created;
+  }
+
+  /** Attach an order and confirm the payment, which is what issues the passes. */
+  async function payBooking(created, key) {
+    const orderId = `order_${key.replace(/[^a-z0-9]/gi, "").toUpperCase()}`;
+
+    await dbQuery(`select public.attach_razorpay_order($1, $2)`, [created.booking_uuid, orderId]);
+    await dbQuery(`select * from public.confirm_booking_payment($1, $2, $3)`, [
+      orderId,
+      `pay_${key.replace(/[^a-z0-9]/gi, "")}`,
+      Number(created.total_amount) * 100,
+    ]);
+  }
+
+  const gatePassRows = async (mobile) =>
+    dbQuery(
+      `select dp.pass_id, dp.qr_token, dp.pass_number, dp.status, dp.checked_in
+         from public.digital_passes dp
+         join public.bookings b on b.id = dp.booking_id
+        where b.customer_mobile = $1
+        order by dp.pass_number`,
+      [mobile],
+    );
+
+  const tonightBooking = await bookingFor({
+    nightId: GATE_TONIGHT,
+    mobile: "+919800000401",
+    name: "Nisha Rao",
+    key: "gate-tonight",
+  });
+  await payBooking(tonightBooking, "gate-tonight");
+  const tonightPasses = await gatePassRows("+919800000401");
+
+  const pastBooking = await bookingFor({
+    nightId: GATE_YESTERDAY,
+    mobile: "+919800000402",
+    name: "Past Night Guest",
+    key: "gate-past",
+  });
+  await payBooking(pastBooking, "gate-past");
+  const pastPasses = await gatePassRows("+919800000402");
+
+  // An unpaid booking with a pass row inserted by hand: a state the app cannot
+  // produce (passes are only issued by a confirmed payment), which is exactly why the
+  // database has to refuse it.
+  const unpaidBooking = await bookingFor({
+    nightId: GATE_TONIGHT,
+    mobile: "+919800000403",
+    name: "Unpaid Guest",
+    key: "gate-unpaid-http",
+  });
+  await dbQuery(`insert into public.digital_passes (booking_id, valid_date, pass_number) values ($1, $2, 1)`, [
+    unpaidBooking.booking_uuid,
+    gateToday,
+  ]);
+  const unpaidPass = (
+    await dbQuery(`select qr_token from public.digital_passes where booking_id = $1`, [unpaidBooking.booking_uuid])
+  )[0];
+
+  check(
+    "gate fixtures: a paid booking for tonight, one for last night, one unpaid, and three staff accounts",
+    tonightPasses.length === 2 && pastPasses.length === 2 && Boolean(unpaidPass?.qr_token),
+    `${tonightPasses.length}/${pastPasses.length}`,
+  );
+
+  // ---- a session, exactly the way the staff sign-in screen gets one --------------
+  // `@supabase/ssr` is the same library the app's server client uses, so the cookies
+  // produced here are the cookies the app will read back: sign in → cookie jar →
+  // request the staff pages with that cookie.
+  const { createServerClient } = await import("@supabase/ssr");
+
+  async function signIn(email, password) {
+    const jar = new Map();
+    const client = createServerClient(shim.url, "test-anon-key", {
+      cookies: {
+        getAll: () => [...jar.entries()].map(([name, value]) => ({ name, value })),
+        setAll: (cookies) => {
+          for (const { name, value } of cookies) {
+            jar.set(name, value);
+          }
+        },
+      },
+    });
+
+    const { data, error } = await client.auth.signInWithPassword({ email, password });
+
+    return {
+      error: error?.message ?? null,
+      userId: data?.user?.id ?? null,
+      cookie: [...jar.entries()].map(([name, value]) => `${name}=${value}`).join("; "),
+    };
+  }
+
+  const gateApi = async (path, { method = "POST", body, cookie } = {}) => {
+    const response = await fetch(api(path), {
+      method,
+      redirect: "manual",
+      headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+
+    let payload = null;
+
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+
+    return { status: response.status, location: response.headers.get("location"), payload };
+  };
+
+  const scanWith = (token, cookie) => gateApi("/api/staff/scan", { body: { token }, cookie });
+
+  // ---- nobody without a session gets anywhere -----------------------------------
+  const anonymousScanner = await gateApi("/admin/scanner", { method: "GET" });
+  check(
+    "the scanner sends a signed-out visitor to the staff sign-in",
+    anonymousScanner.status === 307 && String(anonymousScanner.location ?? "").includes("/admin/login"),
+    `${anonymousScanner.status} ${anonymousScanner.location ?? ""}`,
+  );
+
+  const anonymousScan = await scanWith("a".repeat(64));
+  check("the scan API answers 401 without a session", anonymousScan.status === 401, `${anonymousScan.status}`);
+  check(
+    "and says what to do about it",
+    anonymousScan.payload?.ok === false && anonymousScan.payload?.error?.kind === "not-authorized",
+    JSON.stringify(anonymousScan.payload ?? null),
+  );
+
+  const anonymousCheckIn = await gateApi("/api/staff/check-in", { body: { token: "a".repeat(64) } });
+  check("the check-in API answers 401 without a session", anonymousCheckIn.status === 401, `${anonymousCheckIn.status}`);
+
+  const loginHtml = await fetchPage("/admin/login");
+  const loginPage = visibleText(loginHtml);
+  check(
+    "the sign-in screen asks for a staff email and password",
+    loginPage.includes("Sign in to the gate") && /name="email"/.test(loginHtml) && /name="password"/.test(loginHtml),
+  );
+  check("the sign-in screen is not indexable", /noindex/.test(loginHtml));
+
+  // ---- a real sign-in, a real cookie --------------------------------------------
+  const staffSession = await signIn("scanner@example.com", STAFF_PASSWORD);
+  check(
+    "a staff member signs in through Supabase Auth",
+    staffSession.userId === STAFF_USER_ID && staffSession.cookie.length > 0,
+    `user=${staffSession.userId ?? "none"} error=${staffSession.error ?? "none"}`,
+  );
+  check("the session is written as Supabase cookies", staffSession.cookie.startsWith("sb-"), staffSession.cookie.slice(0, 24));
+
+  const badLogin = await signIn("scanner@example.com", "not-the-password");
+  check(
+    "a wrong password is refused",
+    badLogin.userId === null && /invalid/i.test(badLogin.error ?? ""),
+    badLogin.error ?? "no error",
+  );
+
+  const scannerHtml = await fetchPage("/admin/scanner", { headers: { cookie: staffSession.cookie } });
+  const scannerPage = visibleText(scannerHtml);
+  check(
+    "the scanner renders for a signed-in staff member",
+    scannerPage.includes("Pass scanner") && scannerPage.includes("Gate Night Scanner"),
+    contextAround(scannerPage, "Pass scanner"),
+  );
+  check("the scanner names the night the gate is on", scannerPage.includes(format.formatEventDate(gateToday)), gateToday);
+  check(
+    "the scanner explains that the browser does not decide",
+    scannerPage.includes("the browser never decides that a pass is good"),
+  );
+  check("the scanner is not indexable", /noindex/.test(scannerHtml));
+
+  // ---- the verdicts, over HTTP, against the real database ------------------------
+  const validScan = await scanWith(tonightPasses[0].qr_token, staffSession.cookie);
+  const verdict = validScan.payload?.result ?? null;
+  check(
+    "a paid, unused pass for tonight scans as valid",
+    validScan.status === 200 && verdict?.outcome === "valid",
+    JSON.stringify(validScan.payload ?? null).slice(0, 160),
+  );
+  check(
+    "the verdict carries the guest, the pass id and the night",
+    verdict?.customerName === "Nisha Rao" && /^PS-\d{6}$/.test(verdict?.passId ?? "") && verdict?.eventDate === gateToday,
+    `${verdict?.customerName ?? ""} ${verdict?.passId ?? ""} ${verdict?.eventDate ?? ""}`,
+  );
+  check(
+    "the verdict reports the booking as confirmed and paid",
+    verdict?.bookingStatus === "confirmed" && verdict?.paymentStatus === "paid",
+    `${verdict?.bookingStatus ?? ""}/${verdict?.paymentStatus ?? ""}`,
+  );
+  check(
+    "the database recognises the staff member behind the session",
+    verdict?.staffName === "Gate Night Scanner",
+    verdict?.staffName ?? "",
+  );
+  check(
+    "the verdict carries no mobile number, no email address and no token",
+    !/mobile|email|token/i.test(Object.keys(verdict ?? {}).join(",")),
+    Object.keys(verdict ?? {}).join(","),
+  );
+  check(
+    "scanning still does not admit anybody",
+    (await gatePassRows("+919800000401"))[0].checked_in === false,
+  );
+
+  // ---- CHECK IN, once ------------------------------------------------------------
+  const admitted = await gateApi("/api/staff/check-in", {
+    body: { token: tonightPasses[0].qr_token, gate: "Gate B" },
+    cookie: staffSession.cookie,
+  });
+  check(
+    "CHECK IN admits the guest",
+    admitted.status === 200 && admitted.payload?.result?.outcome === "checked_in",
+    JSON.stringify(admitted.payload ?? null).slice(0, 160),
+  );
+  check("the check-in returns the audit row it wrote", typeof admitted.payload?.result?.checkInId === "string");
+
+  const entryRows = await dbQuery(
+    `select gate, notes, checked_in_by, event_date_id from public.check_ins where digital_pass_id = (select id from public.digital_passes where qr_token = $1)`,
+    [tonightPasses[0].qr_token],
+  );
+  check("exactly one entry was recorded for the pass", entryRows.length === 1, `${entryRows.length}`);
+  check(
+    "the entry records the gate, the source and the staff member",
+    entryRows[0]?.gate === "Gate B" &&
+      entryRows[0]?.notes === "web scanner" &&
+      entryRows[0]?.checked_in_by === staffRowId &&
+      entryRows[0]?.event_date_id === GATE_TONIGHT,
+    `${entryRows[0]?.gate ?? ""} / ${entryRows[0]?.notes ?? ""}`,
+  );
+  const usedPass = (await gatePassRows("+919800000401"))[0];
+  check("the pass is now used and checked in", usedPass.status === "used" && usedPass.checked_in === true);
+
+  const secondScan = await scanWith(tonightPasses[0].qr_token, staffSession.cookie);
+  check(
+    "a second scan reports the pass as already used",
+    secondScan.payload?.result?.outcome === "already_used",
+    secondScan.payload?.result?.outcome ?? "",
+  );
+  const secondAdmit = await gateApi("/api/staff/check-in", {
+    body: { token: tonightPasses[0].qr_token },
+    cookie: staffSession.cookie,
+  });
+  check(
+    "a second check-in is refused and writes nothing",
+    secondAdmit.status === 200 &&
+      secondAdmit.payload?.result?.outcome === "already_used" &&
+      (
+        await dbQuery(
+          `select count(*)::int as n from public.check_ins where digital_pass_id = (select id from public.digital_passes where qr_token = $1)`,
+          [tonightPasses[0].qr_token],
+        )
+      )[0].n === 1,
+  );
+
+  // ---- two phones, one code ------------------------------------------------------
+  const [raceA, raceB] = await Promise.all([
+    gateApi("/api/staff/check-in", { body: { token: tonightPasses[1].qr_token }, cookie: staffSession.cookie }),
+    gateApi("/api/staff/check-in", { body: { token: tonightPasses[1].qr_token }, cookie: staffSession.cookie }),
+  ]);
+  const raceOutcomes = [raceA.payload?.result?.outcome, raceB.payload?.result?.outcome].sort();
+  check(
+    "two check-ins for the same code admit exactly one guest",
+    raceOutcomes.filter((outcome) => outcome === "checked_in").length === 1 &&
+      raceOutcomes.filter((outcome) => outcome === "already_used").length === 1,
+    raceOutcomes.join(","),
+  );
+  check(
+    "and the second guest is not recorded twice",
+    (
+      await dbQuery(
+        `select count(*)::int as n from public.check_ins where digital_pass_id = (select id from public.digital_passes where qr_token = $1)`,
+        [tonightPasses[1].qr_token],
+      )
+    )[0].n === 1,
+  );
+
+  // ---- everything the gate must refuse -------------------------------------------
+  const unknownScan = await scanWith("a".repeat(64), staffSession.cookie);
+  check("an unknown code is refused", unknownScan.payload?.result?.outcome === "invalid", unknownScan.payload?.result?.outcome ?? "");
+  check(
+    "the refusal does not pretend to know a pass",
+    unknownScan.payload?.result?.passId === null && unknownScan.payload?.result?.customerName === null,
+  );
+
+  const malformedScan = await scanWith("not-a-token", staffSession.cookie);
+  check(
+    "a code that is not a pass token is refused before the database is asked",
+    malformedScan.status === 200 && malformedScan.payload?.result?.outcome === "invalid",
+    `${malformedScan.status} ${malformedScan.payload?.result?.outcome ?? ""}`,
+  );
+
+  const emptyScan = await gateApi("/api/staff/scan", { body: {}, cookie: staffSession.cookie });
+  check("a scan with no code at all is a 400", emptyScan.status === 400, `${emptyScan.status}`);
+
+  const brokenJson = await fetch(api("/api/staff/scan"), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: staffSession.cookie },
+    body: "{",
+  });
+  check("a scan body that is not JSON is a 400", brokenJson.status === 400, `${brokenJson.status}`);
+
+  const unpaidScan = await scanWith(unpaidPass.qr_token, staffSession.cookie);
+  check(
+    "a pass whose booking was never paid is refused",
+    unpaidScan.payload?.result?.outcome === "payment_not_verified",
+    unpaidScan.payload?.result?.outcome ?? "",
+  );
+  check(
+    "and it is still not marked used",
+    (await dbQuery(`select checked_in from public.digital_passes where qr_token = $1`, [unpaidPass.qr_token]))[0]
+      .checked_in === false,
+  );
+
+  const pastScan = await scanWith(pastPasses[0].qr_token, staffSession.cookie);
+  check(
+    "a pass for last night is refused",
+    pastScan.payload?.result?.outcome === "expired",
+    pastScan.payload?.result?.outcome ?? "",
+  );
+
+  const futureBooking = await bookingFor({
+    nightId: FREE_NIGHT,
+    mobile: "+919800000404",
+    name: "Next Week Guest",
+    key: "gate-future",
+  });
+  await payBooking(futureBooking, "gate-future");
+  const futurePasses = await gatePassRows("+919800000404");
+  const futureScan = await scanWith(futurePasses[0].qr_token, staffSession.cookie);
+  check(
+    "a pass for a later night is refused",
+    futureScan.payload?.result?.outcome === "not_yet_valid",
+    futureScan.payload?.result?.outcome ?? "",
+  );
+
+  const refundedScan = await scanWith(webhookPasses[0].qr_token, staffSession.cookie);
+  check(
+    "a refunded booking's pass is refused",
+    refundedScan.payload?.result?.outcome === "refunded",
+    refundedScan.payload?.result?.outcome ?? "",
+  );
+
+  // ---- who may scan at all --------------------------------------------------------
+  const guestSession = await signIn("guest@example.com", STAFF_PASSWORD);
+  check(
+    "an ordinary Supabase account can sign in to Auth",
+    guestSession.userId === GUEST_USER_ID && guestSession.cookie.length > 0,
+    guestSession.error ?? "no error",
+  );
+  const guestScan = await scanWith(tonightPasses[1].qr_token, guestSession.cookie);
+  check(
+    "but it gets no scanner and no verdict: not on the allow-list",
+    guestScan.status === 401,
+    `${guestScan.status}`,
+  );
+
+  const suspendedSession = await signIn("suspended@example.com", STAFF_PASSWORD);
+  check("a deactivated staff account can still sign in to Auth", suspendedSession.userId === SUSPENDED_USER_ID);
+  const suspendedScan = await scanWith(tonightPasses[1].qr_token, suspendedSession.cookie);
+  check(
+    "a deactivated staff account is refused by the app",
+    suspendedScan.status === 401,
+    `${suspendedScan.status}`,
+  );
+
+  // ---- the words the door needs ---------------------------------------------------
+  const gateChunks = readChunks(join(REPO_ROOT, DIST_DIR, "static", "chunks")).join("\n");
+
+  for (const wording of ["VALID PASS", "PASS ALREADY USED", "PAYMENT NOT VERIFIED", "INVALID PASS", "CHECK IN"]) {
+    check(`the shipped scanner carries the "${wording}" verdict`, gateChunks.includes(wording));
+  }
+
+  check(
+    "no pass token ever ships inside the client bundle",
+    !gateChunks.includes(tonightPasses[0].qr_token) && !gateChunks.includes(futurePasses[0].qr_token),
   );
 
   // ---- 10. the key secret never reaches the browser -----------------------

@@ -685,6 +685,37 @@ export interface Database {
           is_bookable: boolean;
         }[];
       };
+      /**
+       * Gate entry (step 7). `scan_pass` is the read-only verdict; `check_in_pass`
+       * is the same verdict with the compare-and-swap and the `check_ins` row
+       * behind it. Both are executable by `service_role` only, and both demand a
+       * staff user id — the return shape is identical, so the scanner can show the
+       * result of either without a second model.
+       */
+      scan_pass: {
+        Args: { p_qr_token: string; p_gate_date: string; p_staff_user_id: string };
+        Returns: PassEntryRow[];
+      };
+      check_in_pass: {
+        Args: {
+          p_qr_token: string;
+          p_gate_date: string;
+          p_staff_user_id: string;
+          p_gate?: string | null;
+        };
+        Returns: PassEntryRow[];
+      };
+      /** Internal: the shared body of the two above. Revoked from every role. */
+      pass_entry: {
+        Args: {
+          p_qr_token: string;
+          p_gate_date: string;
+          p_staff_user_id: string | null;
+          p_commit: boolean;
+          p_gate?: string | null;
+        };
+        Returns: PassEntryRow[];
+      };
     };
     Enums: Record<string, never>;
     CompositeTypes: Record<string, never>;
@@ -695,6 +726,40 @@ export interface Database {
 // Status unions — kept in sync with the CHECK constraints in the migrations.
 // Changing a value here is not enough: the SQL constraint must change too.
 // -----------------------------------------------------------------------------
+
+/**
+ * One row of the gate verdict (`scan_pass` / `check_in_pass` / `pass_entry`).
+ *
+ * Every field except `outcome` and `reason` is null when the pass was refused
+ * before it could be read, which is why the presentation type in
+ * `src/types/admin.ts` marks them nullable too.
+ */
+export interface PassEntryRow {
+  outcome: string;
+  reason: string | null;
+  pass_id: string | null;
+  pass_status: string | null;
+  checked_in: boolean | null;
+  checked_in_at: string | null;
+  pass_number: number | null;
+  pass_total: number | null;
+  customer_name: string | null;
+  pass_name: string | null;
+  pass_composition: string | null;
+  booking_reference: string | null;
+  booking_status: string | null;
+  payment_status: string | null;
+  event_name: string | null;
+  event_date: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  venue_name: string | null;
+  venue_address: string | null;
+  city: string | null;
+  gate_date: string | null;
+  staff_name: string | null;
+  check_in_id: string | null;
+}
 
 export type EventStatus = "draft" | "published" | "archived";
 export type EventDateStatus = "scheduled" | "sold_out" | "cancelled" | "completed";

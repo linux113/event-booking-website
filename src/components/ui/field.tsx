@@ -16,7 +16,7 @@ type TextFieldProps = {
   /** Shown under the field, replaced by `error` when there is one. */
   hint?: string;
   error?: string;
-  type?: "text" | "email" | "tel" | "number";
+  type?: "text" | "email" | "tel" | "number" | "password";
   inputMode?: "text" | "email" | "tel" | "numeric";
   autoComplete?: string;
   placeholder?: string;

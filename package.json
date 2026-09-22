@@ -17,6 +17,7 @@
     "@supabase/supabase-js": "^2.117.0",
     "clsx": "^2.1.1",
     "geist": "^1.7.2",
+    "jsqr": "^1.4.0",
     "next": "16.3.5",
     "qrcode": "^1.5.4",
     "react": "19.2.8",

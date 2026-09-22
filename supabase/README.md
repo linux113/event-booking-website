@@ -11,7 +11,8 @@ supabase/
 │   ├── 20260922090200_public_data_api.sql        # per-night availability RPC, highlights, features
 │   ├── 20260922090300_pass_catalogue_visibility.sql  # disabled passes stay visible to the site
 │   ├── 20260922090400_booking_flow.sql           # DND reference, idempotency key, atomic booking RPC
-│   └── 20260922090500_payments.sql               # public token, payment events, confirm/refund, webhook
+│   ├── 20260922090500_payments.sql               # public token, payment events, confirm/refund, webhook
+│   └── 20260922090700_check_in.sql               # gate verdict + atomic check-in (scan_pass, check_in_pass)
 └── seed.sql                                      # event, 9 nights, 5 passes, features, highlights
 ```
 
@@ -136,8 +137,53 @@ A pass is issued by the same transaction that confirms the payment, and by nothi
 - `refund_booking_payment()` cancels every pass of the booking in the same statement that
   marks the booking refunded, so a refunded pass cannot be scanned.
 - `digital_passes.checked_in` / `checked_in_at` are constrained to move together, and
-  `check_ins.digital_pass_id` is unique: one entry per pass, ever. The gate view in this
-  step only *reads* that state; writing it is the authenticated admin step.
+  `check_ins.digital_pass_id` is unique: one entry per pass, ever. The public gate view
+  (`/verify/<token>`) only *reads* that state; the only thing that writes it is
+  `check_in_pass()`, described below.
+
+### Gate entry
+
+A scanned code becomes an admitted guest through exactly one path. `pass_entry()` is the
+shared body; the two functions below are the only entry points, and both run it as the
+definer:
+
+| Function | What it does |
+| -------- | ------------ |
+| `scan_pass(qr_token, gate_date, staff_user_id)` | Returns the verdict for a scanned token and writes **nothing**. This is what the scanner shows before anybody presses a button. |
+| `check_in_pass(qr_token, gate_date, staff_user_id, gate)` | The same verdict, and on success the admission: `checked_in = true`, `status = 'used'`, `checked_in_at = now()` and one `check_ins` row. |
+
+Both take the **night** the gate is open as a parameter, and the server computes it from
+the venue's timezone (`src/lib/gate/night.ts`) — never from the phone that is scanning.
+Both are `service_role`-only (`execute` revoked from `PUBLIC`, `anon` and `authenticated`;
+`pass_entry` itself is revoked from every role, including `service_role`), and both
+re-read the caller's `admin_users` row inside the database: an active row with role
+`owner`, `admin`, `manager` or `scanner`, or the answer is `not_authorised`.
+
+One transaction, one row read under lock:
+
+| Step | Detail |
+| ---- | ------ |
+| Shape | `^[0-9a-f]{64}$`, checked *before* any lookup, so a 1 MB "token" never reaches a query |
+| One inner join | `digital_passes` → `bookings` → `event_dates` → `events` → `pass_categories`, with `for update of digital_passes` — a pass with no booking cannot be half-valid, and a second scanner waits here |
+| The eight checks | token exists · pass exists · booking exists · booking `confirmed` · payment `paid` · pass `active` · the night is not cancelled and the event is published · the pass's night **is** the gate night and the pass is unused |
+| The write | a compare-and-swap: `update … where checked_in = false and status = 'active'`. Zero rows updated means another scanner won the race, and the answer is `already_used` |
+| The audit row | one `check_ins` row (unique `digital_pass_id`), carrying the night, the gate label, `checked_in_by` = the `admin_users` row and `notes = 'web scanner'` |
+
+Outcomes, in the order they are decided: `not_authorised`, `invalid`, `refunded`,
+`payment_not_verified`, `already_used`, `expired`, `not_yet_valid`, then `valid` (preview)
+or `checked_in` (committed). A refusal always carries a `reason` sentence the scanner can
+show, and never carries a mobile number or an email address — the door needs a name and a
+pass, not a customer's contact details.
+
+Two properties are enforced by the database rather than by the application:
+
+- **One pass, one entry, ever.** The lock makes the compare-and-swap safe, and the unique
+  constraint on `check_ins.digital_pass_id` is the backstop underneath it. Two phones
+  scanning the same QR code at the same moment produce exactly one admitted guest; the
+  other is told the pass is already used.
+- **A check-in cannot exist without an admission.** The `check_ins` row is only written on
+  the `checked_in` outcome, and `digital_passes.checked_in`/`checked_in_at` move together
+  (a CHECK constraint).
 
 ### Integrity rules worth knowing
 
@@ -195,7 +241,7 @@ Supabase **SQL editor**.
 | ---- | -------------- |
 | `anon` | Read published events, their nights, their pass categories (active or not), features, highlights and published gallery rows, plus per-night availability counts through `get_event_night_availability()`. Nothing else — no read or write access to bookings, passes, check-ins or admin users. |
 | `authenticated` | Same public reads. Gains admin powers only when present in `admin_users` with an active role (`is_admin()` for owner/admin/manager, `is_staff()` to also include scanners). |
-| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, the pass reads (`get_booking_passes`, `get_pass_by_token`), and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
+| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, the pass reads (`get_booking_passes`, `get_pass_by_token`), the gate functions (`scan_pass`, `check_in_pass`) and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
 
 There is deliberately **no INSERT policy on `bookings`**: bookings are created by
 server code after recalculating the amount from `pass_categories`, so the browser
@@ -212,6 +258,16 @@ values ('<auth-user-uuid>', 'owner@example.com', 'Owner Name', 'owner');
 ```
 
 Only `owner` can manage `admin_users` rows; `scanner` can only check passes in.
+
+A staff member signs in with **Supabase Auth** (email + password, `supabase.auth` — no
+custom passwords are stored anywhere in this schema). The `admin_users` row is the
+allow-list: an account with no row, or with `is_active = false`, can sign in to Supabase
+and still gets no scanner, no verdict and no check-in — `scan_pass`/`check_in_pass`
+refuse the user id, and the app's staff lookup refuses the session before that.
+
+Passwords are created in the Supabase dashboard (**Authentication → Users → Add user**,
+"Auto confirm user") or by the user's own sign-up. `admin_users.user_id` must then be
+pointed at that auth user's uuid.
 
 ## Regenerating TypeScript types
 

@@ -20,6 +20,11 @@
  * service_role derived from the Authorization header, so RLS is exercised for
  * real. Raised exceptions keep their SQLSTATE/detail, which is how the booking
  * API tells capacity failures from duplicate submissions.
+ *
+ * It can also carry `/auth/v1/*` for the Supabase Auth double
+ * (`./supabase-auth-stub.mjs`), so a server-side session — sign in, cookie,
+ * `getUser()`, staff allow-list — can be exercised end to end without a Supabase
+ * project. Pass an `auth` handler to enable it.
  */
 import { createServer } from "node:http";
 
@@ -161,7 +166,7 @@ function buildSelect(raw) {
     .join(", ");
 }
 
-export async function startShim({ db, port = 0, log = false }) {
+export async function startShim({ db, port = 0, log = false, auth = null }) {
   // PGlite is single-connection; serialise every statement through one chain.
   let queue = Promise.resolve();
 
@@ -195,6 +200,22 @@ export async function startShim({ db, port = 0, log = false }) {
 
       if (log) {
         console.log(`  → ${req.method} ${url.pathname}${url.search} [${role}]`);
+      }
+
+      if (url.pathname.startsWith("/auth/v1/")) {
+        if (!auth) {
+          return respond(res, 404, { message: "This shim was started without an auth stub." });
+        }
+
+        const result = await auth.handle({
+          method: req.method,
+          pathname: url.pathname,
+          searchParams: url.searchParams,
+          headers: req.headers,
+          body: await readJsonBody(req),
+        });
+
+        return respond(res, result.status, result.body);
       }
 
       if (url.pathname.startsWith("/rest/v1/rpc/")) {
@@ -258,6 +279,15 @@ export async function startShim({ db, port = 0, log = false }) {
   });
 
   function respond(res, status, body) {
+    // 204 (and a null body) must not be written as JSON: Supabase Auth answers
+    // logout with an empty response, and supabase-js reads that as success.
+    if (status === 204 || body === null || body === undefined) {
+      res.writeHead(status, { "content-length": 0 });
+      res.end();
+
+      return;
+    }
+
     const payload = JSON.stringify(body);
     res.writeHead(status, {
       "content-type": "application/json; charset=utf-8",

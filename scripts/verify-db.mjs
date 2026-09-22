@@ -1347,6 +1347,301 @@ async function main() {
   );
 
   // ---------------------------------------------------------------------------
+  section("Gate check-in: scan a pass, admit a guest exactly once");
+  // ---------------------------------------------------------------------------
+  // The gate date is a parameter: the server computes it from the venue's timezone
+  // (src/config/site.ts) and never takes it from a browser. Here it is the night the
+  // passes are actually for.
+  const gateStaffId = scannerId;
+  const [gateNightRow] = await q(
+    `select event_date::text as gate_date, status from public.event_dates where id = '${NIGHT_FREE}';`,
+  );
+  const gateDate = gateNightRow.gate_date;
+  const gatePasses = await rpc("get_booking_passes", { p_public_token: payA.public_token });
+  const gateToken = gatePasses[0].qr_token;
+  const [gatePassRow] = await q(
+    `select id::text as id, checked_in_at::text as checked_in_at from public.digital_passes where qr_token = '${gateToken}';`,
+  );
+  const [gateBookingRow] = await q(
+    `select customer_name, booking_id from public.bookings where id = '${payA.booking_uuid}';`,
+  );
+
+  const gateScan = async (overrides = {}) =>
+    (
+      await rpc("scan_pass", {
+        p_qr_token: gateToken,
+        p_gate_date: gateDate,
+        p_staff_user_id: gateStaffId,
+        ...overrides,
+      })
+    )[0];
+
+  const gateCheckIn = async (overrides = {}) =>
+    (
+      await rpc("check_in_pass", {
+        p_qr_token: gateToken,
+        p_gate_date: gateDate,
+        p_staff_user_id: gateStaffId,
+        ...overrides,
+      })
+    )[0];
+
+  const gateEntryRows = async () =>
+    Number(
+      (
+        await q(`select count(*)::int as n from public.check_ins where digital_pass_id = '${gatePassRow.id}';`)
+      )[0].n,
+    );
+
+  // ---- the preview: everything the scanner shows before the button is pressed --
+  const gatePreview = await gateScan();
+  check("a paid, unused pass for tonight scans as valid", gatePreview.outcome === "valid", gatePreview.outcome ?? "");
+  check(
+    "the scan returns the guest, the pass and the booking",
+    gatePreview.customer_name === gateBookingRow.customer_name &&
+      gatePreview.booking_reference === gateBookingRow.booking_id &&
+      /^PS-\d{6}$/.test(gatePreview.pass_id ?? ""),
+    `${gatePreview.customer_name} / ${gatePreview.booking_reference}`,
+  );
+  check(
+    "the scan confirms the booking is confirmed and paid",
+    gatePreview.booking_status === "confirmed" && gatePreview.payment_status === "paid",
+    `${gatePreview.booking_status}/${gatePreview.payment_status}`,
+  );
+  check(
+    "the scan reports the night and which pass of how many",
+    gatePreview.gate_date === gateDate && gatePreview.pass_number === 1 && gatePreview.pass_total === 2,
+    `${gatePreview.pass_number}/${gatePreview.pass_total}`,
+  );
+  check(
+    "the scan carries no mobile number or email address",
+    !Object.keys(gatePreview).some((key) => /mobile|email|token/i.test(key)),
+    Object.keys(gatePreview).join(", "),
+  );
+  check(
+    "a preview writes nothing",
+    (await q(`select checked_in from public.digital_passes where id = '${gatePassRow.id}';`))[0].checked_in === false,
+  );
+
+  // ---- who is allowed to ask --------------------------------------------------
+  const gateUnknownStaff = await gateScan({ p_staff_user_id: "ffffffff-ffff-4fff-8fff-ffffffffffff" });
+  check(
+    "an unknown staff id is refused and learns nothing",
+    gateUnknownStaff.outcome === "not_authorised" && gateUnknownStaff.pass_id === null,
+    `${gateUnknownStaff.outcome} ${gateUnknownStaff.pass_id ?? ""}`,
+  );
+
+  const gateNullStaff = await gateScan({ p_staff_user_id: null });
+  check("a scan without a staff id is refused", gateNullStaff.outcome === "not_authorised", gateNullStaff.outcome ?? "");
+
+  const inactiveStaffUserId = "aaaa0000-0000-4000-8000-0000000000ff";
+  await run(`
+    insert into auth.users (id, email) values ('${inactiveStaffUserId}', 'suspended@example.com');
+    insert into public.admin_users (user_id, email, full_name, role, is_active)
+    values ('${inactiveStaffUserId}', 'suspended@example.com', 'Suspended Scanner', 'scanner', false);
+  `);
+  const gateInactiveStaff = await gateScan({ p_staff_user_id: inactiveStaffUserId });
+  check(
+    "a deactivated staff account cannot scan passes",
+    gateInactiveStaff.outcome === "not_authorised",
+    gateInactiveStaff.outcome ?? "",
+  );
+
+  // ---- the check-in ------------------------------------------------------------
+  const gateFirst = await gateCheckIn({ p_gate: "Gate A" });
+  check("the guest is checked in", gateFirst.outcome === "checked_in", gateFirst.outcome ?? "");
+  check("the check-in reports the staff member who did it", gateFirst.staff_name === "scanner@example.com", gateFirst.staff_name ?? "");
+  check("the check-in returns the audit row id", typeof gateFirst.check_in_id === "string", `${gateFirst.check_in_id}`);
+
+  const [gateUsedRow] = await q(
+    `select checked_in, status, checked_in_at::text as checked_in_at from public.digital_passes where id = '${gatePassRow.id}';`,
+  );
+  check("the pass row is marked used and checked in", gateUsedRow.checked_in === true && gateUsedRow.status === "used", JSON.stringify(gateUsedRow));
+  check("the pass stores when it was checked in", Boolean(gateUsedRow.checked_in_at));
+
+  const [gateEntry] = await q(`
+    select ci.checked_in_at::text as checked_in_at,
+           ci.gate,
+           ci.notes,
+           ci.event_date_id::text as event_date_id,
+           au.email as staff_email
+    from public.check_ins ci
+    left join public.admin_users au on au.id = ci.checked_in_by
+    where ci.digital_pass_id = '${gatePassRow.id}';
+  `);
+  check("a check_ins row is written", Boolean(gateEntry));
+  check("the entry records the staff member", gateEntry.staff_email === "scanner@example.com", gateEntry.staff_email ?? "");
+  check(
+    "the entry records the gate and the source",
+    gateEntry.gate === "Gate A" && gateEntry.notes === "web scanner",
+    `${gateEntry.gate} / ${gateEntry.notes}`,
+  );
+  check("the entry is logged against the night of the pass", gateEntry.event_date_id === NIGHT_FREE, gateEntry.event_date_id ?? "");
+  check(
+    "the entry timestamp is the pass's check-in time",
+    gateEntry.checked_in_at === gateUsedRow.checked_in_at,
+    `${gateEntry.checked_in_at} vs ${gateUsedRow.checked_in_at}`,
+  );
+  check("exactly one entry row exists for the pass", (await gateEntryRows()) === 1, `${await gateEntryRows()}`);
+
+  // ---- the second scanner ------------------------------------------------------
+  const gateSecond = await gateCheckIn({ p_gate: "Gate B" });
+  check("a second check-in reports the pass as already used", gateSecond.outcome === "already_used", gateSecond.outcome ?? "");
+  check(
+    "the second scan does not move the check-in time",
+    (await q(`select checked_in_at::text as t from public.digital_passes where id = '${gatePassRow.id}';`))[0].t ===
+      gateUsedRow.checked_in_at,
+  );
+  check("the second scan writes no second entry", (await gateEntryRows()) === 1, `${await gateEntryRows()}`);
+  check(
+    "the second scan reports the first entry's time",
+    new Date(gateSecond.checked_in_at).toISOString() === new Date(gateUsedRow.checked_in_at).toISOString(),
+    `${gateSecond.checked_in_at} vs ${gateUsedRow.checked_in_at}`,
+  );
+  check(
+    "the second scan does not overwrite the gate that admitted the guest",
+    (await q(`select gate from public.check_ins where digital_pass_id = '${gatePassRow.id}';`))[0].gate === "Gate A",
+  );
+  const gateScanUsed = await gateScan();
+  check("a used pass no longer scans as valid", gateScanUsed.outcome === "already_used", gateScanUsed.outcome ?? "");
+
+  // The losing half of a race cannot flip the pass again: the write is conditional
+  // on the pass still being unused, so the row count is what decides the winner.
+  const gateCasLoser = await q(`
+    update public.digital_passes
+    set checked_in = true, checked_in_at = now(), status = 'used'
+    where id = '${gatePassRow.id}' and checked_in = false and status = 'active'
+    returning id;
+  `);
+  check("the compare-and-swap lets exactly one scanner win", gateCasLoser.length === 0, `${gateCasLoser.length} rows updated`);
+
+  const gateDuplicateEntry = await expectError(
+    `insert into public.check_ins (digital_pass_id, event_date_id) values ('${gatePassRow.id}', '${NIGHT_FREE}');`,
+  );
+  check(
+    "the database refuses a second entry row for one pass",
+    /check_ins_one_per_pass|duplicate key/i.test(gateDuplicateEntry ?? ""),
+    gateDuplicateEntry ?? "the insert succeeded",
+  );
+
+  // ---- every way a pass can be refused ----------------------------------------
+  const gateSecondPassToken = gatePasses[1].qr_token;
+  const gateYesterday = await q(`select ('${gateDate}'::date - 1)::text as d;`);
+  const gateTomorrow = await q(`select ('${gateDate}'::date + 1)::text as d;`);
+
+  const gateNotYet = await gateScan({ p_qr_token: gateSecondPassToken, p_gate_date: gateYesterday[0].d });
+  check("a pass for a later night is refused as not yet valid", gateNotYet.outcome === "not_yet_valid", gateNotYet.outcome ?? "");
+  const gateExpired = await gateScan({ p_qr_token: gateSecondPassToken, p_gate_date: gateTomorrow[0].d });
+  check("a pass for a night that has passed is refused as expired", gateExpired.outcome === "expired", gateExpired.outcome ?? "");
+  check(
+    "a refused scan leaves the pass untouched",
+    (await q(`select checked_in from public.digital_passes where qr_token = '${gateSecondPassToken}';`))[0].checked_in === false,
+  );
+  const gateWrongNightCheckIn = await gateCheckIn({ p_qr_token: gateSecondPassToken, p_gate_date: gateTomorrow[0].d });
+  check(
+    "the check-in refuses a pass for another night too",
+    gateWrongNightCheckIn.outcome === "expired",
+    gateWrongNightCheckIn.outcome ?? "",
+  );
+
+  const gateUnknownToken = await gateScan({ p_qr_token: "a".repeat(64) });
+  check("an unknown token is refused as invalid", gateUnknownToken.outcome === "invalid", gateUnknownToken.outcome ?? "");
+  check("an unknown token returns no pass details", gateUnknownToken.pass_id === null && gateUnknownToken.customer_name === null);
+  const gateMalformed = await gateScan({ p_qr_token: "PS-000001" });
+  check("a malformed code is refused without a lookup", gateMalformed.outcome === "invalid", gateMalformed.outcome ?? "");
+  const gateNullToken = await gateScan({ p_qr_token: null });
+  check("a missing code is refused", gateNullToken.outcome === "invalid", gateNullToken.outcome ?? "");
+
+  // A pass whose booking was never paid: the row can exist (a failed callback leaves
+  // the booking unpaid) but the guest must not be admitted.
+  const gateUnpaidBooking = await createBooking({
+    p_customer_mobile: "+919800000122",
+    p_idempotency_key: "gate-unpaid",
+  });
+  await run(`
+    insert into public.digital_passes (booking_id, valid_date, pass_number)
+    values ('${gateUnpaidBooking.booking_uuid}', '${gateDate}', 1);
+  `);
+  const gateUnpaidToken = (await q(`
+    select qr_token from public.digital_passes
+    where booking_id = '${gateUnpaidBooking.booking_uuid}';
+  `))[0].qr_token;
+  const gateUnpaid = await gateCheckIn({ p_qr_token: gateUnpaidToken });
+  check("a pass on an unpaid booking is refused", gateUnpaid.outcome === "payment_not_verified", gateUnpaid.outcome ?? "");
+  check(
+    "the refused pass is not marked used",
+    (await q(`select checked_in from public.digital_passes where qr_token = '${gateUnpaidToken}';`))[0].checked_in === false,
+  );
+
+  // A refunded booking cancels its passes, so its codes must never open the gate.
+  const gateRefundedPasses = await rpc("get_booking_passes", { p_public_token: payB.public_token });
+  const gateRefunded = await gateCheckIn({ p_qr_token: gateRefundedPasses[0].qr_token });
+  check("a refunded booking's pass is refused", gateRefunded.outcome === "refunded", gateRefunded.outcome ?? "");
+  check(
+    "the refund refusal names the booking state",
+    /refund|cancel/i.test(gateRefunded.reason ?? ""),
+    gateRefunded.reason ?? "",
+  );
+
+  // A cancelled night takes nobody, whatever the pass says.
+  await run(`update public.event_dates set status = 'cancelled' where id = '${NIGHT_FREE}';`);
+  const gateCancelledNight = await gateScan({ p_qr_token: gateSecondPassToken });
+  check("a cancelled night refuses every pass", gateCancelledNight.outcome === "invalid", gateCancelledNight.outcome ?? "");
+  check("the refusal explains why", /not taking place/i.test(gateCancelledNight.reason ?? ""), gateCancelledNight.reason ?? "");
+  await run(
+    `update public.event_dates set status = '${gateNightRow.status}' where id = '${NIGHT_FREE}';`,
+  );
+  check(
+    "the night fixture is restored",
+    (await q(`select status from public.event_dates where id = '${NIGHT_FREE}';`))[0].status === gateNightRow.status,
+  );
+
+  // ---- grants ------------------------------------------------------------------
+  for (const [fn, signature] of [
+    ["scan_pass", "text, date, uuid"],
+    ["check_in_pass", "text, date, uuid, text"],
+  ]) {
+    const [grants] = await q(`
+      select has_function_privilege('anon', 'public.${fn}(${signature})', 'execute') as anon_can,
+             has_function_privilege('authenticated', 'public.${fn}(${signature})', 'execute') as authenticated_can,
+             has_function_privilege('service_role', 'public.${fn}(${signature})', 'execute') as service_can;
+    `);
+    check(
+      `${fn} is service_role only`,
+      grants.anon_can === false && grants.authenticated_can === false && grants.service_can === true,
+      JSON.stringify(grants),
+    );
+  }
+
+  const gateInternalPrivilege = await q(
+    `select has_function_privilege('service_role', 'public.pass_entry(text, date, uuid, boolean, text)', 'execute') as can;`,
+  );
+  check(
+    "the verdict implementation itself is not callable by any role",
+    gateInternalPrivilege[0].can === false,
+    `${gateInternalPrivilege[0].can}`,
+  );
+
+  const gateAnonAttempt = await (async () => {
+    await run("set role anon;");
+
+    try {
+      await q(`select * from public.check_in_pass('${gateSecondPassToken}', '${gateDate}', '${gateStaffId}');`);
+      return null;
+    } catch (error) {
+      return error;
+    } finally {
+      await run("reset role;");
+    }
+  })();
+  check("a browser key cannot check anybody in", gateAnonAttempt !== null, gateAnonAttempt ? "refused" : "allowed");
+  check(
+    "the second pass is still unused after every refusal",
+    (await q(`select checked_in from public.digital_passes where qr_token = '${gateSecondPassToken}';`))[0]
+      .checked_in === false,
+  );
+
+  // ---------------------------------------------------------------------------
   section("Result");
   // ---------------------------------------------------------------------------
   console.log(`\n  ${passed} passed, ${failures.length} failed\n`);

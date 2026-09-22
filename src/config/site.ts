@@ -28,6 +28,17 @@ export const siteConfig = {
   locale: "en-IN",
   currency: "INR",
 
+  /**
+   * The clock the venue runs on.
+   *
+   * A night is a calendar date, and "is this pass for tonight?" has to be answered
+   * somewhere. That answer comes from here and nowhere else: the server computes
+   * the gate night in this timezone and hands it to the database, which refuses any
+   * pass dated for another night. When the product runs events in more than one
+   * region this becomes a column on `events`.
+   */
+  timezone: "Asia/Kolkata",
+
   nav: [
     { label: "Home", href: "/" },
     { label: "About", href: "/about" },

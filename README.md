@@ -15,9 +15,10 @@ fits within free tiers for development and small-scale launch.
 | 3 | Database + connecting the public site to it (schema, RLS, seed, service layer) | ✅ done |
 | 4 | Booking system — four-step checkout, server-side pricing, capacity, duplicate protection | ✅ done |
 | 5 | Payments — Razorpay test mode: order creation, server-side signature verification, webhook, duplicate protection, refresh-safe status page | ✅ done |
-| 6 | Auth and attendee accounts | ⏳ next |
-| 7 | Admin dashboard (publish events, capacity, check-in) | ⏳ |
-| 8 | Hardening — rate limiting, analytics, perf budget | ⏳ |
+| 6 | Digital pass + QR code — issued only after a verified payment, printable ticket, gate view | ✅ done |
+| 7 | QR verification and entry — staff sign-in, mobile camera scanner, server-side check-in | ✅ done |
+| 8 | Admin dashboard — publish events, capacity, the rest of the staff surfaces | ⏳ next |
+| 9 | Hardening — rate limiting, analytics, perf budget | ⏳ |
 
 Step 3 is two halves of one job — the Supabase schema/RLS layer, then replacing every
 hard-coded value in the UI with database reads. Both are done and verified against real
@@ -25,10 +26,12 @@ PostgreSQL (`npm run db:verify`, `npm run verify:web`). Until a Supabase project
 anon key are added to `.env.local`, every route renders a "Database not connected" state
 rather than failing.
 
-**There is no payment code and no mock API.** The database layer is real (Supabase
-schema + RLS, read through `src/lib/services`), but checkout is deliberately not
-implemented: `/book` collects nothing, and every route that cannot reach the database
-renders an explicit empty or error state rather than invented content.
+**Nothing is mocked.** Prices, nights, gallery, bookings, payments and gate entries all
+come from the database, through `src/lib/services`; no component invents a price, a
+booking or a verdict. Payments run in Razorpay test mode (the flow is exercised
+end-to-end by `npm run verify:web` against a local stub gateway, because real test keys
+are yours to create), and a booking is only ever marked paid by a server-verified
+signature — never by the browser saying so.
 
 ## Pages
 
@@ -43,6 +46,8 @@ renders an explicit empty or error state rather than invented content.
 | `/pass/[passId]` | The digital pass itself — mobile-first, ticket-shaped, printable and downloadable. Needs the pass's own 64-character token in `?t=…` (noindex) |
 | `/pass/[passId]/download` | The pass as a standalone SVG ticket, or just the QR code as a PNG (`?format=png`). Token-guarded and never cached |
 | `/verify/[token]` | What the QR code opens — the gate view: `VALID`, `ALREADY CHECKED IN`, `CANCELLED`, `EXPIRED` or `NOT A VALID PASS`. Read-only |
+| `/admin/login` | Staff sign-in: Supabase Auth email + password, then the `admin_users` allow-list. Sends a valid non-staff account back with an explanation |
+| `/admin/scanner` | The gate: camera QR scanner, the verdict for the pass that was scanned, and the CHECK IN button that burns it. Staff session required; the page itself never writes |
 | `/gallery` | Published photos and videos from the `gallery` table, grouped by album |
 | `/contact` | Contact channels derived from the event row (WhatsApp, phone, email, map), venue block, support hours, FAQ |
 | `/events` | Published events from the database, each with its nights and passes |
@@ -68,7 +73,7 @@ runs — each route renders a "Database not connected" state instead of event da
 | `npm run lint`      | ESLint (Next core-web-vitals + TypeScript rules)                   |
 | `npm run typecheck` | `next typegen && tsc --noEmit` (route types must exist first)      |
 | `npm run db:verify` | Run the migrations + seed against PostgreSQL (WASM) and assert schema, constraints and RLS |
-| `npm run verify:web` | End-to-end check against a real database: boots PostgreSQL, serves it over a PostgREST-compatible shim, calls the real services, then builds and serves the real pages and exercises the whole booking **and payment** flow — validation, capacity, pricing, duplicate submissions, order creation, signature verification, webhooks, refunds, refresh-safe status and the live-key guard (payments run against a local stub gateway; no real credentials are needed) |
+| `npm run verify:web` | End-to-end check against a real database: boots PostgreSQL, serves it over a PostgREST-compatible shim, calls the real services, then builds and serves the real pages and exercises the whole booking, **payment** and **gate** flow — validation, capacity, pricing, duplicate submissions, order creation, signature verification, webhooks, refunds, refresh-safe status and the live-key guard, then signs in as staff, scans a pass, admits it once, races two check-ins against the same code and refuses every kind of bad pass — payments run against a local stub gateway and staff sign-in against a local Auth double, so no credentials are needed |
 | `npm run check`     | typecheck → lint → build, in one command                           |
 
 ## Booking flow
@@ -194,6 +199,57 @@ the payment — never by a page being opened:
 | Night already over | `EXPIRED` | derived from `valid_date` (no cron job required) |
 | Unknown or malformed token | `NOT A VALID PASS` | the token matched no row |
 
+## Gate check-in (`/admin/scanner`)
+
+The scanner is the only part of the site that *changes* a pass, so it is built around one
+rule: **the door is decided by the database, never by the browser.**
+
+1. **Sign in as staff.** `/admin/login` is Supabase Auth email + password. Signing in is
+   not enough on its own: the account must also be on the `admin_users` allow-list with an
+   active `owner` / `admin` / `manager` / `scanner` role, and that check is made against
+   the database on every request (`src/lib/auth/staff.ts`). A perfectly valid Supabase
+   account that is not staff is signed out again with an explanation instead of being
+   handed a scanner.
+2. **Scan with the phone.** `/admin/scanner` opens the rear camera (`getUserMedia`,
+   `facingMode: environment`), decodes frames with `jsqr` and keeps only codes that are
+   **our own** verification URLs — a code pointing at another site, or at plain text, is
+   refused without a request leaving the page. Manual entry sits under the camera for a
+   cracked lens, a dead battery or a desktop webcam.
+3. **The token is the only thing sent.** The browser POSTs the 64-character token to
+   `/api/staff/scan`. It never sends a date, a pass id, a name or a verdict: the server
+   works out which night the gate is on itself (`src/lib/gate/night.ts`, the venue's
+   `Asia/Kolkata` clock) and the pass is checked inside one transaction by `scan_pass()`.
+4. **Every check happens in the database.** The token must belong to a real pass, behind a
+   real booking, with `booking_status = 'confirmed'`, `payment_status = 'paid'`, a pass
+   that is `active` and not already checked in, on a night that is not cancelled, for the
+   event that owns it, and on the night the gate is actually open — and the person
+   scanning must still be active staff. Anything else is a refusal, with the reason.
+5. **CHECK IN burns the pass.** The button calls `/api/staff/check-in`, which runs
+   `check_in_pass()`: the pass row is locked (`for update`), the state is re-checked, and
+   the write is a compare-and-swap (`where checked_in = false and status = 'active'`)
+   followed by one `check_ins` row carrying the gate, the night and the staff id. Two
+   phones scanning the same code in the same second therefore admit the guest **once** —
+   the slower one is told the pass is already used. A unique constraint on
+   `check_ins.digital_pass_id` is the backstop if anything ever races past the lock.
+6. **A refusal is a sentence, not a stack trace.** The scanner shows the verdict and what
+   to do about it, and never reveals more than the ticket already does: the responses
+   carry no mobile number, no email address and no token.
+
+| Scanner shows | What happened | What the staff member does |
+| ------------- | ------------- | -------------------------- |
+| **✓ VALID PASS** | Everything above checked out for tonight | Confirm the name, then press CHECK IN |
+| **✓ CHECKED IN** | The button just succeeded — the entry is stored | Let the guest in |
+| **⚠ PASS ALREADY USED** | This code has already been through the gate (the time is shown) | Admit only with a supervisor's approval |
+| **✕ PAYMENT NOT VERIFIED** | The booking is not (or is no longer) paid | Send the guest to the ticket desk |
+| **✕ INVALID PASS** | Unknown, cancelled, refunded, or for another night — with the reason underneath | Do not admit |
+| **✕ NOT AUTHORISED** | The signed-in account is not active staff any more | Sign in again, or fetch a supervisor |
+
+`/api/staff/scan` and `/api/staff/check-in` answer `401` to anybody without a staff
+session, so the endpoint is not a public check-in API; `check_ins` and
+`digital_passes.status` are written by `service_role` functions only. The session cookie
+itself is refreshed by `src/proxy.ts` (Next's request hook), which is what keeps a
+scanner alive across a long shift.
+
 ## Where the data comes from
 
 Every public page reads live data through `src/lib/services`. There is no demo data
@@ -211,6 +267,8 @@ Supabase directly.
 | Gallery images and videos | `gallery` (published rows; `alt_text`/`caption` supply the copy) |
 | A booking's own status (confirmation page) | `bookings` through `get_booking_status(public_token)` — statuses, amount and issued pass count only, never customer details |
 | A booking's passes and their QR codes | `digital_passes` through `get_booking_passes(public_token)` (booking page) and `get_pass_by_token(qr_token)` (ticket and gate view) — pass id, state, night and event, never a mobile number or an email address |
+| The gate verdict for a scanned token | `scan_pass()` — one transaction, `service_role` only, and the caller must present a staff user id |
+| A check-in record | `check_in_pass()` — the same verdict plus a compare-and-swap on the pass row and one `check_ins` row |
 
 Availability is never computed in the browser: `get_event_night_availability()` is a
 `SECURITY DEFINER` function returning counts per night, so a visitor can see that a
@@ -227,8 +285,11 @@ produces a 500 — verified by `npm run verify:web`.
 src/
 ├── app/                        # App Router routes (routing + composition only)
 │   ├── about/ book/ contact/ events/ gallery/ passes/   # page.tsx (+ loading.tsx skeleton)
+│   ├── admin/                  # login + scanner (staff only: session checked server-side)
 │   ├── api/bookings/route.ts   # POST only: create a pending booking (no-key fallback)
 │   ├── api/payment/            # create-order, verify, webhook, status — all POST/GET server routes
+│   ├── api/staff/              # scan + check-in: staff session required, gate night decided server-side
+│   ├── proxy.ts                # session refresh for /admin and /api/staff (Next request hook)
 │   ├── book/status/            # server-rendered confirmation / live status page
 │   ├── layout.tsx              # Root shell: fonts, metadata, header/footer, skip link
 │   ├── page.tsx                # Home page composition
@@ -236,6 +297,7 @@ src/
 │   └── globals.css             # Tailwind entry + @theme design tokens
 ├── assets/images/              # Original generated artwork (no stock, no faces)
 ├── components/
+│   ├── admin/                  # scanner panel (camera + jsQR) and the scan verdict card
 │   ├── booking/                # checkout wizard: steps, pass choice, summary, confirmation panel
 │   ├── brand/logo.tsx          # Inline brand mark (no image request)
 │   ├── contact/contact-card.tsx
@@ -246,26 +308,32 @@ src/
 │   └── ui/                     # Button, Card, Badge, Container, Section, EmptyState, Skeleton, ErrorState
 ├── config/                     # env.ts (only reader of process.env), site.ts, contact.ts
 ├── lib/
+│   ├── admin/                  # verdict.ts: the outcome → what the scanner says
+│   ├── auth/                   # staff.ts: Supabase session + admin_users allow-list
 │   ├── booking/                # shared validation, idempotency keys (browser + server)
-│   ├── services/               # events.ts, gallery.ts, bookings.ts, payments.ts, mappers.ts, result.ts
+│   ├── gate/                   # night.ts: which night the gate is working, in the venue's timezone
+│   ├── pass/                   # links, status, QR rendering (server) and QR decoding (browser)
+│   ├── services/               # events.ts, gallery.ts, bookings.ts, payments.ts, passes.ts, check-in.ts, result.ts
 │   ├── supabase/               # browser / server / admin clients + public.ts (memoised anon client)
 │   ├── payments/               # razorpay.ts (orders + signatures), mode.ts (test/live guard), checkout.ts (browser loader)
 │   ├── format.ts               # INR, dates, times — UTC-anchored, composed from Intl parts
 │   └── utils.ts                # cn(): clsx + tailwind-merge
 └── types/
     ├── index.ts                # View models the UI renders
+    ├── admin.ts                # Staff session, gate verdict and scan-response types
     ├── booking.ts              # Checkout payload, field errors, order + confirmation views
+    ├── pass.ts                 # Digital pass view models
     └── database.ts             # Generated-shape Supabase types for every table
 
 supabase/
-├── migrations/                 # 1) schema  2) RLS  3) public data API  4) pass visibility  5) booking  6) payments
+├── migrations/                 # 1) schema  2) RLS  3) public data API  4) pass visibility  5) booking  6) payments  7) check-in
 ├── seed.sql                    # event, 9 nights, 5 pass categories, features, highlights
 └── README.md                   # how to apply, roles, what is/isn't seeded
 
 scripts/
 ├── verify-db.mjs               # npm run db:verify — schema, constraints, RLS
 ├── verify-web.mjs              # npm run verify:web — real pages against a real database
-└── test/                       # PostgREST shim, Razorpay stub, TypeScript path-alias loader
+└── test/                       # PostgREST shim, Supabase Auth stub, Razorpay stub, path-alias loader
 ```
 
 ### Conventions
@@ -277,9 +345,14 @@ scripts/
   Tailwind utilities and merge classes with `cn()`.
 - **Components:** primitives in `components/ui` are presentational; composition lives in
   `components/sections` and route files.
-- **Server/client:** only the mobile menu and the checkout wizard (selection, form
-  state, submission) are client components — the pages they sit on render on the
-  server, and the wizard's data arrives as props from the page.
+- **Server/client:** the mobile menu, the checkout wizard and the camera scanner are the
+  client components — the pages they sit on render on the server, and the wizard's data
+  arrives as props from the page. The scanner is a client component because it owns a
+  camera; everything it *does* goes through a route handler that checks the session and
+  calls the database.
+- **Trust:** a client component never decides anything that matters. It draws, it
+  collects, it posts. Prices, verdicts, check-ins and pass states are all decided in
+  Postgres.
 
 ## Accessibility & performance
 
@@ -323,6 +396,14 @@ whose `execute` privilege is granted to `service_role` alone: `anon` and
 Each row also carries a unique `idempotency_key`, so a retried request returns the
 booking that already exists instead of creating a second one.
 
+Gate entry is the same shape: `scan_pass(qr_token, gate_date, staff_user_id)` returns a
+verdict without writing, `check_in_pass(...)` returns the same verdict and admits the
+guest, and both are `service_role`-only with `execute` revoked from `anon` and
+`authenticated`. They refuse a caller who is not active staff — checked inside the
+database, so an API bug alone cannot admit anybody. The verdicts are `valid`, `checked_in`,
+`already_used`, `payment_not_verified`, `refunded`, `expired`, `not_yet_valid`, `invalid`
+and `not_authorised`.
+
 Per-night availability comes from `get_event_night_availability(uuid)`: visitors get
 remaining counts, never booking rows. A pass the organiser has disabled stays visible
 and is labelled "Not on sale"; the booking step — which runs with the service role — is
@@ -351,7 +432,7 @@ production. `src/config/env.ts` is the only module that reads `process.env`.
 | `NEXT_PUBLIC_SITE_URL`          | client + server | yes       | Canonical/OG URLs, absolute links, and the base of the URL inside every pass QR code (set it before printing passes) |
 | `NEXT_PUBLIC_SUPABASE_URL`      | client + server | yes       | Supabase project URL (public reads)      |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | client + server | yes       | Supabase anon key (RLS-protected)        |
-| `SUPABASE_SERVICE_ROLE_KEY`     | **server only** | yes — booking creation | Bypasses RLS. Guarded by `server-only` — a client import fails the build |
+| `SUPABASE_SERVICE_ROLE_KEY`     | **server only** | yes — bookings, passes, gate check-in | Bypasses RLS. Guarded by `server-only` — a client import fails the build |
 | `NEXT_PUBLIC_RAZORPAY_KEY_ID`   | client + server | yes — inlined at build time | Opens Razorpay Checkout. Changing keys means a new deployment |
 | `RAZORPAY_KEY_SECRET`           | **server only** | yes       | Creates orders, verifies the Checkout signature |
 | `RAZORPAY_WEBHOOK_SECRET`       | **server only** | yes       | Verifies webhook signatures              |
@@ -386,3 +467,7 @@ production. `src/config/env.ts` is the only module that reads `process.env`.
   made end to end.
 - Create the first admin: insert a row in `admin_users` for an existing Auth user with
   `role = 'owner'` (see supabase/README.md).
+- Create one staff account per person working the gate (a Supabase Auth user plus an
+  `admin_users` row with `role = 'scanner'`), and test the scanner **on the phones that
+  will actually be used**, over HTTPS — browsers only hand a camera to a secure origin,
+  so `http://` on a laptop's LAN address will not open one.
