@@ -1,14 +1,24 @@
 import type { NavItem } from "@/types";
 
 /**
- * Static application configuration (branding, navigation, SEO copy).
+ * Static application configuration: branding, navigation, SEO copy and the
+ * contact/social handles used by the header and footer.
  *
- * This is *not* event data. Anything that an organiser edits — events, passes,
- * prices, venues — must come from Supabase, never from this file.
- *
- * TODO(branding): replace `name`/`shortName` with the real product name. It is the
- * single source of truth for the header, footer and page metadata.
+ * This is *not* event data. Anything an organiser edits — events, passes,
+ * prices, venues, gallery photos — lives in `src/config/*` only as clearly
+ * marked demo content today, and moves to Supabase next.
  */
+
+/**
+ * Single switch that documents which content is still demo data.
+ * Rendered in the UI wherever demo values are shown, so the site never
+ * presents placeholder content as if it were live.
+ */
+export const contentStatus = {
+  isDemoContent: true,
+  notice: "Demo content — these values will be loaded from the database.",
+} as const;
+
 export const siteConfig = {
   name: "Garba Nights",
   shortName: "Garba Nights",
@@ -17,15 +27,49 @@ export const siteConfig = {
     "Discover Navratri and Dandiya events, reserve your passes and pay securely online. Built for organisers and dancers across India.",
   locale: "en-IN",
   currency: "INR",
+
   nav: [
-    { label: "Events", href: "/events" },
-    { label: "How it works", href: "/#how-it-works" },
+    { label: "Home", href: "/" },
+    { label: "About", href: "/about" },
+    { label: "Passes", href: "/passes" },
+    { label: "Gallery", href: "/gallery" },
+    { label: "Contact", href: "/contact" },
   ] satisfies readonly NavItem[],
+
   footerNav: [
     { label: "Home", href: "/" },
+    { label: "About", href: "/about" },
+    { label: "Passes", href: "/passes" },
+    { label: "Book Now", href: "/book" },
+    { label: "Gallery", href: "/gallery" },
     { label: "Events", href: "/events" },
-    { label: "How it works", href: "/#how-it-works" },
+    { label: "Contact", href: "/contact" },
   ] satisfies readonly NavItem[],
+
+  /**
+   * Contact handles. Placeholders — replace with the real lines before launch
+   * and delete `isDemoContent` above for those values.
+   */
+  contact: {
+    /** International format, digits only — used to build wa.me links. */
+    whatsappNumber: "919000000000",
+    phoneDisplay: "+91 90000 00000",
+    email: "hello@example.com",
+    addressLines: ["Royal Garden Lawns", "Andheri West, Mumbai 400053"],
+  },
+
+  socials: [
+    { label: "Instagram", href: "https://instagram.com/", icon: "instagram" },
+    { label: "Facebook", href: "https://facebook.com/", icon: "facebook" },
+    { label: "YouTube", href: "https://youtube.com/", icon: "youtube" },
+  ] as const,
 } as const;
 
 export type SiteConfig = typeof siteConfig;
+
+/** `wa.me` deep link with a prefilled enquiry message. */
+export function whatsappLink(
+  message = "Hi! I'd like to know more about the Navratri event passes.",
+): string {
+  return `https://wa.me/${siteConfig.contact.whatsappNumber}?text=${encodeURIComponent(message)}`;
+}

@@ -1,13 +1,21 @@
+import { AboutSection } from "@/components/sections/about-section";
+import { ContactSection } from "@/components/sections/contact-section";
+import { CtaBand } from "@/components/sections/cta-band";
+import { FeatureStrip } from "@/components/sections/feature-strip";
+import { GalleryPreview } from "@/components/sections/gallery-preview";
 import { Hero } from "@/components/sections/hero";
-import { HowItWorks } from "@/components/sections/how-it-works";
-import { UpcomingEvents } from "@/components/sections/upcoming-events";
+import { PassesPreview } from "@/components/sections/passes-preview";
 
 export default function HomePage() {
   return (
     <>
       <Hero />
-      <UpcomingEvents />
-      <HowItWorks />
+      <FeatureStrip />
+      <AboutSection />
+      <PassesPreview />
+      <GalleryPreview />
+      <ContactSection variant="preview" />
+      <CtaBand />
     </>
   );
 }

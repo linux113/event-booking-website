@@ -8,17 +8,31 @@ fits within free tiers for development and small-scale launch.
 
 ## Status
 
-**Step 1 — project setup only.** What exists today:
+| Step | Scope | State |
+| ---- | ----- | ----- |
+| 1 | Project setup — Next.js, TypeScript, Tailwind, structure, tooling | ✅ done |
+| 2 | Public UI — all six public pages, responsive, accessible | ✅ done |
+| 3 | Supabase project + schema (events, pass tiers, bookings, payments) | ⏳ next |
+| 4 | Auth and attendee accounts | ⏳ |
+| 5 | Razorpay order creation, signature verification, webhook, booking record | ⏳ |
+| 6 | Admin dashboard (publish events, capacity, check-in) | ⏳ |
+| 7 | Hardening — rate limiting, RLS tests, analytics, perf budget | ⏳ |
 
-- Next.js 16 App Router project with TypeScript (strict) and Tailwind CSS v4.
-- Reusable UI primitives, layout shell (header / footer / mobile nav) and a home page.
-- `/events` route, `not-found` page, SEO metadata, brand tokens.
-- `.env.example` documenting every variable the later steps will need.
+**There is no backend yet, no payment code and no mock API.** Sections that will be
+database-driven render explicit empty states rather than invented content, and every
+placeholder value is labelled in the UI as demo content.
 
-Not built yet (deliberately): Supabase client and schema, Razorpay integration,
-authentication, admin dashboard, booking flow. There is **no mock data and no fake
-payment logic anywhere** — sections that will be database-driven render explicit empty
-states instead.
+## Pages
+
+| Route | Purpose |
+| ----- | ------- |
+| `/` | Hero (banner, dates, venue, CTAs), feature strip, about, pass preview, gallery preview, contact preview, CTA band |
+| `/about` | Festival overview, what to expect, production list, organiser profiles (empty state until the DB exists) |
+| `/passes` | Full pass comparison, inclusions, pass policy notes |
+| `/book` | How booking will work, what to bring, event details. **Collects nothing and takes no payment** |
+| `/gallery` | Photo grid, video slots (empty by design), album empty state |
+| `/contact` | Contact channels, venue block, support hours, FAQ, contact-form placeholder |
+| `/events` | Database-backed listing route — intentionally empty until the `events` table exists |
 
 ## Getting started
 
@@ -39,60 +53,73 @@ npm run dev                  # http://localhost:3000
 | `npm run typecheck` | `next typegen && tsc --noEmit` (route types must exist first)      |
 | `npm run check`     | typecheck → lint → build, in one command                           |
 
-> Next.js 16 no longer runs ESLint inside `next build`, so run `npm run lint`
-> (or `npm run check`) separately — in CI and before deploying.
+## Demo content policy
 
-### Notes on the current setup
+Prices, dates, venue, contact details and imagery are **placeholders**, not live data.
+They are isolated so the swap to Supabase is a data-source change, not a UI rewrite:
 
-- **Typed routes** (`typedRoutes: true`) means `href` values are checked against the
-  routes generated from `src/app`. `npm run typecheck` runs `next typegen` first so the
-  generated `.next/types` exist even on a fresh clone.
-- **Fonts are self-hosted** through the [`geist`](https://www.npmjs.com/package/geist)
-  package instead of `next/font/google`: the build never depends on reaching Google
-  Fonts, and visitors make zero third-party requests.
-- **Theme tokens** live in `src/app/globals.css` (`@theme`). Change the hex values there
-  to re-skin the site.
+| File | Contents | Becomes |
+| ---- | -------- | ------- |
+| `src/config/event.ts` | Hero event + highlights | `events` / `event_highlights` tables |
+| `src/config/passes.ts` | Five pass tiers, prices, inclusions | `pass_tiers` table (per event, with availability) |
+| `src/config/features.ts` | Production elements (anchor, DJ, drone…) | `event_features` table or an enum column |
+| `src/config/gallery.ts` | Gallery artwork | Supabase Storage bucket + `gallery_items` |
+| `src/config/promos.ts` | Video slots (no URLs set) | `promo_videos` with real URLs |
+| `src/config/contact.ts` | Phone, email, address, map link | `organisers` table |
+| `src/config/site.ts` | Branding, nav, socials | Env/DB as appropriate |
+
+Every one of these files carries a `⚠️ DEMO CONTENT` banner, and the UI shows a
+`DemoBadge` next to the affected sections so nobody mistakes placeholder content for a
+live event. Pages consume domain types (`EventDetails`, `PassTier`, `GalleryItem`…), so
+the data layer maps rows onto those shapes and the components stay unchanged.
 
 ## Folder structure
 
 ```
 src/
-├── app/                       # App Router routes (routing + layout only, no business logic)
-│   ├── events/page.tsx        # /events listing (waiting on the database)
-│   ├── layout.tsx             # Root shell: fonts, metadata, header/footer, skip link
-│   ├── page.tsx               # Home page composition
-│   ├── not-found.tsx          # 404
-│   ├── globals.css            # Tailwind entry + design tokens (@theme)
-│   └── icon.svg               # Favicon
+├── app/                        # App Router routes (routing + composition only)
+│   ├── about/ book/ contact/ events/ gallery/ passes/
+│   ├── layout.tsx              # Root shell: fonts, metadata, header/footer, skip link
+│   ├── page.tsx                # Home page composition
+│   ├── not-found.tsx           # 404
+│   └── globals.css             # Tailwind entry + @theme design tokens
+├── assets/images/              # Original generated artwork (no stock, no faces)
 ├── components/
-│   ├── brand/                 # Logo / brand marks
-│   ├── events/                # (empty) event-specific UI: cards, filters, lists
-│   ├── layout/                # Site header, footer, mobile nav
-│   ├── sections/              # Page-level composed sections (hero, how-it-works…)
-│   └── ui/                    # Reusable primitives: Button, Card, Badge, Container…
-├── config/
-│   ├── env.ts                 # Single place that reads process.env + site URL
-│   └── site.ts                # Branding, navigation, SEO copy (no event data)
-├── lib/
-│   ├── payments/              # (empty) Razorpay — server-only helpers
-│   ├── services/              # (empty) data-access layer used by pages/actions
-│   ├── supabase/              # (empty) browser/server/admin Supabase clients
-│   └── utils.ts               # cn(): clsx + tailwind-merge
-└── types/                     # Shared types (domain types follow the DB schema)
+│   ├── brand/logo.tsx          # Inline brand mark (no image request)
+│   ├── contact/contact-card.tsx
+│   ├── events/                 # pass-card, gallery-tile
+│   ├── icons/index.tsx         # Original inline icon set (stroke-based, 24×24)
+│   ├── layout/                 # header, footer, mobile nav, page hero, WhatsApp button
+│   ├── sections/               # hero, feature strip, about, passes/gallery preview, CTA
+│   └── ui/                     # Button, Card, Badge, Container, Section, EmptyState…
+├── config/                     # site, env, event, passes, features, gallery, promos, contact
+├── lib/                        # utils (cn), format (INR), supabase/ payments/ services/ (empty)
+└── types/index.ts              # Domain types shared by UI and the future data layer
 ```
 
 ### Conventions
 
 - **Data flow:** pages/components call functions in `src/lib/services`, which wrap
-  Supabase. No component talks to Supabase or Razorpay directly, and nothing that
-  belongs in the database is hard-coded in the UI.
+  Supabase. No component talks to Supabase or Razorpay directly.
 - **Secrets:** only `NEXT_PUBLIC_*` variables may be imported into client components.
-  Server-only keys (`RAZORPAY_KEY_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`) live in code
-  that must only run on the server (route handlers, server actions).
-- **Styling:** design tokens are declared once in `src/app/globals.css` under `@theme`;
-  components compose Tailwind utilities and merge classes with `cn()`.
-- **Components:** primitives in `components/ui` stay presentational and receive props;
-  page-specific composition lives in `components/sections` and route files.
+- **Styling:** design tokens live in `globals.css` under `@theme`; components compose
+  Tailwind utilities and merge classes with `cn()`.
+- **Components:** primitives in `components/ui` are presentational; composition lives in
+  `components/sections` and route files.
+- **Server/client:** only `mobile-nav.tsx` is a client component — everything else ships
+  zero JS beyond the framework runtime.
+
+## Accessibility & performance
+
+- Skip-to-content link, one `<h1>` per page, ordered headings, `aria-label`s on icon-only
+  controls, `aria-expanded`/`aria-controls` on the mobile menu, `Escape` closes it.
+- Every informative image has descriptive `alt`; decorative art and gradients are
+  `aria-hidden`; empty states carry real copy rather than lorem text.
+- Visible focus ring on all interactive elements (gold, 2px, offset).
+- Animations are limited to two ambient CSS keyframes and are wrapped in `motion-safe:`;
+  `prefers-reduced-motion` also disables smooth scrolling.
+- Fonts self-hosted (no third-party requests), images optimised through `next/image`,
+  production CSS ≈ 8 KB gzipped, all routes prerendered static.
 
 ## Environment variables
 
@@ -118,12 +145,11 @@ production. `src/config/env.ts` is the only module that reads `process.env`.
 4. Deploy. `NEXT_PUBLIC_SITE_URL` should be the production domain; `VERCEL_URL` is used
    automatically for preview deployments.
 
-## Roadmap
+## Before launch
 
-1. **Setup** — scaffold, structure, layout, tooling. ✅
-2. Supabase project + schema (events, pass tiers, bookings, payments) and typed clients.
-3. Auth and attendee accounts.
-4. Events listing + event detail with pass selection.
-5. Razorpay order creation, server-side signature verification, webhook, booking record.
-6. Admin dashboard for organisers (publish events, capacity, check-in).
-7. Hardening: rate limiting, RLS tests, analytics, accessibility and performance budget.
+- Replace the placeholder brand name in `src/config/site.ts`.
+- Replace demo contact numbers, email, address and the WhatsApp number
+  (`siteConfig.contact.whatsappNumber`, international format, digits only).
+- Swap the placeholder artwork in `src/assets/images/` for real event photography, and
+  delete the `DemoBadge` components once sections read live data.
+- Change the festival dates/venue in `src/config/event.ts` (or, after step 3, in the DB).

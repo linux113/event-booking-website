@@ -1,42 +1,97 @@
 import Link from "next/link";
 
 import { Logo } from "@/components/brand/logo";
+import { MailIcon, MapPinIcon, PhoneIcon, socialIcons } from "@/components/icons";
+import { WhatsAppButton } from "@/components/layout/whatsapp-button";
 import { Container } from "@/components/ui/container";
-import { siteConfig } from "@/config/site";
+import { contentStatus, siteConfig } from "@/config/site";
 
 export function SiteFooter() {
   const year = new Date().getFullYear();
 
   return (
-    <footer className="border-border/70 bg-surface/40 mt-8 border-t">
-      <Container className="flex flex-col gap-8 py-12">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-          <div className="flex max-w-sm flex-col gap-3">
-            <Logo />
-            <p className="text-muted text-sm/6">{siteConfig.description}</p>
+    <footer className="border-border/60 bg-surface/40 mt-16 border-t">
+      <Container className="grid gap-12 py-14 lg:grid-cols-[1.4fr_1fr_1.2fr]">
+        <div className="flex flex-col gap-4">
+          <Logo />
+          <p className="text-muted max-w-sm text-sm/6">{siteConfig.description}</p>
+          <div className="flex items-center gap-2.5">
+            {siteConfig.socials.map((social) => {
+              const SocialIcon = socialIcons[social.icon];
+
+              return (
+                <a
+                  key={social.label}
+                  href={social.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={`${siteConfig.name} on ${social.label}`}
+                  className="border-border bg-surface-raised/60 text-muted hover:border-marigold/50 hover:text-marigold flex size-10 items-center justify-center rounded-full border transition-colors"
+                >
+                  <SocialIcon className="size-[1.15rem]" />
+                </a>
+              );
+            })}
           </div>
-
-          <nav aria-label="Footer" className="flex flex-col gap-2.5 text-sm">
-            {siteConfig.footerNav.map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                className="text-muted hover:text-foreground w-fit transition-colors"
-              >
-                {item.label}
-              </Link>
-            ))}
-          </nav>
         </div>
 
-        <div className="border-border/70 text-muted flex flex-col gap-2 border-t pt-6 text-xs sm:flex-row sm:items-center sm:justify-between">
-          <p>
-            © {year} {siteConfig.name}. All rights reserved.
+        <nav aria-label="Footer" className="flex flex-col gap-3 text-sm">
+          <h2 className="text-foreground text-xs font-semibold tracking-widest uppercase">
+            Explore
+          </h2>
+          {siteConfig.footerNav.map((item) => (
+            <Link
+              key={item.href}
+              href={item.href}
+              className="text-muted hover:text-foreground w-fit transition-colors"
+            >
+              {item.label}
+            </Link>
+          ))}
+        </nav>
+
+        <div className="flex flex-col gap-3 text-sm">
+          <h2 className="text-foreground text-xs font-semibold tracking-widest uppercase">
+            Get in touch
+          </h2>
+          <a
+            href={`tel:${siteConfig.contact.phoneDisplay.replace(/\s/g, "")}`}
+            className="text-muted hover:text-foreground flex items-center gap-2.5 transition-colors"
+          >
+            <PhoneIcon className="text-marigold size-[1.05rem]" />
+            {siteConfig.contact.phoneDisplay}
+          </a>
+          <a
+            href={`mailto:${siteConfig.contact.email}`}
+            className="text-muted hover:text-foreground flex items-center gap-2.5 transition-colors"
+          >
+            <MailIcon className="text-marigold size-[1.05rem]" />
+            {siteConfig.contact.email}
+          </a>
+          <p className="text-muted flex items-start gap-2.5">
+            <MapPinIcon className="text-marigold mt-0.5 size-[1.05rem] shrink-0" />
+            <span>
+              {siteConfig.contact.addressLines.map((line) => (
+                <span key={line} className="block">
+                  {line}
+                </span>
+              ))}
+            </span>
           </p>
-          <p>
-            Payments will be processed by Razorpay. Prices are shown in {siteConfig.currency}.
-          </p>
+          <WhatsAppButton variant="full" size="sm" className="mt-1 w-fit" />
         </div>
+      </Container>
+
+      <Container className="border-border/60 flex flex-col gap-3 border-t py-6 text-xs sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-muted">
+          © {year} {siteConfig.name}. All rights reserved.
+        </p>
+        <p className="text-muted">
+          {contentStatus.isDemoContent ? (
+            <span className="text-muted/80">{contentStatus.notice} </span>
+          ) : null}
+          Payments will be processed by Razorpay. Prices are shown in {siteConfig.currency}.
+        </p>
       </Container>
     </footer>
   );

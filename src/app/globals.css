@@ -2,29 +2,72 @@
 
 /*
  * Design tokens for the Navratri / Dandiya theme.
- * Everything is exposed as a Tailwind v4 theme token, so utilities such as
- * `bg-background`, `text-muted`, `border-border` stay consistent app-wide.
+ *
+ * Exposed as Tailwind v4 theme tokens, so utilities such as `bg-background`,
+ * `text-muted`, `border-border` and `bg-marigold` stay consistent app-wide.
  * Swap the hex values here to re-skin the whole site.
+ *
+ * Palette brief: deep blue, purple, pink/magenta, yellow/gold, orange, white.
  */
 @theme {
-  --color-background: #0e0a1f;
-  --color-foreground: #f7f5ff;
-  --color-surface: #171030;
-  --color-surface-raised: #221743;
-  --color-border: #35285f;
-  --color-muted: #b9b2d6;
+  /* Surfaces */
+  --color-background: #0b0a24;
+  --color-foreground: #fbf9ff;
+  --color-surface: #16123a;
+  --color-surface-raised: #201a52;
+  --color-border: #352e6b;
+  --color-muted: #bcb6e0;
 
-  /* Festive accents: marigold, rani pink and peacock teal. */
+  /* Deep blue + purple */
+  --color-navy: #16205c;
+  --color-navy-soft: #24358f;
+  --color-violet: #6b3fd4;
+  --color-violet-soft: #9b7bf0;
+  --color-night: #0d0922;
+
+  /* Pink / magenta */
+  --color-rani: #e5399b;
+  --color-rani-soft: #ff7cc3;
+
+  /* Yellow / gold */
   --color-marigold: #f7b731;
   --color-marigold-soft: #ffcd63;
   --color-marigold-foreground: #1a1206;
-  --color-rani: #e5399b;
-  --color-rani-soft: #ff7cc3;
+
+  /* Orange + accents */
+  --color-orange: #ff8a3d;
+  --color-orange-soft: #ffb070;
   --color-peacock: #22c3a6;
-  --color-night: #120722;
 
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  /* One restrained ambient animation, used only on decorative elements and
+     always behind `motion-safe:` so it is skipped for reduced-motion users. */
+  --animate-float: float 7s ease-in-out infinite;
+  --animate-halo: halo 9s ease-in-out infinite;
+}
+
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes halo {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.85;
+    transform: scale(1.06);
+  }
 }
 
 @layer base {
@@ -48,5 +91,11 @@
   ::selection {
     background-color: var(--color-rani);
     color: #fff;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
   }
 }
