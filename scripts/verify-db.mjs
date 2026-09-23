@@ -5079,6 +5079,693 @@ async function main() {
   );
 
   // ---------------------------------------------------------------------------
+  section("Gallery management: two buckets, object keys and the running order");
+  // ---------------------------------------------------------------------------
+  // The gallery is the first part of the site that stores *files*, and the rule the
+  // whole design turns on is this one:
+  //
+  //     a photograph that is not published is not merely unlisted, it is not
+  //     publicly reachable — the object lives in a private bucket, and only the
+  //     service role can touch either bucket.
+  //
+  // What is checked here is the half of that promise the database can keep: the row
+  // is the record of where the file lives, the object key is safe to hand to storage,
+  // the status is the only thing that decides whether the public can see the
+  // photograph, and every write is refused to anybody but the service role. The other
+  // half — the file actually moving between buckets — is exercised against the
+  // storage double in `verify-web`.
+
+  // ---- the columns and constraints the step added -------------------------------
+  const galGalleryColumns = await q(`
+    select column_name
+      from information_schema.columns
+     where table_schema = 'public' and table_name = 'gallery'
+       and column_name in ('storage_path', 'thumbnail_path', 'width', 'height', 'byte_size');
+  `);
+
+  check(
+    "gallery records where both versions of the file live, and how heavy it is",
+    galGalleryColumns.length === 5,
+    galGalleryColumns.map((row) => row.column_name).join(", "),
+  );
+
+  const galGalleryIndexes = await q(`
+    select indexname
+      from pg_indexes
+     where schemaname = 'public' and tablename = 'gallery'
+       and indexname in ('gallery_storage_path_unique', 'gallery_thumbnail_path_unique');
+  `);
+
+  check(
+    "one row per stored object — a full image and a thumbnail are each unique",
+    galGalleryIndexes.length === 2,
+    galGalleryIndexes.map((row) => row.indexname).join(", "),
+  );
+
+  const galGalleryChecks = await q(`
+    select conname
+      from pg_constraint
+     where conrelid = 'public.gallery'::regclass and contype = 'c'
+       and conname in ('gallery_has_source', 'gallery_alt_text_not_blank', 'gallery_dimensions_range', 'gallery_byte_size_range');
+  `);
+
+  check(
+    "and the row's own rules are constraints, not conventions",
+    galGalleryChecks.length === 4,
+    galGalleryChecks.map((row) => row.conname).join(", "),
+  );
+
+  // ---- the two buckets, created by the migration --------------------------------
+  // The storage schema belongs to Supabase, not to this project, and a deployment may
+  // not have rights on it — so the migration is written to skip the buckets rather
+  // than fail. Both halves of that are checked: the skip (which is what happened when
+  // the migration ran at the top of this file, with no storage schema present) and
+  // the creation, by standing up the two tables Supabase has and applying it again.
+  const galMigrationFile = readFileSync(join(MIGRATIONS_DIR, "20260922091300_gallery_management.sql"), "utf8");
+
+  const galReapplied = await expectError(galMigrationFile);
+
+  check(
+    "re-applying the migration without a storage schema is a silent no-op",
+    galReapplied === null,
+    galReapplied ?? "",
+  );
+
+  await run(`
+    create schema if not exists storage;
+
+    create table if not exists storage.buckets (
+      id                 text primary key,
+      name               text not null,
+      public             boolean not null default false,
+      file_size_limit    bigint,
+      allowed_mime_types text[],
+      created_at         timestamptz not null default now()
+    );
+
+    create table if not exists storage.objects (
+      id         uuid primary key default gen_random_uuid(),
+      bucket_id  text,
+      name       text,
+      owner      uuid,
+      created_at timestamptz not null default now()
+    );
+  `);
+
+  const galBuckedRun = await expectError(galMigrationFile);
+
+  check(
+    "with a storage schema present, the migration creates the buckets",
+    galBuckedRun === null,
+    galBuckedRun ?? "",
+  );
+
+  const galBucketRows = await q(`
+    select id, public, file_size_limit, allowed_mime_types
+      from storage.buckets
+     where id in ('gallery', 'gallery-inbox')
+     order by id;
+  `);
+
+  check(
+    "there are two buckets and only one of them is public",
+    galBucketRows.length === 2 &&
+      galBucketRows.find((row) => row.id === "gallery")?.public === true &&
+      galBucketRows.find((row) => row.id === "gallery-inbox")?.public === false,
+    galBucketRows.map((row) => `${row.id}:${row.public}`).join(", "),
+  );
+
+  check(
+    "both buckets cap the upload at 8 MiB and accept only image formats",
+    galBucketRows.every(
+      (row) =>
+        Number(row.file_size_limit) === 8388608 &&
+        ["image/webp", "image/jpeg", "image/png", "image/avif"].every((type) =>
+          (row.allowed_mime_types ?? []).includes(type),
+        ),
+    ),
+    JSON.stringify(galBucketRows.map((row) => row.allowed_mime_types)),
+  );
+
+  const [galObjectRls] = await q(`
+    select relrowsecurity as enabled
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'storage' and c.relname = 'objects';
+  `);
+
+  check("storage.objects has row level security switched on", galObjectRls?.enabled === true);
+
+  const [galObjectPolicies] = await q(`
+    select count(*)::int as n
+      from pg_policies
+     where schemaname = 'storage' and tablename = 'objects';
+  `);
+
+  check(
+    "and nothing grants anon or authenticated access to a gallery object",
+    galObjectPolicies?.n === 0,
+    `${galObjectPolicies?.n} policies`,
+  );
+
+  // ---- the functions exist, and only the service role may call them -------------
+  const galGalleryFunctions = [
+    "public.admin_gallery_items(uuid)",
+    "public.gallery_check_metadata(text, text, text, text, integer)",
+    "public.admin_add_gallery_item(uuid, uuid, text, text, text, integer, integer, integer, text, text, text, text, date, integer, text)",
+    "public.admin_update_gallery_item(uuid, text, text, text, text, date, integer)",
+    "public.admin_move_gallery_item(uuid, text)",
+    "public.admin_set_gallery_status(uuid, text)",
+    "public.admin_delete_gallery_item(uuid)",
+  ];
+
+  for (const fn of galGalleryFunctions) {
+    const [grants] = await q(`
+      select has_function_privilege('anon', '${fn}', 'execute') as anon_can,
+             has_function_privilege('authenticated', '${fn}', 'execute') as authenticated_can,
+             has_function_privilege('service_role', '${fn}', 'execute') as service_can;
+    `);
+
+    check(
+      `${fn.split("(")[0].replace("public.", "")} is callable only with the service role`,
+      grants.anon_can === false && grants.authenticated_can === false && grants.service_can === true,
+      `anon=${grants.anon_can} authenticated=${grants.authenticated_can} service=${grants.service_can}`,
+    );
+  }
+
+  const galAnonGallery = await expectError(`
+    set role anon;
+    select * from public.admin_gallery_items(null);
+  `);
+  await run("reset role;");
+
+  check(
+    "a visitor cannot list the gallery rows either",
+    /permission denied/i.test(galAnonGallery ?? ""),
+    galAnonGallery ?? "the read succeeded",
+  );
+
+  // ---- the rules a photograph has to pass ---------------------------------------
+  const galNewItemId = (suffix) => `9a000000-0000-4000-8000-0000000000${suffix}`;
+
+  /** The arguments of a well-formed upload, so each refusal changes one thing. */
+  const galUpload = (overrides = {}) => ({
+    p_id: galNewItemId("a1"),
+    p_event_id: EVENT,
+    p_storage_path: `${EVENT}/${galNewItemId("a1")}/full.webp`,
+    p_thumbnail_path: `${EVENT}/${galNewItemId("a1")}/thumb.webp`,
+    p_media_type: "image",
+    p_width: 2000,
+    p_height: 1500,
+    p_byte_size: 250000,
+    p_title: "Night one",
+    p_description: null,
+    p_alt_text: "Garba circle at full spin",
+    p_album: "Night 1",
+    p_captured_on: "2026-10-11",
+    p_sort_order: 0,
+    p_status: "draft",
+    ...overrides,
+  });
+
+  const galAltTextRequired = await rpcError("admin_add_gallery_item", galUpload({ p_alt_text: "   " }));
+
+  check(
+    "a photograph without alternative text is refused",
+    galAltTextRequired?.code === "PG001" && galAltTextRequired?.detail === "alt_text",
+    `${galAltTextRequired?.code} / ${galAltTextRequired?.detail}`,
+  );
+
+  const galUrlAsKey = await rpcError(
+    "admin_add_gallery_item",
+    galUpload({ p_storage_path: "https://example.com/storage/v1/object/public/gallery/night-1.jpg" }),
+  );
+
+  check(
+    "a storage path that is really a URL is refused",
+    galUrlAsKey?.code === "PG005" && galUrlAsKey?.detail === "storage_path",
+    `${galUrlAsKey?.code} / ${galUrlAsKey?.detail}`,
+  );
+
+  for (const escape of ["../outside/full.webp", "/leading/full.webp", "trailing/full.webp/"]) {
+    const attempt = await rpcError("admin_add_gallery_item", galUpload({ p_storage_path: escape }));
+
+    check(
+      `the object key "${escape}" cannot escape its bucket`,
+      attempt?.code === "PG005",
+      attempt?.code ?? "it was accepted",
+    );
+  }
+
+  const galLongTitle = await rpcError("admin_add_gallery_item", galUpload({ p_title: "N".repeat(121) }));
+
+  check(
+    "a title longer than the column is refused, and the field is named",
+    galLongTitle?.code === "PG002" && galLongTitle?.detail === "title",
+    `${galLongTitle?.code} / ${galLongTitle?.detail}`,
+  );
+
+  const galLongDescription = await rpcError(
+    "admin_add_gallery_item",
+    galUpload({ p_description: "D".repeat(401) }),
+  );
+
+  check(
+    "so is a description beyond its limit",
+    galLongDescription?.code === "PG003" && galLongDescription?.detail === "description",
+    `${galLongDescription?.code} / ${galLongDescription?.detail}`,
+  );
+
+  const galBadOrder = await rpcError("admin_add_gallery_item", galUpload({ p_sort_order: -1 }));
+
+  check(
+    "a negative position in the running order is refused",
+    galBadOrder?.code === "PG007" && galBadOrder?.detail === "sort_order",
+    `${galBadOrder?.code} / ${galBadOrder?.detail}`,
+  );
+
+  const galHalfMeasured = await rpcError("admin_add_gallery_item", galUpload({ p_height: null }));
+
+  check(
+    "an image with a width but no height is refused",
+    galHalfMeasured?.code === "PG009",
+    galHalfMeasured?.code ?? "it was accepted",
+  );
+
+  const galHugeFile = await rpcError("admin_add_gallery_item", galUpload({ p_byte_size: 0 }));
+
+  check(
+    "a file size that cannot be real is refused",
+    galHugeFile?.code === "PG010" && galHugeFile?.detail === "byte_size",
+    `${galHugeFile?.code} / ${galHugeFile?.detail}`,
+  );
+
+  const galBadStatus = await rpcError("admin_add_gallery_item", galUpload({ p_status: "live" }));
+
+  check(
+    "a status outside the three the column allows is refused",
+    galBadStatus?.code === "PG008" && galBadStatus?.detail === "status",
+    `${galBadStatus?.code} / ${galBadStatus?.detail}`,
+  );
+
+  const galBadMedia = await rpcError("admin_add_gallery_item", galUpload({ p_media_type: "audio" }));
+
+  check(
+    "so is a media type that is neither an image nor a video",
+    galBadMedia?.code === "PG008" && galBadMedia?.detail === "media_type",
+    `${galBadMedia?.code} / ${galBadMedia?.detail}`,
+  );
+
+  const [galNothingWritten] = await q(`select count(*)::int as n from public.gallery;`);
+
+  check("and none of those refusals left a row behind", galNothingWritten.n === 0, `${galNothingWritten.n} rows`);
+
+  // ---- adding a photograph ------------------------------------------------------
+  const galFirst = galNewItemId("b1");
+  const galSecond = galNewItemId("b2");
+  const galThird = galNewItemId("b3");
+  const galBare = galNewItemId("b4");
+
+  const galAdded = await rpc(
+    "admin_add_gallery_item",
+    galUpload({
+      p_id: galFirst,
+      p_storage_path: `${EVENT}/${galFirst}/full.webp`,
+      p_thumbnail_path: `${EVENT}/${galFirst}/thumb.webp`,
+      p_width: 2400,
+      p_height: 1600,
+      p_byte_size: 512000,
+      p_title: "Garba circle at full spin",
+      p_description: "The first night, photographed from the sound desk.",
+      p_alt_text: "Dancers in a circle under blue stage light",
+      p_sort_order: 0,
+      p_status: "draft",
+    }),
+  );
+
+  check(
+    "an uploaded photograph is recorded as a draft, with its measured size",
+    galAdded[0]?.item_id === galFirst &&
+      galAdded[0]?.item_status === "draft" &&
+      galAdded[0]?.sort_order === 0 &&
+      galAdded[0]?.storage_path === `${EVENT}/${galFirst}/full.webp`,
+    JSON.stringify(galAdded[0] ?? {}),
+  );
+
+  const [galStoredRow] = await q(
+    `select width, height, byte_size, thumbnail_path from public.gallery where id = '${galFirst}';`,
+  );
+
+  check(
+    "the row holds both object keys and the dimensions the grid needs",
+    galStoredRow.width === 2400 &&
+      galStoredRow.height === 1600 &&
+      galStoredRow.byte_size === 512000 &&
+      galStoredRow.thumbnail_path === `${EVENT}/${galFirst}/thumb.webp`,
+    JSON.stringify(galStoredRow),
+  );
+
+  const galDuplicate = await rpcError(
+    "admin_add_gallery_item",
+    galUpload({
+      p_id: galSecond,
+      p_storage_path: `${EVENT}/${galFirst}/full.webp`,
+      p_alt_text: "A duplicate that must not exist",
+    }),
+  );
+
+  check(
+    "two rows cannot point at the same stored object",
+    galDuplicate?.code === "PG011" && galDuplicate?.detail === "storage_path",
+    `${galDuplicate?.code} / ${galDuplicate?.detail}`,
+  );
+
+  for (const [id, order] of [
+    [galSecond, 1],
+    [galThird, 2],
+  ]) {
+    await rpc(
+      "admin_add_gallery_item",
+      galUpload({
+        p_id: id,
+        p_storage_path: `${EVENT}/${id}/full.webp`,
+        p_thumbnail_path: `${EVENT}/${id}/thumb.webp`,
+        p_width: 2400,
+        p_height: 1600,
+        p_byte_size: 480000,
+        p_title: `Ordering test ${order}`,
+        p_alt_text: `Ordering test photograph number ${order}`,
+        p_sort_order: order,
+      }),
+    );
+  }
+
+  // A last one with no thumbnail of its own: a video hosted somewhere else, or an
+  // upload that only ever produced the full image.
+  await rpc(
+    "admin_add_gallery_item",
+    galUpload({
+      p_id: galBare,
+      p_storage_path: `${EVENT}/${galBare}/full.webp`,
+      p_thumbnail_path: null,
+      p_width: 1920,
+      p_height: 1080,
+      p_byte_size: 400000,
+      p_title: "A photograph with no thumbnail",
+      p_alt_text: "A wide shot of the whole ground",
+      p_sort_order: 3,
+    }),
+  );
+
+  const galListed = await rpc("admin_gallery_items", { p_event_id: EVENT });
+
+  check(
+    "the management list returns every row, published or not",
+    galListed.length === 4 && galListed.every((row) => row.total_count === 4),
+    `${galListed.length} rows`,
+  );
+  check(
+    "and hands them back in the order the public grid will show them",
+    galListed.map((row) => row.sort_order).join(",") === "0,1,2,3",
+    galListed.map((row) => row.sort_order).join(","),
+  );
+  check(
+    "each row carries the file facts the screen shows",
+    galListed.every((row) => row.media_type === "image" && row.width > 0 && row.byte_size > 0),
+  );
+  check(
+    "the item without a thumbnail is still a usable row",
+    galListed.find((row) => row.item_id === galBare)?.thumbnail_path === null,
+  );
+
+  // ---- the words, and the running order -----------------------------------------
+  const galEdited = await rpc("admin_update_gallery_item", {
+    p_id: galFirst,
+    p_title: "Garba circle, midnight",
+    p_description: "Retitled after the second look.",
+    p_alt_text: "Dancers in a circle under blue stage light, seen from above",
+    p_album: "Night 1 — edited",
+    p_captured_on: "2026-10-12",
+    p_sort_order: 0,
+  });
+
+  check(
+    "a caption can be changed without touching the file",
+    galEdited[0]?.title === "Garba circle, midnight" &&
+      galEdited[0]?.alt_text === "Dancers in a circle under blue stage light, seen from above" &&
+      galEdited[0]?.album === "Night 1 — edited",
+    JSON.stringify(galEdited[0] ?? {}),
+  );
+
+  const [galFileUnchanged] = await q(
+    `select storage_path, thumbnail_path, width, byte_size from public.gallery where id = '${galFirst}';`,
+  );
+
+  check(
+    "and the object keys are exactly where they were",
+    galFileUnchanged.storage_path === `${EVENT}/${galFirst}/full.webp` &&
+      galFileUnchanged.thumbnail_path === `${EVENT}/${galFirst}/thumb.webp` &&
+      galFileUnchanged.width === 2400 &&
+      galFileUnchanged.byte_size === 512000,
+  );
+
+  const galEditNoAlt = await rpcError("admin_update_gallery_item", {
+    p_id: galFirst,
+    p_title: "Garba circle, midnight",
+    p_description: null,
+    p_alt_text: "",
+    p_album: null,
+    p_captured_on: null,
+    p_sort_order: 0,
+  });
+
+  check(
+    "a caption cannot be saved without alternative text either",
+    galEditNoAlt?.code === "PG001" && galEditNoAlt?.detail === "alt_text",
+    `${galEditNoAlt?.code} / ${galEditNoAlt?.detail}`,
+  );
+
+  const galEditUnknown = await rpcError("admin_update_gallery_item", {
+    p_id: "00000000-0000-4000-8000-0000000000ff",
+    p_title: "Nowhere",
+    p_description: null,
+    p_alt_text: "Nothing",
+    p_album: null,
+    p_captured_on: null,
+    p_sort_order: 0,
+  });
+
+  check(
+    "editing a photograph that does not exist is refused by name",
+    galEditUnknown?.code === "PG006",
+    galEditUnknown?.code ?? "it was accepted",
+  );
+
+  const galMoveUp = await rpc("admin_move_gallery_item", { p_id: galThird, p_direction: "up" });
+
+  check(
+    "moving a photograph up puts it above the one that was above it",
+    galMoveUp[0]?.moved === true && galMoveUp[0]?.sort_order === 1,
+    JSON.stringify(galMoveUp[0] ?? {}),
+  );
+
+  const galOrderAfterMove = await rpc("admin_gallery_items", { p_event_id: EVENT });
+
+  check(
+    "and the list shows the new running order",
+    galOrderAfterMove.map((row) => row.item_id).join(",") === `${galFirst},${galThird},${galSecond},${galBare}`,
+    galOrderAfterMove.map((row) => row.item_id).join(","),
+  );
+
+  const galMoveTop = await rpc("admin_move_gallery_item", { p_id: galFirst, p_direction: "up" });
+
+  check(
+    "the first photograph cannot move up — that is an answer, not an error",
+    galMoveTop[0]?.moved === false && galMoveTop[0]?.sort_order === 0,
+    JSON.stringify(galMoveTop[0] ?? {}),
+  );
+
+  const galMoveBottom = await rpc("admin_move_gallery_item", { p_id: galBare, p_direction: "down" });
+
+  check(
+    "and the last one cannot move down",
+    galMoveBottom[0]?.moved === false,
+    JSON.stringify(galMoveBottom[0] ?? {}),
+  );
+
+  const galMoveBack = await rpc("admin_move_gallery_item", { p_id: galThird, p_direction: "down" });
+  const galOrderAfterBack = await rpc("admin_gallery_items", { p_event_id: EVENT });
+
+  check(
+    "a move down puts it back below its neighbour",
+    galMoveBack[0]?.moved === true &&
+      galOrderAfterBack.map((row) => row.item_id).join(",") === `${galFirst},${galSecond},${galThird},${galBare}`,
+    galOrderAfterBack.map((row) => row.item_id).join(","),
+  );
+
+  const galBadDirection = await rpcError("admin_move_gallery_item", { p_id: galFirst, p_direction: "sideways" });
+
+  check(
+    "an unknown direction is refused",
+    galBadDirection?.code === "PG007" && galBadDirection?.detail === "direction",
+    `${galBadDirection?.code} / ${galBadDirection?.detail}`,
+  );
+
+  // Ties: three photographs uploaded in the same second share a position, and the grid
+  // shows the newest first among them. "Up" still has to mean visibly up, so the whole
+  // list is renumbered with the pair exchanged rather than two numbers being swapped.
+  await run(`
+    update public.gallery
+       set sort_order = 5,
+           created_at = case id
+                          when '${galFirst}'  then timestamptz '2026-10-11 20:00:00+05:30'
+                          when '${galSecond}' then timestamptz '2026-10-11 20:01:00+05:30'
+                          when '${galThird}'  then timestamptz '2026-10-11 20:02:00+05:30'
+                          else                     timestamptz '2026-10-11 20:03:00+05:30'
+                        end
+     where id in ('${galFirst}', '${galSecond}', '${galThird}', '${galBare}');
+  `);
+
+  const galTiedBefore = await q(
+    `select id from public.gallery where event_id = '${EVENT}' order by sort_order, created_at desc, id;`,
+  );
+  const galTiedMove = await rpc("admin_move_gallery_item", { p_id: galSecond, p_direction: "up" });
+  const galTiedAfter = await q(
+    `select id from public.gallery where event_id = '${EVENT}' order by sort_order, created_at desc, id;`,
+  );
+
+  check(
+    "a tied list is numbered from zero, newest first, as the grid shows it",
+    galTiedBefore.map((row) => row.id).join(",") === `${galBare},${galThird},${galSecond},${galFirst}`,
+    galTiedBefore.map((row) => row.id).join(","),
+  );
+  check(
+    "and moving one up still changes the order, from a tie",
+    galTiedMove[0]?.moved === true &&
+      galTiedAfter.map((row) => row.id).join(",") === `${galBare},${galSecond},${galThird},${galFirst}`,
+    `${galTiedAfter.map((row) => row.id).join(",")} (sort_order ${galTiedMove[0]?.sort_order})`,
+  );
+
+  // ---- enable and disable -------------------------------------------------------
+  const galPublished = await rpc("admin_set_gallery_status", { p_id: galFirst, p_status: "published" });
+
+  check(
+    "publishing a draft says where the file was and where it now belongs",
+    galPublished[0]?.was_public === false &&
+      galPublished[0]?.is_public === true &&
+      galPublished[0]?.storage_path === `${EVENT}/${galFirst}/full.webp` &&
+      galPublished[0]?.thumbnail_path === `${EVENT}/${galFirst}/thumb.webp`,
+    JSON.stringify(galPublished[0] ?? {}),
+  );
+
+  const galAnonSees = await asRole("anon", `select count(*)::int as n from public.gallery where id = '${galFirst}';`);
+
+  check("the published photograph is now readable by a visitor", galAnonSees[0].n === 1, `${galAnonSees[0].n}`);
+
+  const galUnpublished = await rpc("admin_set_gallery_status", { p_id: galFirst, p_status: "draft" });
+
+  check(
+    "unpublishing says the file has to go back to the private bucket",
+    galUnpublished[0]?.was_public === true && galUnpublished[0]?.is_public === false,
+    JSON.stringify(galUnpublished[0] ?? {}),
+  );
+
+  const galAnonSeesAfter = await asRole(
+    "anon",
+    `select count(*)::int as n from public.gallery where id = '${galFirst}';`,
+  );
+
+  check(
+    "and a disabled photograph is invisible to the public gallery",
+    galAnonSeesAfter[0].n === 0,
+    `${galAnonSeesAfter[0].n}`,
+  );
+
+  const galBadStatusToggle = await rpcError("admin_set_gallery_status", { p_id: galFirst, p_status: "hidden" });
+
+  check(
+    "only the three real statuses can be set",
+    galBadStatusToggle?.code === "PG008" && galBadStatusToggle?.detail === "status",
+    `${galBadStatusToggle?.code} / ${galBadStatusToggle?.detail}`,
+  );
+
+  const galUnknownToggle = await rpcError("admin_set_gallery_status", {
+    p_id: "00000000-0000-4000-8000-0000000000ff",
+    p_status: "published",
+  });
+
+  check(
+    "and publishing something that does not exist is refused",
+    galUnknownToggle?.code === "PG006",
+    galUnknownToggle?.code ?? "it was accepted",
+  );
+
+  await rpc("admin_set_gallery_status", { p_id: galFirst, p_status: "published" });
+
+  // ---- delete, and the files it hands back --------------------------------------
+  const galDeleted = await rpc("admin_delete_gallery_item", { p_id: galFirst });
+
+  check(
+    "deleting a photograph hands back both objects so the app can clean up storage",
+    galDeleted[0]?.storage_path === `${EVENT}/${galFirst}/full.webp` &&
+      Array.isArray(galDeleted[0]?.removed_paths) &&
+      galDeleted[0].removed_paths.length === 2 &&
+      galDeleted[0].removed_paths.includes(`${EVENT}/${galFirst}/full.webp`) &&
+      galDeleted[0].removed_paths.includes(`${EVENT}/${galFirst}/thumb.webp`) &&
+      galDeleted[0].is_public === true,
+    JSON.stringify(galDeleted[0] ?? {}),
+  );
+
+  check("and the row is gone", (await count("gallery", `where id = '${galFirst}'`)) === 0);
+
+  const galDeleteAgain = await rpcError("admin_delete_gallery_item", { p_id: galFirst });
+
+  check(
+    "deleting it twice is refused rather than silently ignored",
+    galDeleteAgain?.code === "PG006",
+    galDeleteAgain?.code ?? "it was accepted",
+  );
+
+  const galDeletedBare = await rpc("admin_delete_gallery_item", { p_id: galBare });
+
+  check(
+    "an item with no thumbnail hands back just the one object to delete",
+    galDeletedBare[0]?.thumbnail_path === null &&
+      galDeletedBare[0]?.removed_paths?.length === 1 &&
+      galDeletedBare[0]?.is_public === false,
+    JSON.stringify(galDeletedBare[0] ?? {}),
+  );
+
+  check(
+    "and the two items that are left were not touched",
+    (await count("gallery")) === 2,
+    `${await count("gallery")} rows`,
+  );
+
+  // ---- the row's own constraints are still the last word ------------------------
+  const galNoSource = await expectError(`
+    insert into public.gallery (event_id, title, alt_text, sort_order)
+    values ('${EVENT}', 'Nowhere', 'A photograph with no file behind it', 0);
+  `);
+
+  check(
+    "a gallery row still cannot exist without a file behind it",
+    /gallery_has_source/i.test(galNoSource ?? ""),
+    galNoSource ?? "the insert succeeded",
+  );
+
+  const galBlankAlt = await expectError(`
+    insert into public.gallery (event_id, title, alt_text, url, sort_order)
+    values ('${EVENT}', 'Nowhere', '   ', 'https://test.supabase.co/storage/v1/object/public/gallery/x.jpg', 0);
+  `);
+
+  check(
+    "and never without alternative text",
+    /gallery_alt_text_not_blank/i.test(galBlankAlt ?? ""),
+    galBlankAlt ?? "the insert succeeded",
+  );
+
+  // ---------------------------------------------------------------------------
   section("Result");
   // ---------------------------------------------------------------------------
   console.log(`\n  ${passed} passed, ${failures.length} failed\n`);

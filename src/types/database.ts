@@ -458,8 +458,12 @@ export interface Database {
           description: string | null;
           media_type: MediaType;
           storage_path: string | null;
+          thumbnail_path: string | null;
           url: string | null;
           thumbnail_url: string | null;
+          width: number | null;
+          height: number | null;
+          byte_size: number | null;
           alt_text: string;
           captured_on: string | null;
           status: GalleryStatus;
@@ -475,6 +479,10 @@ export interface Database {
           description?: string | null;
           media_type?: MediaType;
           storage_path?: string | null;
+          thumbnail_path?: string | null;
+          width?: number | null;
+          height?: number | null;
+          byte_size?: number | null;
           url?: string | null;
           thumbnail_url?: string | null;
           alt_text: string;
@@ -492,6 +500,10 @@ export interface Database {
           description?: string | null;
           media_type?: MediaType;
           storage_path?: string | null;
+          thumbnail_path?: string | null;
+          width?: number | null;
+          height?: number | null;
+          byte_size?: number | null;
           url?: string | null;
           thumbnail_url?: string | null;
           alt_text?: string;
@@ -1044,6 +1056,103 @@ export interface Database {
           booked_people: number;
           seats_available: number;
           updated_at: string;
+        }[];
+      };
+      admin_gallery_items: {
+        Args: { p_event_id?: string | null };
+        Returns: {
+          item_id: string;
+          event_id: string | null;
+          album: string | null;
+          title: string | null;
+          description: string | null;
+          alt_text: string;
+          media_type: string;
+          storage_path: string | null;
+          thumbnail_path: string | null;
+          url: string | null;
+          thumbnail_url: string | null;
+          width: number | null;
+          height: number | null;
+          byte_size: number | null;
+          captured_on: string | null;
+          item_status: string;
+          sort_order: number;
+          created_at: string;
+          updated_at: string;
+          total_count: number;
+        }[];
+      };
+      admin_add_gallery_item: {
+        Args: {
+          p_id: string;
+          p_event_id?: string | null;
+          p_storage_path: string;
+          p_thumbnail_path?: string | null;
+          p_media_type?: string | null;
+          p_width?: number | null;
+          p_height?: number | null;
+          p_byte_size?: number | null;
+          p_title?: string | null;
+          p_description?: string | null;
+          p_alt_text: string;
+          p_album?: string | null;
+          p_captured_on?: string | null;
+          p_sort_order?: number;
+          p_status?: string | null;
+        };
+        Returns: {
+          item_id: string;
+          storage_path: string;
+          item_status: string;
+          sort_order: number;
+          updated_at: string;
+        }[];
+      };
+      admin_update_gallery_item: {
+        Args: {
+          p_id: string;
+          p_title?: string | null;
+          p_description?: string | null;
+          p_alt_text: string;
+          p_album?: string | null;
+          p_captured_on?: string | null;
+          p_sort_order?: number;
+        };
+        Returns: {
+          item_id: string;
+          title: string | null;
+          description: string | null;
+          alt_text: string;
+          album: string | null;
+          captured_on: string | null;
+          sort_order: number;
+          updated_at: string;
+        }[];
+      };
+      admin_move_gallery_item: {
+        Args: { p_id: string; p_direction: string };
+        Returns: { item_id: string; sort_order: number; moved: boolean }[];
+      };
+      admin_set_gallery_status: {
+        Args: { p_id: string; p_status: string };
+        Returns: {
+          item_id: string;
+          item_status: string;
+          storage_path: string | null;
+          thumbnail_path: string | null;
+          was_public: boolean;
+          is_public: boolean;
+        }[];
+      };
+      admin_delete_gallery_item: {
+        Args: { p_id: string };
+        Returns: {
+          item_id: string;
+          storage_path: string | null;
+          thumbnail_path: string | null;
+          is_public: boolean;
+          removed_paths: string[];
         }[];
       };
       admin_payment_summary: {

@@ -26,10 +26,41 @@
  * (`./supabase-auth-stub.mjs`), so a server-side session — sign in, cookie,
  * `getUser()`, staff allow-list — can be exercised end to end without a Supabase
  * project. Pass an `auth` handler to enable it.
+ *
+ * `/storage/v1/*` is mounted here too, forwarded to the Storage double
+ * (`./storage-double.mjs`), because Supabase serves storage from the same origin
+ * as the REST API: the app builds its storage URLs from
+ * `NEXT_PUBLIC_SUPABASE_URL`, which in this harness is the shim. The returned
+ * `storage` handle is the in-memory bucket state a test can inspect.
  */
 import { createServer } from "node:http";
 
+import { createStorageDouble } from "./storage-double.mjs";
+
 const UNSUPPORTED = new Set();
+
+/**
+ * A request body, shaped the way the Storage double reads it.
+ *
+ * An upload arrives as bytes — multipart when the client sent a file, or the raw
+ * file with its own content type. The commands (`move`, `remove`, `list`, `sign`)
+ * arrive as a small JSON document instead. So: parse when the bytes *are* JSON, and
+ * hand over the untouched buffer otherwise. Guessing from the content type alone
+ * would break a raw upload whose bytes happen not to be valid UTF-8.
+ */
+function storageBody(contentType, raw) {
+  if (contentType.includes("multipart/form-data")) {
+    return raw;
+  }
+
+  try {
+    const parsed = JSON.parse(raw.toString("utf8"));
+
+    return parsed !== null && typeof parsed === "object" ? parsed : raw;
+  } catch {
+    return raw;
+  }
+}
 
 function logUnsupported(what) {
   if (!UNSUPPORTED.has(what)) {
@@ -189,9 +220,11 @@ function scalarFunctionSql(fnName) {
   `;
 }
 
-export async function startShim({ db, port = 0, log = false, auth = null }) {
+export async function startShim({ db, port = 0, log = false, auth = null, storage = null }) {
   // PGlite is single-connection; serialise every statement through one chain.
   let queue = Promise.resolve();
+
+  const buckets = storage ?? createStorageDouble();
 
   function serialised(task) {
     const result = queue.then(task, task);
@@ -237,6 +270,34 @@ export async function startShim({ db, port = 0, log = false, auth = null }) {
           headers: req.headers,
           body: await readJsonBody(req),
         });
+
+        return respond(res, result.status, result.body);
+      }
+
+      if (url.pathname.startsWith("/storage/v1/")) {
+        const contentType = String(req.headers["content-type"] ?? "");
+        const rawBody = await readRawBody(req);
+
+        const result = buckets.handle({
+          method: req.method,
+          pathname: url.pathname,
+          headers: req.headers,
+          body: storageBody(contentType, rawBody),
+          // Storage authorises by the key in the header, exactly as the hosted
+          // service does: the service-role key reaches everything, an anon key
+          // reaches only what a policy allows — and the gallery grants nothing.
+          role,
+        });
+
+        if (result.raw) {
+          res.writeHead(result.status, {
+            ...(result.headers ?? {}),
+            "content-length": result.raw.length,
+          });
+          res.end(result.raw);
+
+          return;
+        }
 
         return respond(res, result.status, result.body);
       }
@@ -331,6 +392,15 @@ export async function startShim({ db, port = 0, log = false, auth = null }) {
     res.end(payload);
   }
 
+  function readRawBody(req) {
+    return new Promise((resolve) => {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => resolve(Buffer.concat(chunks)));
+      req.on("error", () => resolve(Buffer.alloc(0)));
+    });
+  }
+
   function readJsonBody(req) {
     return new Promise((resolve) => {
       let raw = "";
@@ -354,6 +424,7 @@ export async function startShim({ db, port = 0, log = false, auth = null }) {
   return {
     url: `http://127.0.0.1:${address.port}`,
     unsupported: UNSUPPORTED,
+    storage: buckets,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }

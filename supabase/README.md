@@ -12,8 +12,14 @@ supabase/
 │   ├── 20260922090300_pass_catalogue_visibility.sql  # disabled passes stay visible to the site
 │   ├── 20260922090400_booking_flow.sql           # DND reference, idempotency key, atomic booking RPC
 │   ├── 20260922090500_payments.sql               # public token, payment events, confirm/refund, webhook
+│   ├── 20260922090600_digital_pass.sql           # pass ids, QR tokens, ticket reads
 │   ├── 20260922090700_check_in.sql               # gate verdict + atomic check-in (scan_pass, check_in_pass)
-│   └── 20260922090800_admin_roles.sql            # three-role model, RLS helpers, admin lookup + stats
+│   ├── 20260922090800_admin_roles.sql            # three-role model, RLS helpers, admin lookup + stats
+│   ├── 20260922090900_admin_dashboard.sql        # the dashboard's counts, series and recent rows
+│   ├── 20260922091000_admin_booking_management.sql  # search, filters, detail, CSV, contact gating
+│   ├── 20260922091100_admin_payments_and_passes.sql # gateway delivery log, attention list, door list
+│   ├── 20260922091200_admin_pass_and_date_management.sql  # pass catalogue + night/capacity writers
+│   └── 20260922091300_gallery_management.sql     # the two storage buckets, gallery columns + writers
 └── seed.sql                                      # event, 9 nights, 5 passes, features, highlights
 ```
 
@@ -32,6 +38,38 @@ supabase/
 | `check_ins` | Gate scan log (one row per pass, ever) | ❌ staff only |
 | `gallery` | Photo/video metadata (files in Storage) | ✅ published only |
 | `admin_users` | Auth users allow-listed as staff (`super_admin` / `admin` / `staff`) | ❌ super admins only |
+
+### The gallery's files (Storage)
+
+A `gallery` row *describes* a file; the file itself lives in Supabase Storage. The gallery
+migration creates (and keeps in step, if they already exist) exactly two buckets:
+
+| Bucket | Public? | Holds |
+| ------ | ------- | ----- |
+| `gallery` | ✅ | the full image and the thumbnail of every **published** row — what the website loads |
+| `gallery-inbox` | ❌ | everything else: drafts and archived photographs, where an upload waits until somebody publishes it |
+
+Both accept `image/jpeg`, `image/png`, `image/webp` and `image/avif`, with an 8 MB
+`file_size_limit` — the same numbers `src/lib/gallery/paths.ts`, the form and the upload
+route use. Object keys are `<event id or "festival">/<item id>/full.webp` and
+`…/thumb.webp`: derived from the row, so nothing has to store a URL that could drift from
+the file.
+
+There is deliberately **no policy on `storage.objects`** — not even a read policy for the
+public bucket. A public bucket is served through
+`/storage/v1/object/public/<bucket>/<key>`, which does not consult those policies; what
+the policies govern is listing, downloading and writing through the storage API. With
+none, an anon key cannot enumerate a single object in either bucket and cannot write one
+either, and a draft is unreachable rather than merely unlisted. Everything the app does
+with storage happens server-side with the service-role key, which bypasses RLS. A
+deployment that wants per-object reads through the authenticated API has to add a `select`
+policy scoped to `bucket_id = 'gallery'` — and accept that a leaked anon key could then
+list what is published.
+
+Because the bucket block is guarded (`storage` belongs to Supabase's own roles, and some
+deployments run these migrations without rights on it), the migration prints a `notice`
+when it cannot create them instead of failing the chain. Create them by hand in that case
+— see *Creating the two storage buckets* below.
 
 ### What the public API exposes
 
@@ -259,6 +297,13 @@ counts or filters rows by pulling a table into Node:
 | `admin_save_event_date(p_id, p_event_id, p_event_date, p_start_time, p_end_time, p_capacity, p_capacity_held, p_status, p_booking_open, p_notes)` | Creates or edits one night. Locks the night row before counting, refuses a capacity below the seats paid for plus the seats held back (`PT004`, with the floor in `detail`), an impossible held figure (`PT002`/`PT003`), a duplicate date (`PT006`) or a night that ends before it starts (`PT008`) |
 | `admin_set_event_date_capacity(p_id, p_capacity, p_capacity_held)` | `capacity_held` defaults to the value already stored, so a capacity can be corrected without disturbing what is held back. Locks the night, then refuses `paid + held > capacity` with `PT004` — the number the control needs to offer instead |
 | `admin_set_event_date_booking(p_id, p_booking_open)` | Opens or closes booking on one night without cancelling it, so the night stays on the site with its reason instead of disappearing |
+| `admin_gallery_items(p_event_id)` | `/admin/gallery`: every row of the event (or of every event when `p_event_id` is null) in the running order the public grid uses — `sort_order`, then newest, then id — with `total_count` for the whole list and every column the screen edits or displays. Drafts and archived rows are included: the management list is a worklist, not a public view |
+| `admin_add_gallery_item(p_id, p_event_id, p_storage_path, p_thumbnail_path, p_media_type, p_width, p_height, p_byte_size, p_title, p_description, p_alt_text, p_album, p_captured_on, p_sort_order, p_status)` | Records an upload the app has already stored. The caller supplies the id, because the object key contains it: a retried upload lands on the same key and cannot become a second row (`PG011`). Validates the storage key (`PG005` — a relative path, no scheme, no `..`), dimensions (`PG009`), byte size (`PG010`), status (`PG008`) and the metadata rules below, then returns the row. Passing a null `p_event_id` falls back to `admin_default_event_id()` |
+| `admin_update_gallery_item(p_id, p_title, p_description, p_alt_text, p_album, p_captured_on, p_sort_order)` | Edits the words, the album, the date and the position — never the file. Locks the row, applies the metadata rules and returns the row as it now stands. `PG006` when the item is gone |
+| `admin_move_gallery_item(p_id, p_direction)` | Moves one photograph one place `up` or `down` and **renumbers the whole event list** in one transaction, having locked the rows first, so two organisers moving photos at the same time cannot leave two items claiming one position. Answers `moved = false` at either end of the list, and `PG007` for a direction that is neither |
+| `admin_set_gallery_status(p_id, p_status)` | Enables (`published`), disables (`draft`) or retires (`archived`) one photograph, and reports `storage_path`, `thumbnail_path`, `was_public` and `is_public` so the app can move the objects between the two buckets. The **row changes first**: if the move then fails, the row is still the truth and the failure is logged — whereas moving first could publish a file the row still calls a draft. `PG008` for an unknown status |
+| `admin_delete_gallery_item(p_id)` | Deletes the row and hands back `removed_paths` (both object keys) plus `is_public`, so the app deletes exactly the files that belonged to it — from the bucket its status pointed at. The row goes first: an orphaned object costs kilobytes and nothing links to it, while a row whose file has gone is a broken picture on the public page |
+| `gallery_check_metadata(p_title, p_description, p_alt_text, p_album, p_sort_order)` | The rules both gallery write paths share: alt text present and non-blank (`PG001` — a photograph nobody can see needs words), title/description/album inside their column limits (`PG002`–`PG004`) and order a whole number in range (`PG007`). Raises with the field in `detail`, which is how the screen knows which input to highlight. Internal to the writer functions, but callable for tests |
 | `admin_default_event_id()` | The event the management screens operate on: the published one, else the oldest |
 | `admin_pass_summary(p_tz, p_include_contact)` | The counts above the door list: passes by status, checked-in totals, **checked in today in the venue's timezone** (`p_tz`, not the server's), how many gates are in use, the last entry, and the money behind the passes counted **once per booking** rather than once per pass — a group of four passes does not pay four times. `passes_revenue` is `null` without `p_include_contact` |
 
@@ -362,13 +407,29 @@ npx supabase db push
 or paste `migrations/*.sql` (in filename order) and then `seed.sql` into the
 Supabase **SQL editor**.
 
+### Creating the two storage buckets (if the migration could not)
+
+The migration creates both buckets itself. If your deployment runs migrations as a role
+without rights on the `storage` schema, the migration prints a notice and carries on —
+create the buckets once, by hand, in **Storage → New bucket**:
+
+| Name | Public | File size limit | Allowed MIME types |
+| ---- | ------ | --------------- | ------------------ |
+| `gallery` | ✅ public | 8 MB | `image/jpeg`, `image/png`, `image/webp`, `image/avif` |
+| `gallery-inbox` | ❌ private | 8 MB | `image/jpeg`, `image/png`, `image/webp`, `image/avif` |
+
+Then leave **Storage → Policies** empty for both: the app never uses a signed URL or an
+anon-key read, and a policy is what would let a leaked key enumerate (or write) objects.
+The gallery also works with the buckets created by a previous attempt at this step — the
+migration updates their visibility, size limit and accepted types to the numbers above.
+
 ## Roles and access
 
 | Role | What it can do |
 | ---- | -------------- |
 | `anon` | Read published events, their nights, their pass categories (active or not), features, highlights and published gallery rows, plus per-night availability counts through `get_event_night_availability()`. Nothing else — no read or write access to bookings, passes, check-ins or admin users. |
 | `authenticated` | Same public reads. Gains admin powers only when present in `admin_users` with an active role: `is_admin()` for the management roles (super admin, admin), `is_staff()` to include gate staff, `is_super_admin()` for the bare `admin_users` access. |
-| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, the pass reads (`get_booking_passes`, `get_pass_by_token`), the gate functions (`scan_pass`, `check_in_pass`), the admin reads (`admin_search_bookings`, `admin_booking_detail`, `admin_dashboard_stats`, `admin_booking_series`, `admin_pass_breakdown`, `admin_recent_bookings`, `admin_payment_events`, `admin_payment_attention`, `admin_payment_summary`, `admin_pass_list`, `admin_pass_summary`, `admin_pass_catalogue`, `admin_event_dates`) and the pass/date writes (`admin_save_pass_category`, `admin_set_pass_category_active`, `admin_save_event_date`, `admin_set_event_date_capacity`, `admin_set_event_date_booking`) and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
+| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, the pass reads (`get_booking_passes`, `get_pass_by_token`), the gate functions (`scan_pass`, `check_in_pass`), the admin reads (`admin_search_bookings`, `admin_booking_detail`, `admin_dashboard_stats`, `admin_booking_series`, `admin_pass_breakdown`, `admin_recent_bookings`, `admin_payment_events`, `admin_payment_attention`, `admin_payment_summary`, `admin_pass_list`, `admin_pass_summary`, `admin_pass_catalogue`, `admin_event_dates`) the pass/date writes (`admin_save_pass_category`, `admin_set_pass_category_active`, `admin_save_event_date`, `admin_set_event_date_capacity`, `admin_set_event_date_booking`) and the gallery reads and writes (`admin_gallery_items`, `admin_add_gallery_item`, `admin_update_gallery_item`, `admin_move_gallery_item`, `admin_set_gallery_status`, `admin_delete_gallery_item`) and Razorpay webhooks. Storage is service-role only too: the anon and authenticated roles have no policy on `storage.objects` in either gallery bucket. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
 
 There is deliberately **no INSERT policy on `bookings`**: bookings are created by
 server code after recalculating the amount from `pass_categories`, so the browser

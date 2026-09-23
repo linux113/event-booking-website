@@ -316,6 +316,28 @@ async function main() {
     create or replace function auth.uid() returns uuid language sql stable as $$
       select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid;
     $$;
+
+    -- Supabase ships a "storage" schema next to "auth", and the gallery migration
+    -- creates its two buckets there inside a guarded block. Creating the schema here
+    -- means the real migration runs its real branch rather than the fallback, and the
+    -- harness can then serve the same buckets the project would have.
+    create schema if not exists storage;
+    create table if not exists storage.buckets (
+      id text primary key,
+      name text not null,
+      public boolean not null default false,
+      file_size_limit bigint,
+      allowed_mime_types text[]
+    );
+    create table if not exists storage.objects (
+      id uuid primary key default gen_random_uuid(),
+      bucket_id text not null,
+      name text not null,
+      owner uuid,
+      metadata jsonb,
+      created_at timestamptz not null default now()
+    );
+    alter table storage.objects enable row level security;
   `);
 
   for (const file of readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql")).sort()) {
@@ -382,6 +404,29 @@ async function main() {
   });
 
   shim = await startShim({ db, auth: authStub });
+
+  // The storage double starts empty; the buckets are the ones the migration created,
+  // read back out of the database, so there is one source of truth for their names,
+  // their visibility and their size limit.
+  const galStorageBuckets = await dbQuery(
+    `select id, public, file_size_limit, allowed_mime_types from storage.buckets order by id`,
+  );
+
+  for (const row of galStorageBuckets) {
+    shim.storage.setBucket(row.id, {
+      public: row.public === true,
+      fileSizeLimit: row.file_size_limit === null ? null : Number(row.file_size_limit),
+      allowedMimeTypes: row.allowed_mime_types ?? null,
+    });
+  }
+
+  check(
+    "the gallery migration created its two buckets in the storage schema",
+    galStorageBuckets.length === 2 &&
+      galStorageBuckets.some((row) => row.id === "gallery" && row.public === true) &&
+      galStorageBuckets.some((row) => row.id === "gallery-inbox" && row.public === false),
+    galStorageBuckets.map((row) => `${row.id}:${row.public}`).join(", "),
+  );
 
   process.env.NEXT_PUBLIC_SUPABASE_URL = shim.url;
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "test-anon-key";
@@ -2406,12 +2451,13 @@ async function main() {
     adminHome.text.slice(0, 160),
   );
   check(
-    "a section that exists is a link, and a section that does not says so instead",
+    "every operational section is a link an admin can follow",
     adminHome.html.includes('href="/admin/payments"') &&
       adminHome.html.includes('href="/admin/passes"') &&
-      adminHome.text.includes("Not built yet") &&
-      adminHome.text.includes("Gallery") &&
-      !adminHome.html.includes('href="/admin/gallery"'),
+      adminHome.html.includes('href="/admin/dates"') &&
+      adminHome.html.includes('href="/admin/gallery"') &&
+      adminHome.text.includes("Gallery"),
+    `${adminHome.status}`,
   );
 
   // ---------------------------------------------------------------------------
@@ -5120,6 +5166,1435 @@ async function main() {
         [HELD_NIGHT, CLOSED_NIGHT, COUPLE_PASS],
       )
     )[0].held === 0,
+  );
+
+  // ---------------------------------------------------------------------------
+  section("Pass and date management: what a visitor is told, and what an admin can change");
+  // ---------------------------------------------------------------------------
+  // The dates and catalogue screens are only worth having if the numbers they show are
+  // the numbers the website promises. So this section reads the public pages *after*
+  // changing the things an organiser can change — seats held back, booking closed, an
+  // age restriction, a price — and checks that both surfaces say the same thing.
+  //
+  // What is checked, in order:
+  //
+  //   1. The copy rules on their own (a pure module), so a wording regression is caught
+  //      without a database.
+  //   2. The public pages against the database's own arithmetic.
+  //   3. The admin screens: that they render the controls, that the API writes what the
+  //      database then holds, and that the refusals come back with the field to fix.
+  //   4. The public site again — the point of the whole step.
+
+  const pdmCopy = await import("../src/lib/event-copy.ts");
+  const pdmRules = await import("../src/lib/admin/catalogue.ts");
+  const { formatEventDate: pdmFormatDate } = await import("../src/lib/format.ts");
+
+  /** A night shaped the way the view model shapes one, so the copy can be read alone. */
+  const pdmNight = (overrides = {}) => ({
+    id: "pdm-night",
+    date: "2026-10-11",
+    startTime: "19:00:00",
+    endTime: "23:59:00",
+    status: "scheduled",
+    capacity: 1500,
+    capacityHeld: 50,
+    bookedPeople: 1430,
+    remaining: 20,
+    isFullyBooked: false,
+    isBookingOpen: true,
+    isBookable: true,
+    ...overrides,
+  });
+
+  check(
+    "seats on sale is capacity minus what the organiser held back, and never negative",
+    pdmCopy.seatsOnSale(pdmNight()) === 1450 &&
+      pdmCopy.seatsOnSale(pdmNight({ capacityHeld: 2000 })) === 0,
+    `${pdmCopy.seatsOnSale(pdmNight())}`,
+  );
+  check(
+    "a night with seats left says how many, out of what is on sale",
+    pdmCopy.nightAvailabilityCopy(pdmNight()) === "20 of 1450 places left · 50 held for the gate",
+    pdmCopy.nightAvailabilityCopy(pdmNight()) ?? "null",
+  );
+  check(
+    "and without any held seats it does not mention the gate at all",
+    pdmCopy.nightAvailabilityCopy(pdmNight({ capacityHeld: 0 })) === "20 of 1500 places left",
+    pdmCopy.nightAvailabilityCopy(pdmNight({ capacityHeld: 0 })) ?? "null",
+  );
+  check(
+    "a night whose booking is closed says that, rather than printing a number that looks buyable",
+    pdmCopy.nightAvailabilityCopy(pdmNight({ isBookingOpen: false, isBookable: false })) ===
+      "Booking is closed for this night" &&
+      pdmCopy.nightStateLabel(pdmNight({ isBookingOpen: false, isBookable: false })) === "Booking closed" &&
+      pdmCopy.nightUnavailableReason(pdmNight({ isBookingOpen: false, isBookable: false })) === "Booking closed",
+    pdmCopy.nightAvailabilityCopy(pdmNight({ isBookingOpen: false, isBookable: false })) ?? "null",
+  );
+  check(
+    "a sold-out night says so, and a cancelled or finished night says nothing about seats",
+    pdmCopy.nightAvailabilityCopy(pdmNight({ isFullyBooked: true, remaining: 0 })) === "No passes left for this night" &&
+      pdmCopy.nightAvailabilityCopy(pdmNight({ status: "cancelled", isBookable: false })) === null &&
+      pdmCopy.nightAvailabilityCopy(pdmNight({ status: "completed", isBookable: false })) === null,
+  );
+  check(
+    "an age restriction is never rendered as “0+”",
+    pdmCopy.passAgeCopy({ minAge: 18 }) === "18+ only" && pdmCopy.passAgeCopy({ minAge: 0 }) === null,
+    pdmCopy.passAgeCopy({ minAge: 18 }) ?? "null",
+  );
+  check(
+    "and a night that is merely full is labelled full, not closed",
+    pdmCopy.nightStateLabel(pdmNight({ isFullyBooked: true, isBookable: false })) === "Fully booked" &&
+      pdmCopy.nightUnavailableReason(pdmNight({ isFullyBooked: true, isBookable: false })) === "Fully booked",
+  );
+
+  // ---- the fixtures this section needs ------------------------------------------
+  // The nights a visitor sees are read from one RPC, so the expected copy is built from
+  // that same RPC rather than from a number written down here.
+  const pdmHeldNight = "d0000000-0000-4000-8000-000000000004";
+  const pdmClosedNight = "d0000000-0000-4000-8000-000000000005";
+
+  const [pdmBaseline] = await dbQuery(
+    `select
+       (select capacity from public.event_dates where id = $1) as held_capacity,
+       (select capacity_held from public.event_dates where id = $1) as held_capacity_held,
+       (select booking_open from public.event_dates where id = $2) as closed_booking_open,
+       (select min_age from public.pass_categories where id = $3) as couple_min_age,
+       (select price_inr from public.pass_categories where id = $3) as couple_price`,
+    [pdmHeldNight, pdmClosedNight, COUPLE_PASS],
+  );
+
+  await dbRun(`update public.event_dates set capacity_held = 20 where id = '${pdmHeldNight}';`);
+  await dbRun(`update public.event_dates set booking_open = false where id = '${pdmClosedNight}';`);
+  await dbRun(`update public.pass_categories set min_age = 18 where id = '${COUPLE_PASS}';`);
+
+  const pdmNights = await dbQuery(`select * from public.get_event_night_availability($1)`, [EVENT_ID]);
+  const pdmHeld = pdmNights.find((row) => row.event_date_id === pdmHeldNight);
+  const pdmClosed = pdmNights.find((row) => row.event_date_id === pdmClosedNight);
+  check(
+    "the fixtures are in place: seats held back on one night, booking closed on another",
+    pdmHeld?.capacity_held === 20 && pdmHeld?.is_booking_open === true && pdmClosed?.is_booking_open === false,
+    `held=${pdmHeld?.capacity_held} closed=${pdmClosed?.is_booking_open}`,
+  );
+
+  const pdmExpectedHeldLine = `${pdmHeld.remaining} of ${
+    pdmHeld.capacity - pdmHeld.capacity_held
+  } places left · 20 held for the gate`;
+
+  // The booking wizard and the pass pages are rendered per request, so they are where a
+  // fixture written a moment ago can be checked. (The landing page is served from an ISR
+  // snapshot taken at build time — its numbers are the build's, by design.)
+  const pdmBook = visibleText(await fetchPage("/book"));
+  const pdmPasses = visibleText(await fetchPage("/passes"));
+
+  check(
+    "the booking wizard tells a visitor how many places are left, out of what is on sale",
+    pdmBook.includes(pdmExpectedHeldLine),
+    contextAround(pdmBook, "places left"),
+  );
+  check(
+    "and names the seats held back for the gate, so the arithmetic is not a mystery",
+    pdmBook.includes("20 held for the gate"),
+    contextAround(pdmBook, "held for the gate"),
+  );
+  check(
+    "the booking wizard disables that night, and says why",
+    pdmBook.includes("Booking is closed for this night") &&
+      pdmBook.includes("Booking closed — this night cannot be selected."),
+    contextAround(pdmBook, "cannot be selected"),
+  );
+  check(
+    "a night that is still on sale is still selectable",
+    pdmBook.includes("Select this night"),
+    contextAround(pdmBook, "Select this night"),
+  );
+  check(
+    "the age restriction set on a pass reaches the page a guest reads",
+    pdmPasses.includes("18+ only"),
+    contextAround(pdmPasses, "18+ only"),
+  );
+  check(
+    "and the booking wizard shows the same line, because both read the same rule",
+    readFileSync(join(REPO_ROOT, "src/components/events/pass-card.tsx"), "utf8").includes("passAgeCopy(pass)") &&
+      readFileSync(join(REPO_ROOT, "src/components/booking/pass-choice.tsx"), "utf8").includes("passAgeCopy(pass)"),
+  );
+
+  // ---- the nights screen ---------------------------------------------------------
+  const pdmStaffSession = await signIn("scanner@example.com", STAFF_PASSWORD);
+  const pdmAdminSession = await signIn("admin@example.com", STAFF_PASSWORD);
+  const pdmSuperSession = await signIn("owner@example.com", STAFF_PASSWORD);
+  const pdmGuestSession = await signIn("guest@example.com", STAFF_PASSWORD);
+
+  const pdmPost = async (path, cookie, body) => {
+    const response = await fetch(api(path), {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+    let payload = null;
+
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+
+    return { status: response.status, payload };
+  };
+
+  const pdmDatesPage = await adminHtml("/admin/dates", pdmAdminSession.cookie);
+
+  check(
+    "an admin opens the nights screen and is offered the controls",
+    pdmDatesPage.status === 200 &&
+      pdmDatesPage.text.includes("Nights") &&
+      pdmDatesPage.text.includes("Set capacity") &&
+      pdmDatesPage.text.includes("Close booking"),
+    `${pdmDatesPage.status}`,
+  );
+  check(
+    "the screen prints the capacity floor from the database, not a rule of thumb",
+    pdmDatesPage.text.includes(
+      `Capacity cannot go below the ${pdmHeld.booked_people} people already paid for.`,
+    ),
+    contextAround(pdmDatesPage.text, "cannot go below"),
+  );
+  check(
+    "and the seats-left figure it shows is the one the booking path uses",
+    pdmDatesPage.text.includes(pdmRules.capacityCopy({
+      seatsAvailable: pdmHeld.remaining,
+      capacity: pdmHeld.capacity,
+      capacityHeld: pdmHeld.capacity_held,
+    })),
+    contextAround(pdmDatesPage.text, "seats left"),
+  );
+
+  // ---- adding a night ------------------------------------------------------------
+  const pdmNewDate = "2027-03-07";
+  const pdmAddedNight = await pdmPost("/api/admin/dates", pdmAdminSession.cookie, {
+    action: "save",
+    night: {
+      id: null,
+      date: pdmNewDate,
+      startTime: "19:00",
+      endTime: "23:30",
+      capacity: 300,
+      capacityHeld: 30,
+      status: "scheduled",
+      bookingOpen: true,
+      notes: "Added by the verification harness",
+    },
+  });
+
+  check(
+    "a night can be added through the endpoint",
+    pdmAddedNight.status === 200 &&
+      pdmAddedNight.payload?.ok === true &&
+      pdmAddedNight.payload.data.date === pdmNewDate &&
+      pdmAddedNight.payload.data.capacity === 300 &&
+      pdmAddedNight.payload.data.capacityHeld === 30,
+    `${pdmAddedNight.status} ${JSON.stringify(pdmAddedNight.payload?.error ?? {})}`,
+  );
+
+  const [pdmNewNightRow] = await dbQuery(
+    `select id, capacity, capacity_held, booking_open from public.event_dates where event_id = $1 and event_date = $2`,
+    [EVENT_ID, pdmNewDate],
+  );
+
+  check(
+    "and the row it wrote is the one an organiser will see",
+    pdmNewNightRow?.capacity === 300 && pdmNewNightRow?.capacity_held === 30 && pdmNewNightRow?.booking_open === true,
+    JSON.stringify(pdmNewNightRow ?? {}),
+  );
+  check(
+    "the night it reports is the night it saved",
+    pdmNewNightRow?.id === pdmAddedNight.payload?.data?.id,
+    `${pdmNewNightRow?.id} / ${pdmAddedNight.payload?.data?.id}`,
+  );
+
+  const pdmDuplicateNight = await pdmPost("/api/admin/dates", pdmAdminSession.cookie, {
+    action: "save",
+    night: {
+      id: null,
+      date: pdmNewDate,
+      startTime: "19:00",
+      endTime: "23:30",
+      capacity: 300,
+      capacityHeld: 0,
+      status: "scheduled",
+      bookingOpen: true,
+      notes: "",
+    },
+  });
+
+  check(
+    "the same date cannot be added twice — the database says which rule stopped it",
+    pdmDuplicateNight.status === 409 && pdmDuplicateNight.payload?.error?.code === "PT006",
+    `${pdmDuplicateNight.status} ${pdmDuplicateNight.payload?.error?.code ?? ""}`,
+  );
+
+  const pdmDatesPageAgain = await adminHtml("/admin/dates", pdmAdminSession.cookie);
+
+  check(
+    "the new night appears on the screen with its held seats",
+    pdmDatesPageAgain.status === 200 &&
+      pdmDatesPageAgain.text.includes(pdmFormatDate(pdmNewDate)) &&
+      pdmDatesPageAgain.text.includes("270 of 300 seats left") &&
+      pdmDatesPageAgain.text.includes("30 held back"),
+    contextAround(pdmDatesPageAgain.text, pdmFormatDate(pdmNewDate)),
+  );
+
+  const pdmHeldTooHigh = await pdmPost("/api/admin/dates", pdmAdminSession.cookie, {
+    action: "capacity",
+    id: pdmNewNightRow.id,
+    capacity: 300,
+    capacityHeld: 400,
+  });
+
+  check(
+    "holding back more seats than the night has is refused, with the field to fix",
+    pdmHeldTooHigh.status === 409 &&
+      pdmHeldTooHigh.payload?.error?.code === "PT003" &&
+      pdmHeldTooHigh.payload?.error?.field === "capacityHeld",
+    `${pdmHeldTooHigh.status} ${JSON.stringify(pdmHeldTooHigh.payload?.error ?? {})}`,
+  );
+
+  const pdmNegativeCapacity = await pdmPost("/api/admin/dates", pdmAdminSession.cookie, {
+    action: "capacity",
+    id: pdmNewNightRow.id,
+    capacity: -5,
+    capacityHeld: 0,
+  });
+
+  check(
+    "and a negative capacity is refused before it reaches SQL, with the field named",
+    pdmNegativeCapacity.status === 400 &&
+      pdmNegativeCapacity.payload?.error?.code === "PT001" &&
+      pdmNegativeCapacity.payload?.error?.field === "capacity",
+    `${pdmNegativeCapacity.status} ${JSON.stringify(pdmNegativeCapacity.payload?.error ?? {})}`,
+  );
+
+  check(
+    "with the night left exactly as it was",
+    (
+      await dbQuery(`select capacity, capacity_held from public.event_dates where id = $1`, [pdmNewNightRow.id])
+    )[0].capacity === 300,
+  );
+
+  // ---- capacity below what has been paid for -------------------------------------
+  // The floor is the seats already taken, counted under the night's own lock. The
+  // fixture night has paid bookings, so the floor is a real number rather than zero.
+  const [pdmPaidOnHeld] = await dbQuery(
+    `select coalesce(sum(number_of_people), 0)::int as people
+       from public.bookings
+      where event_date_id = $1 and payment_status = 'paid'`,
+    [pdmHeldNight],
+  );
+
+  if (pdmPaidOnHeld.people > 0) {
+    const pdmTooLow = await pdmPost("/api/admin/dates", pdmAdminSession.cookie, {
+      action: "capacity",
+      id: pdmHeldNight,
+      capacity: pdmPaidOnHeld.people - 1,
+      capacityHeld: 0,
+    });
+
+    check(
+      "capacity cannot be lowered below the seats already paid for",
+      pdmTooLow.status === 409 && pdmTooLow.payload?.error?.code === "PT004",
+      `${pdmTooLow.status} ${pdmTooLow.payload?.error?.code ?? ""}`,
+    );
+    check(
+      "and the refusal carries the floor, so the form can offer the number that works",
+      pdmTooLow.payload?.error?.floor === pdmPaidOnHeld.people,
+      `${pdmTooLow.payload?.error?.floor} / ${pdmPaidOnHeld.people}`,
+    );
+
+    const pdmAtFloor = await pdmPost("/api/admin/dates", pdmAdminSession.cookie, {
+      action: "capacity",
+      id: pdmHeldNight,
+      capacity: pdmPaidOnHeld.people,
+      capacityHeld: 0,
+    });
+
+    check(
+      "exactly the seats already taken is allowed, and then nothing is left to sell",
+      pdmAtFloor.status === 200 && pdmAtFloor.payload?.data?.seatsAvailable === 0,
+      `${pdmAtFloor.status} ${pdmAtFloor.payload?.data?.seatsAvailable ?? ""}`,
+    );
+
+    const pdmRestored = await pdmPost("/api/admin/dates", pdmAdminSession.cookie, {
+      action: "capacity",
+      id: pdmHeldNight,
+      capacity: pdmBaseline.held_capacity,
+      capacityHeld: 20,
+    });
+
+    check(
+      "and the capacity can be raised again",
+      pdmRestored.status === 200 && pdmRestored.payload?.data?.capacity === pdmBaseline.held_capacity,
+      `${pdmRestored.status}`,
+    );
+  } else {
+    check("capacity below the seats paid for is refused", false, "no paid bookings on the fixture night");
+  }
+
+  // ---- booking open and closed ---------------------------------------------------
+  const pdmClosedToggle = await pdmPost("/api/admin/dates", pdmAdminSession.cookie, {
+    action: "booking",
+    id: pdmNewNightRow.id,
+    bookingOpen: false,
+  });
+
+  check(
+    "booking can be closed on a night without cancelling it",
+    pdmClosedToggle.status === 200 && pdmClosedToggle.payload?.data?.bookingOpen === false,
+    `${pdmClosedToggle.status}`,
+  );
+
+  const [pdmClosedRow] = await dbQuery(
+    `select booking_open, status from public.event_dates where id = $1`,
+    [pdmNewNightRow.id],
+  );
+
+  check(
+    "and closing it changes only the booking window",
+    pdmClosedRow.booking_open === false && pdmClosedRow.status === "scheduled",
+  );
+
+  const pdmClosedBooking = await postBooking({
+    eventId: EVENT_ID,
+    eventDateId: pdmNewNightRow.id,
+    passCategoryId: COUPLE_PASS,
+    quantity: 1,
+    numberOfPeople: 2,
+    customerName: "Closed Night Guest",
+    customerMobile: "+919800000901",
+    customerEmail: "closed-night@example.com",
+    idempotencyKey: "pdm-closed-night-1",
+  });
+
+  check(
+    "a closed night cannot be booked, and the refusal names the reason",
+    pdmClosedBooking.status === 409 &&
+      pdmClosedBooking.payload?.error?.message === "This night is no longer open for booking.",
+    `${pdmClosedBooking.status} ${JSON.stringify(pdmClosedBooking.payload?.error ?? {})}`,
+  );
+
+  const pdmReopened = await pdmPost("/api/admin/dates", pdmAdminSession.cookie, {
+    action: "booking",
+    id: pdmNewNightRow.id,
+    bookingOpen: true,
+  });
+
+  check("and reopening it puts it back on sale", pdmReopened.status === 200 && pdmReopened.payload?.data?.bookingOpen === true);
+
+  // ---- who may change what -------------------------------------------------------
+  const pdmAnonymousWrite = await pdmPost("/api/admin/dates", null, {
+    action: "capacity",
+    id: pdmNewNightRow.id,
+    capacity: 10,
+  });
+
+  check(
+    "a signed-out visitor cannot change a night — the request hook answers with JSON, not HTML",
+    pdmAnonymousWrite.status === 401 && pdmAnonymousWrite.payload?.error?.kind === "not-authorized",
+    `${pdmAnonymousWrite.status} ${JSON.stringify(pdmAnonymousWrite.payload ?? {})}`,
+  );
+
+  const pdmGuestWrite = await pdmPost("/api/admin/dates", pdmGuestSession.cookie, {
+    action: "capacity",
+    id: pdmNewNightRow.id,
+    capacity: 10,
+  });
+
+  check(
+    "nor can an account with no role",
+    pdmGuestWrite.status === 401,
+    `${pdmGuestWrite.status}`,
+  );
+
+  const pdmStaffWrite = await pdmPost("/api/admin/dates", pdmStaffSession.cookie, {
+    action: "capacity",
+    id: pdmNewNightRow.id,
+    capacity: 10,
+  });
+
+  check(
+    "and a staff member — who may use the gate — cannot change capacity",
+    pdmStaffWrite.status === 403 && pdmStaffWrite.payload?.error?.kind === "forbidden",
+    `${pdmStaffWrite.status} ${JSON.stringify(pdmStaffWrite.payload ?? {})}`,
+  );
+
+  const pdmSuperWrite = await pdmPost("/api/admin/dates", pdmSuperSession.cookie, {
+    action: "capacity",
+    id: pdmNewNightRow.id,
+    capacity: 300,
+    capacityHeld: 30,
+  });
+
+  check(
+    "a super admin can, and an unknown night is refused rather than silently ignored",
+    pdmSuperWrite.status === 200 &&
+      (await pdmPost("/api/admin/dates", pdmSuperSession.cookie, {
+        action: "capacity",
+        id: "00000000-0000-4000-8000-0000000000ff",
+        capacity: 100,
+      })).payload?.error?.code === "PT007",
+  );
+
+  const pdmBadAction = await pdmPost("/api/admin/dates", pdmAdminSession.cookie, {
+    action: "delete",
+    id: pdmNewNightRow.id,
+  });
+
+  check(
+    "there is no action that deletes a night — only one that closes it",
+    pdmBadAction.status === 400 && pdmBadAction.payload?.error?.kind === "invalid-input",
+    `${pdmBadAction.status} ${JSON.stringify(pdmBadAction.payload?.error ?? {})}`,
+  );
+
+  const pdmNotJson = await pdmPost("/api/admin/dates", pdmAdminSession.cookie, "capacity=10");
+
+  check(
+    "a body that is not JSON is refused before any SQL runs",
+    pdmNotJson.status === 400,
+    `${pdmNotJson.status}`,
+  );
+
+  const pdmTooLarge = await pdmPost("/api/admin/dates", pdmAdminSession.cookie, {
+    action: "capacity",
+    id: pdmNewNightRow.id,
+    capacity: 300,
+    pad: "x".repeat(9000),
+  });
+
+  check(
+    "and a body too large to be a form is refused rather than parsed",
+    pdmTooLarge.status === 400,
+    `${pdmTooLarge.status}`,
+  );
+
+  const pdmGetWrite = await fetchWith("/api/admin/passes", pdmAdminSession.cookie);
+
+  check(
+    "the management endpoints answer JSON, and a GET is not a verb they accept",
+    pdmGetWrite.status === 405 && (await pdmGetWrite.json()).ok === false,
+    `${pdmGetWrite.status}`,
+  );
+
+  // ---- the pass catalogue --------------------------------------------------------
+  const pdmCataloguePage = await adminHtml("/admin/passes?view=types", pdmAdminSession.cookie);
+
+  if (
+    process.env.VERIFY_DEBUG === "1" ||
+    !(
+      pdmCataloguePage.status === 200 &&
+      pdmCataloguePage.text.includes("Pass types") &&
+      pdmCataloguePage.text.includes("Couple Pass") &&
+      // Read as text: React separates the rupee sign from the digits with a comment
+      // node, so the markup holds "₹<!-- -->499" rather than "₹499".
+      pdmCataloguePage.text.includes("₹499") &&
+      pdmCataloguePage.text.includes("18+") &&
+      pdmCataloguePage.text.includes("on sale")
+    )
+  ) {
+    writeFileSync("/tmp/passes-view.html", pdmCataloguePage.html);
+    writeFileSync("/tmp/passes-view.txt", pdmCataloguePage.text);
+  }
+
+  check(
+    "the catalogue screen lists the pass types with their prices, limits and age",
+    pdmCataloguePage.status === 200 &&
+      pdmCataloguePage.text.includes("Pass types") &&
+      pdmCataloguePage.text.includes("Add a pass type") &&
+      pdmCataloguePage.text.includes("Couple Pass") &&
+      // Read as text: React separates the rupee sign from the digits with a comment
+      // node, so the markup holds "₹<!-- -->499" rather than "₹499".
+      pdmCataloguePage.text.includes("₹499") &&
+      pdmCataloguePage.text.includes("18+") &&
+      pdmCataloguePage.text.includes("on sale"),
+    `${pdmCataloguePage.status}`,
+  );
+
+  const pdmPaidBookingsBefore = await dbQuery(
+    `select id, total_amount from public.bookings where pass_category_id = $1 and payment_status = 'paid' order by id`,
+    [COUPLE_PASS],
+  );
+
+  const pdmRepriced = await pdmPost("/api/admin/passes", pdmAdminSession.cookie, {
+    action: "save",
+    pass: {
+      id: COUPLE_PASS,
+      code: "couple",
+      name: "Couple Pass",
+      composition: "2 Guests",
+      description: "Entry for two on one night.",
+      priceInr: 777,
+      numberOfPeople: 2,
+      maxPerBooking: 10,
+      minAge: 18,
+      sortOrder: 2,
+      isActive: true,
+    },
+  });
+
+  check(
+    "a price can be changed through the endpoint, and the answer is the row as saved",
+    pdmRepriced.status === 200 &&
+      pdmRepriced.payload?.ok === true &&
+      pdmRepriced.payload.data.priceInr === 777,
+    `${pdmRepriced.status} ${JSON.stringify(pdmRepriced.payload?.error ?? {})}`,
+  );
+
+  const [pdmRepricedRow] = await dbQuery(
+    `select price_inr, min_age, name from public.pass_categories where id = $1`,
+    [COUPLE_PASS],
+  );
+
+  check(
+    "and the database holds the new price",
+    pdmRepricedRow.price_inr === 777 && pdmRepricedRow.min_age === 18,
+    JSON.stringify(pdmRepricedRow),
+  );
+
+  const pdmPaidBookingsAfter = await dbQuery(
+    `select id, total_amount from public.bookings where pass_category_id = $1 and payment_status = 'paid' order by id`,
+    [COUPLE_PASS],
+  );
+
+  check(
+    "bookings that were already taken keep what they were charged",
+    pdmPaidBookingsBefore.length > 0 &&
+      JSON.stringify(pdmPaidBookingsBefore) === JSON.stringify(pdmPaidBookingsAfter),
+    `${pdmPaidBookingsBefore.length} paid bookings: ${JSON.stringify(pdmPaidBookingsBefore)} → ${JSON.stringify(
+      pdmPaidBookingsAfter,
+    )}`,
+  );
+
+  const pdmZeroPrice = await pdmPost("/api/admin/passes", pdmAdminSession.cookie, {
+    action: "save",
+    pass: {
+      id: COUPLE_PASS,
+      code: "couple",
+      name: "Couple Pass",
+      composition: "2 Guests",
+      description: "Entry for two on one night.",
+      priceInr: 0,
+      numberOfPeople: 2,
+      maxPerBooking: 10,
+      minAge: 18,
+      sortOrder: 2,
+      isActive: true,
+    },
+  });
+
+  check(
+    "a price of zero never reaches SQL — the form catches it and names the field",
+    pdmZeroPrice.status === 400 &&
+      pdmZeroPrice.payload?.error?.field === "priceInr",
+    `${pdmZeroPrice.status} ${JSON.stringify(pdmZeroPrice.payload?.error ?? {})}`,
+  );
+
+  const pdmUnknownPass = await pdmPost("/api/admin/passes", pdmAdminSession.cookie, {
+    action: "save",
+    pass: {
+      id: "00000000-0000-4000-8000-0000000000ff",
+      code: "ghost",
+      name: "Ghost Pass",
+      composition: "1 Guest",
+      description: "",
+      priceInr: 100,
+      numberOfPeople: 1,
+      maxPerBooking: 1,
+      minAge: 0,
+      sortOrder: 9,
+      isActive: true,
+    },
+  });
+
+  check(
+    "editing a pass that no longer exists is refused by name",
+    pdmUnknownPass.status === 409 && pdmUnknownPass.payload?.error?.code === "PC008",
+    `${pdmUnknownPass.status} ${pdmUnknownPass.payload?.error?.code ?? ""}`,
+  );
+
+  const pdmDuplicateCode = await pdmPost("/api/admin/passes", pdmAdminSession.cookie, {
+    action: "save",
+    pass: {
+      id: null,
+      code: "Couple",
+      name: "Another Couple",
+      composition: "2 Guests",
+      description: "",
+      priceInr: 499,
+      numberOfPeople: 2,
+      maxPerBooking: 2,
+      minAge: 0,
+      sortOrder: 9,
+      isActive: true,
+    },
+  });
+
+  check(
+    "and a code that already exists is refused, whatever case it is typed in",
+    pdmDuplicateCode.status === 409 &&
+      pdmDuplicateCode.payload?.error?.code === "PC003" &&
+      pdmDuplicateCode.payload?.error?.field === "code",
+    `${pdmDuplicateCode.status} ${JSON.stringify(pdmDuplicateCode.payload?.error ?? {})}`,
+  );
+
+  const pdmToggledPass = await pdmPost("/api/admin/passes", pdmAdminSession.cookie, {
+    action: "toggle",
+    id: COUPLE_PASS,
+    isActive: false,
+  });
+
+  check(
+    "a pass can be taken off sale, which never deletes it",
+    pdmToggledPass.status === 200 &&
+      pdmToggledPass.payload?.data?.isActive === false &&
+      (await dbQuery(`select is_active from public.pass_categories where id = $1`, [COUPLE_PASS]))[0].is_active === false,
+  );
+
+  const pdmOffSalePage = await adminHtml("/admin/passes?view=types", pdmAdminSession.cookie);
+
+  check(
+    "and the screen says off sale rather than hiding the pass",
+    pdmOffSalePage.text.includes("Comeback Pass") ||
+      (pdmOffSalePage.text.includes("Couple Pass") && pdmOffSalePage.text.includes("off sale")),
+    contextAround(pdmOffSalePage.text, "off sale"),
+  );
+
+  await pdmPost("/api/admin/passes", pdmAdminSession.cookie, {
+    action: "toggle",
+    id: COUPLE_PASS,
+    isActive: true,
+  });
+  await pdmPost("/api/admin/passes", pdmAdminSession.cookie, {
+    action: "save",
+    pass: {
+      id: COUPLE_PASS,
+      code: "couple",
+      name: "Couple Pass",
+      composition: "2 Guests",
+      description: "Entry for two on one night.",
+      priceInr: pdmBaseline.couple_price,
+      numberOfPeople: 2,
+      maxPerBooking: 10,
+      minAge: pdmBaseline.couple_min_age,
+      sortOrder: 2,
+      isActive: true,
+    },
+  });
+
+  // ---- the fixtures are put back --------------------------------------------------
+  await dbRun(`update public.event_dates set capacity_held = ${pdmBaseline.held_capacity_held} where id = '${pdmHeldNight}';`);
+  await dbRun(`update public.event_dates set capacity = ${pdmBaseline.held_capacity} where id = '${pdmHeldNight}';`);
+  await dbRun(`update public.event_dates set booking_open = ${pdmBaseline.closed_booking_open} where id = '${pdmClosedNight}';`);
+  await dbRun(`delete from public.event_dates where id = '${pdmNewNightRow.id}';`);
+
+  check(
+    "the fixtures are back where the rest of the run found them",
+    (
+      await dbQuery(
+        `select (select capacity from public.event_dates where id = $1) as capacity,
+                (select capacity_held from public.event_dates where id = $1) as held,
+                (select booking_open from public.event_dates where id = $2) as closed_open,
+                (select price_inr from public.pass_categories where id = $3) as price,
+                (select min_age from public.pass_categories where id = $3) as age,
+                (select count(*)::int from public.event_dates where event_date = $4) as added_nights`,
+        [pdmHeldNight, pdmClosedNight, COUPLE_PASS, pdmNewDate],
+      )
+    )[0].capacity === pdmBaseline.held_capacity,
+  );
+
+  check(
+    "and the night this section added is gone, so nothing it wrote can affect a later step",
+    (
+      await dbQuery(`select count(*)::int as n from public.event_dates where event_date = $1`, [pdmNewDate])
+    )[0].n === 0,
+  );
+
+  // ---------------------------------------------------------------------------
+  section("Gallery management: private uploads, publishing, ordering and deleting");
+  // ---------------------------------------------------------------------------
+  // The gallery is the first step that owns *files*, so most of these assertions are
+  // about two things at once: what the database holds, and what a browser can actually
+  // fetch. The section drives the real endpoints with real image bytes — sharp decodes
+  // and re-encodes them, supabase-js uploads the results to the storage double exactly
+  // as it would to a project — and then looks at both sides.
+  //
+  // One thing cannot be asserted through the page: `/gallery` is statically revalidated
+  // every five minutes (`revalidate = 300`), and the harness serves the copy the
+  // production build rendered. So "a published photo appears, an unpublished one does
+  // not" is checked against `listPublishedGallery()` — the very query that page
+  // consumes — plus a live fetch of the object's public address; the rendered page is
+  // checked for the markup the step asks for (a responsive grid, lazy loading, an
+  // accessible lightbox).
+  const galPaths = await import("../src/lib/gallery/paths.ts");
+  const galWords = await import("../src/lib/admin/gallery.ts");
+  const galRules = await import("../src/lib/admin/catalogue.ts");
+  const galSharp = (await import("sharp")).default;
+
+  const GALLERY_BUCKET = galPaths.GALLERY_BUCKET;
+  const INBOX_BUCKET = galPaths.GALLERY_INBOX_BUCKET;
+  const galUploadUrl = api("/api/admin/gallery");
+  const galPreviewUrl = api("/api/admin/gallery/preview");
+
+  /** A real PNG of a given size — the pipeline must run on an image, not on a stub. */
+  const galPng = (width, height) =>
+    galSharp({ create: { width, height, channels: 3, background: { r: 198, g: 40, b: 88 } } })
+      .png()
+      .toBuffer();
+
+  const galPost = async (body, cookie) => {
+    const galResponse = await fetch(galUploadUrl, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+    return { status: galResponse.status, payload: await galResponse.json().catch(() => null) };
+  };
+
+  const galUpload = async (files, cookie, fields = {}) => {
+    const galForm = new FormData();
+
+    for (const [key, value] of Object.entries(fields)) {
+      galForm.append(key, value);
+    }
+
+    for (const file of files) {
+      galForm.append("files", file);
+    }
+
+    const galResponse = await fetch(galUploadUrl, {
+      method: "POST",
+      redirect: "manual",
+      headers: cookie ? { cookie } : {},
+      body: galForm,
+    });
+
+    return { status: galResponse.status, payload: await galResponse.json().catch(() => null) };
+  };
+
+  const galObjects = () => shim.storage.list();
+  const galInboxKeys = () => galObjects().filter((key) => key.startsWith(`${INBOX_BUCKET}/`));
+  const galPublicKeys = () => galObjects().filter((key) => key.startsWith(`${GALLERY_BUCKET}/`));
+  const galBytes = (key) => shim.storage.objects.get(key)?.data ?? Buffer.alloc(0);
+  const galIsWebp = (bytes) =>
+    bytes.length > 12 && bytes.subarray(0, 4).toString() === "RIFF" && bytes.subarray(8, 12).toString() === "WEBP";
+
+  /** The running order the management screen and the public grid both read. */
+  const galOrder = async () =>
+    (
+      await dbQuery(
+        `select id from public.gallery where event_id = $1 order by sort_order, created_at desc, id`,
+        [EVENT_ID],
+      )
+    ).map((row) => row.id);
+
+  const galSessions = {
+    admin: await signIn("admin@example.com", STAFF_PASSWORD),
+    staff: await signIn("scanner@example.com", STAFF_PASSWORD),
+    guest: await signIn("guest@example.com", STAFF_PASSWORD),
+  };
+
+  check(
+    "the harness signs in as the three accounts this section needs",
+    Boolean(galSessions.admin.cookie) && Boolean(galSessions.staff.cookie) && Boolean(galSessions.guest.cookie),
+    JSON.stringify(Object.fromEntries(Object.entries(galSessions).map(([k, v]) => [k, v.error]))),
+  );
+
+  // ---- the buckets, and who can reach them ---------------------------------------
+  const galBucketRows = await dbQuery(
+    `select id, public, file_size_limit, allowed_mime_types from storage.buckets order by id`,
+  );
+  check(
+    "the migration created exactly the two buckets the gallery uses",
+    galBucketRows.length === 2 &&
+      galBucketRows.some((row) => row.id === GALLERY_BUCKET) &&
+      galBucketRows.some((row) => row.id === INBOX_BUCKET),
+    galBucketRows.map((row) => row.id).join(", "),
+  );
+  check(
+    "the public bucket is public and the inbox is not",
+    galBucketRows.find((row) => row.id === GALLERY_BUCKET)?.public === true &&
+      galBucketRows.find((row) => row.id === INBOX_BUCKET)?.public === false,
+  );
+  check(
+    "both buckets carry the same size limit and the same accepted types",
+    galBucketRows.every((row) => Number(row.file_size_limit) === galWords.GALLERY_LIMITS.uploadBytes) &&
+      galBucketRows.every((row) =>
+        galWords.GALLERY_UPLOAD_TYPES.every((type) => (row.allowed_mime_types ?? []).includes(type)),
+      ),
+    JSON.stringify(galBucketRows.map((row) => [row.id, row.file_size_limit, row.allowed_mime_types])),
+  );
+  check(
+    "no policy lets an anon or authenticated key list or write either bucket",
+    (await dbQuery(`select count(*)::int as n from pg_policies where schemaname = 'storage' and tablename = 'objects'`))[0]
+      .n === 0,
+  );
+  check(
+    "and the harness starts with nothing in storage, so every object below is one this section made",
+    galObjects().length === 0,
+    galObjects().join(", "),
+  );
+
+  // ---- the rules, without touching storage ---------------------------------------
+  check(
+    "an object key is derived from the row: <event or festival>/<item id>/<variant>.webp",
+    galPaths.galleryObjectKey("11111111-1111-4111-8111-111111111111", "thumb", EVENT_ID) ===
+      `${EVENT_ID}/11111111-1111-4111-8111-111111111111/thumb.webp` &&
+      galPaths.galleryObjectKey("x", "full") === "festival/x/full.webp",
+    galPaths.galleryObjectKey("x", "full"),
+  );
+  check(
+    "only a published row's file belongs in the public bucket",
+    galPaths.bucketForStatus("published") === GALLERY_BUCKET &&
+      galPaths.bucketForStatus("draft") === INBOX_BUCKET &&
+      galPaths.bucketForStatus("archived") === INBOX_BUCKET,
+  );
+  check(
+    "a key that is a URL, absolute, or climbs out of the bucket is not a key",
+    !galPaths.isSafeGalleryKey("https://example.com/x.webp") &&
+      !galPaths.isSafeGalleryKey("/etc/passwd") &&
+      !galPaths.isSafeGalleryKey("night/../../other.webp") &&
+      galPaths.isSafeGalleryKey(`${EVENT_ID}/item/full.webp`),
+  );
+  check(
+    "the public address of a file is a plain storage URL — never a signed one",
+    galPaths.publicGalleryUrl("night/item/full.webp") ===
+      `${shim.url}/storage/v1/object/public/${GALLERY_BUCKET}/night/item/full.webp` &&
+      galPaths.publicGalleryUrl(null) === null,
+    String(galPaths.publicGalleryUrl("night/item/full.webp")),
+  );
+
+  // ---- who may upload, and who may only look --------------------------------------
+  const galAnonymousUpload = await galUpload([new File([await galPng(900, 600)], "Anonymous.png", { type: "image/png" })], null);
+  check(
+    "a signed-out upload is refused before anything is read",
+    galAnonymousUpload.status === 401 && galAnonymousUpload.payload?.error?.kind === "not-authorized",
+    `${galAnonymousUpload.status} ${JSON.stringify(galAnonymousUpload.payload)}`,
+  );
+
+  const galGuestUpload = await galUpload(
+    [new File([await galPng(900, 600)], "Guest.png", { type: "image/png" })],
+    galSessions.guest.cookie,
+  );
+  check(
+    "and so is an account that is signed in but not on the staff list",
+    galGuestUpload.status === 401,
+    `${galGuestUpload.status} ${JSON.stringify(galGuestUpload.payload)}`,
+  );
+
+  const galStaffUpload = await galUpload(
+    [new File([await galPng(900, 600)], "Gate staff.png", { type: "image/png" })],
+    galSessions.staff.cookie,
+  );
+  check(
+    "a role that may not change the gallery is refused by the endpoint itself",
+    galStaffUpload.status === 403 && galStaffUpload.payload?.error?.kind === "forbidden",
+    `${galStaffUpload.status} ${JSON.stringify(galStaffUpload.payload)}`,
+  );
+  check("and none of those three attempts reached storage", galObjects().length === 0, galObjects().join(", "));
+
+  const galStaffPage = await adminHtml("/admin/gallery", galSessions.staff.cookie);
+  check(
+    "the gallery screen turns that role away too, and says which capability it wanted",
+    galStaffPage.status === 307 && String(galStaffPage.location ?? "").includes("denied=gallery%3Aview"),
+    `${galStaffPage.status} ${galStaffPage.location ?? ""}`,
+  );
+
+  const galGet = await fetchWith("/api/admin/gallery", galSessions.admin.cookie);
+  check("the gallery endpoint answers JSON, and a GET is not one of its verbs", galGet.status === 405, `${galGet.status}`);
+
+  // ---- an upload, end to end ------------------------------------------------------
+  const galFirstUpload = await galUpload(
+    [new File([await galPng(1200, 800)], "Second night first dance.png", { type: "image/png" })],
+    galSessions.admin.cookie,
+    { album: "Night 2" },
+  );
+  const galFirst = galFirstUpload.payload?.data?.uploaded?.[0];
+  check(
+    "an admin's upload is accepted, optimised and recorded",
+    galFirstUpload.status === 200 &&
+      galFirstUpload.payload?.ok === true &&
+      galFirstUpload.payload.data.uploaded.length === 1 &&
+      galFirstUpload.payload.data.refused.length === 0 &&
+      Boolean(galFirst?.id),
+    JSON.stringify(galFirstUpload.payload).slice(0, 300),
+  );
+  check(
+    "a new photograph arrives as a draft, so nothing is public until somebody publishes it",
+    galFirst?.status === "draft" && galFirst?.isPublic === false,
+    `${galFirst?.status} / isPublic=${galFirst?.isPublic}`,
+  );
+  check(
+    "the title is taken from the file name and the alternative text is never blank",
+    galFirst?.title === "Second night first dance" && (galFirst?.altText ?? "").length > 0,
+    `${galFirst?.title} / ${galFirst?.altText}`,
+  );
+  check(
+    "the keys are derived from the row, its event and the two variants",
+    galFirst?.storagePath === `${EVENT_ID}/${galFirst?.id}/full.webp` &&
+      galFirst?.thumbnailPath === `${EVENT_ID}/${galFirst?.id}/thumb.webp`,
+    `${galFirst?.storagePath} / ${galFirst?.thumbnailPath}`,
+  );
+  check(
+    "both files were written to the private inbox and re-encoded as WebP",
+    galIsWebp(galBytes(`${INBOX_BUCKET}/${galFirst?.storagePath}`)) &&
+      galIsWebp(galBytes(`${INBOX_BUCKET}/${galFirst?.thumbnailPath}`)) &&
+      galInboxKeys().length === 2 &&
+      galPublicKeys().length === 0,
+    galObjects().join(", "),
+  );
+  check(
+    "an image inside the ceiling keeps its size and the row records the stored bytes",
+    galFirst?.width === 1200 &&
+      galFirst?.height === 800 &&
+      galFirst?.byteSize === galBytes(`${INBOX_BUCKET}/${galFirst?.storagePath}`).length,
+    `${galFirst?.width}×${galFirst?.height}, ${galFirst?.byteSize} bytes`,
+  );
+
+  const galThumbMeta = await galSharp(galBytes(`${INBOX_BUCKET}/${galFirst?.thumbnailPath}`)).metadata();
+  check(
+    "the grid thumbnail is 640 px wide, so a phone downloads a fraction of the photograph",
+    galThumbMeta.width === 640 && galThumbMeta.height === 427,
+    `${galThumbMeta.width}×${galThumbMeta.height}`,
+  );
+  check(
+    "the stored files carry no EXIF — a guest's location never reaches the site",
+    galThumbMeta.exif === undefined && (await galSharp(galBytes(`${INBOX_BUCKET}/${galFirst?.storagePath}`)).metadata()).exif === undefined,
+  );
+
+  const galDraftPublicUrl = galPaths.publicGalleryUrl(galFirst?.storagePath);
+  const galDraftPublicFetch = await fetch(galDraftPublicUrl);
+  check(
+    "the draft's object is not reachable at its public address",
+    galDraftPublicFetch.status === 400,
+    `${galDraftPublicFetch.status} ${galDraftPublicUrl}`,
+  );
+  const galInboxFetch = await fetch(`${shim.url}/storage/v1/object/public/${INBOX_BUCKET}/${galFirst?.storagePath}`);
+  check(
+    "and nothing under the private bucket is served to anybody",
+    galInboxFetch.status === 400,
+    `${galInboxFetch.status}`,
+  );
+
+  const galPreview = await fetch(galPreviewUrl + `?id=${galFirst?.id}&variant=thumb`, {
+    headers: { cookie: galSessions.admin.cookie },
+  });
+  const galPreviewBytes = Buffer.from(await galPreview.arrayBuffer());
+  check(
+    "the thumbnail is served to staff through the session, cached privately, never signed",
+    galPreview.status === 200 &&
+      galPreview.headers.get("content-type") === "image/webp" &&
+      (galPreview.headers.get("cache-control") ?? "").startsWith("private") &&
+      galIsWebp(galPreviewBytes),
+    `${galPreview.status} ${galPreview.headers.get("content-type")} ${galPreview.headers.get("cache-control")}`,
+  );
+  check(
+    "and it is the stored thumbnail, byte for byte",
+    galPreviewBytes.length === galBytes(`${INBOX_BUCKET}/${galFirst?.thumbnailPath}`).length,
+    `${galPreviewBytes.length} vs ${galBytes(`${INBOX_BUCKET}/${galFirst?.thumbnailPath}`).length}`,
+  );
+
+  const galStaffPreview = await fetch(galPreviewUrl + `?id=${galFirst?.id}&variant=thumb`, {
+    headers: { cookie: galSessions.staff.cookie },
+  });
+  check(
+    "a role without the gallery capability cannot read a draft's bytes either",
+    galStaffPreview.status === 403,
+    `${galStaffPreview.status}`,
+  );
+
+  const galAnonymousPreview = await fetch(galPreviewUrl + `?id=${galFirst?.id}&variant=thumb`);
+  check("a signed-out preview is refused", galAnonymousPreview.status === 401, `${galAnonymousPreview.status}`);
+
+  const galMissingPreview = await fetch(galPreviewUrl + `?id=${crypto.randomUUID()}&variant=thumb`, {
+    headers: { cookie: galSessions.admin.cookie },
+  });
+  check(
+    "a photograph that is gone has no preview, and the screen is told why",
+    galMissingPreview.status === 409,
+    `${galMissingPreview.status}`,
+  );
+
+  // ---- a file that has to be refused ----------------------------------------------
+  const galAfterFirstUpload = galObjects().length;
+  const galSmallUpload = await galUpload(
+    [new File([await galPng(200, 150)], "Logo.png", { type: "image/png" })],
+    galSessions.admin.cookie,
+  );
+  check(
+    "an image too small to be a photograph is refused, with the reason",
+    galSmallUpload.status === 400 && /at least 400 px/.test(galSmallUpload.payload?.error?.message ?? ""),
+    JSON.stringify(galSmallUpload.payload).slice(0, 200),
+  );
+
+  const galNotAnImage = await galUpload(
+    [new File([Buffer.from("this is not a photograph, it is a sentence")], "Notes.png", { type: "image/png" })],
+    galSessions.admin.cookie,
+  );
+  check(
+    "a file whose declared type lies is refused after the bytes are read",
+    galNotAnImage.status === 400 && /could not be read as an image/.test(galNotAnImage.payload?.error?.message ?? ""),
+    JSON.stringify(galNotAnImage.payload).slice(0, 200),
+  );
+
+  const galTooBig = await galUpload(
+    [new File([Buffer.alloc(galWords.GALLERY_LIMITS.uploadBytes + 1, 7)], "Huge.png", { type: "image/png" })],
+    galSessions.admin.cookie,
+  );
+  check(
+    "a file past the bucket's limit is refused before it is decoded",
+    galTooBig.status === 400 && /larger than 8 MB/.test(galTooBig.payload?.error?.message ?? ""),
+    JSON.stringify(galTooBig.payload).slice(0, 200),
+  );
+  check(
+    "none of the three refused uploads left anything in storage",
+    galObjects().length === galAfterFirstUpload,
+    galObjects().join(", "),
+  );
+
+  const galMixedUpload = await galUpload(
+    [
+      new File([await galPng(1400, 1000)], "Doors open the hall fills.png", { type: "image/png" }),
+      new File([await galPng(180, 120)], "Too small to use.png", { type: "image/png" }),
+    ],
+    galSessions.admin.cookie,
+    { album: "Night 2" },
+  );
+  check(
+    "a batch keeps the photographs it can take and reports the one it cannot",
+    galMixedUpload.status === 200 &&
+      galMixedUpload.payload?.data?.uploaded.length === 1 &&
+      galMixedUpload.payload?.data?.refused.length === 1 &&
+      galMixedUpload.payload.data.refused[0].fileName === "Too small to use.png",
+    JSON.stringify(galMixedUpload.payload).slice(0, 300),
+  );
+
+  const galSecond = galMixedUpload.payload?.data?.uploaded?.[0];
+  check(
+    "a photograph larger than the ceiling is resized, and the row says so",
+    galSecond?.width === 1400 &&
+      galSecond?.height === 1000 &&
+      (await galSharp(galBytes(`${INBOX_BUCKET}/${galSecond?.thumbnailPath}`)).metadata()).width === 640,
+    `${galSecond?.width}×${galSecond?.height}`,
+  );
+
+  const galBigUpload = await galUpload(
+    [new File([await galPng(3000, 2000)], "Stage from the balcony.png", { type: "image/png" })],
+    galSessions.admin.cookie,
+  );
+  const galBig = galBigUpload.payload?.data?.uploaded?.[0];
+  check(
+    "a 3000 px photograph is downscaled to the stored ceiling of 2400 px, and the thumbnail to 640",
+    galBig?.width === 2400 &&
+      galBig?.height === 1600 &&
+      (await galSharp(galBytes(`${INBOX_BUCKET}/${galBig?.thumbnailPath}`)).metadata()).height === 427,
+    `${galBig?.width}×${galBig?.height}`,
+  );
+
+  // ---- the admin screen -----------------------------------------------------------
+  const galAdminPage = await adminHtml("/admin/gallery", galSessions.admin.cookie);
+  check(
+    "the gallery screen lists the photographs in the database, drafts included",
+    galAdminPage.status === 200 &&
+      galAdminPage.text.includes("Second night first dance") &&
+      galAdminPage.text.includes("Draft") &&
+      galAdminPage.text.includes("photos"),
+    `${galAdminPage.status}`,
+  );
+  const galAdminMarkup = stripScripts(galAdminPage.html);
+  check(
+    "a draft's picture comes through the staff route, never a public URL",
+    galAdminMarkup.includes(`/api/admin/gallery/preview?id=${galFirst?.id}`) &&
+      !galAdminMarkup.includes("/storage/v1/object/public/") &&
+      !galAdminMarkup.includes(`${galFirst?.storagePath}`),
+  );
+  check(
+    "the screen offers the controls this step asks for",
+    galAdminPage.text.includes("Add photos") &&
+      galAdminPage.text.includes("Choose files") &&
+      galAdminPage.text.includes("Publish") &&
+      galAdminPage.text.includes("Move up") &&
+      galAdminPage.text.includes("Move down") &&
+      galAdminPage.text.includes("Delete"),
+  );
+  check(
+    "and it says what a draft means, in words rather than only in colour",
+    galAdminPage.text.includes("Only staff can see this photo"),
+  );
+
+  // ---- editing the words ----------------------------------------------------------
+  const galSaveValues = {
+    id: galFirst?.id,
+    title: "The circle opens",
+    description: "The first circle of the second night, photographed from the stage.",
+    altText: "Dancers in a colourful garba circle under warm stage lights",
+    album: "Night 2",
+    capturedOn: "2026-10-12",
+    sortOrder: 4,
+  };
+
+  const galSaved = await galPost({ action: "save", item: galSaveValues }, galSessions.admin.cookie);
+  check(
+    "the title, description, alt text, album, date and order are saved and echoed back",
+    galSaved.status === 200 &&
+      galSaved.payload?.data?.title === "The circle opens" &&
+      galSaved.payload?.data?.altText === galSaveValues.altText &&
+      galSaved.payload?.data?.album === "Night 2" &&
+      galSaved.payload?.data?.capturedOn === "2026-10-12",
+    JSON.stringify(galSaved.payload).slice(0, 300),
+  );
+
+  const galBlankAlt = await galPost(
+    { action: "save", item: { ...galSaveValues, altText: "   " } },
+    galSessions.admin.cookie,
+  );
+  check(
+    "alternative text cannot be blanked — the form rule the browser and the server share stops it first",
+    galBlankAlt.status === 400 &&
+      galBlankAlt.payload?.error?.field === "altText" &&
+      /Describe the photo/.test(galBlankAlt.payload?.error?.message ?? ""),
+    JSON.stringify(galBlankAlt.payload).slice(0, 300),
+  );
+  check(
+    "and the database's own copy of that rule raises a code the screen already has words for",
+    (await dbQuery(
+      `select 1 from pg_proc where proname = 'gallery_check_metadata' and pg_get_functiondef(oid) like '%alt_text_required%'`,
+    )).length === 1,
+  );
+
+  const galRefusalCodes = ["PG001", "PG002", "PG003", "PG004", "PG005", "PG006", "PG007", "PG008", "PG009", "PG010", "PG011"];
+  check(
+    "every rule the gallery's SQL raises has a sentence and a field for the screen",
+    galRefusalCodes.every((code) => {
+      const copy = galRules.refusalFromDatabase({ message: `the database said ${code}`, code, details: "" });
+
+      return copy.kind === "refused" && Boolean(copy.field) && !/could not be saved/.test(copy.message);
+    }),
+    galRefusalCodes
+      .filter((code) => galRules.refusalFromDatabase({ message: "", code, details: "" }).kind !== "refused")
+      .join(", "),
+  );
+
+  const galLongTitle = await galPost(
+    { action: "save", item: { ...galSaveValues, title: "x".repeat(galWords.GALLERY_LIMITS.titleMax + 1) } },
+    galSessions.admin.cookie,
+  );
+  check(
+    "a title past the column's length is refused before it reaches the database",
+    galLongTitle.status === 400 && galLongTitle.payload?.error?.field === "title",
+    JSON.stringify(galLongTitle.payload).slice(0, 200),
+  );
+
+  const galUnknownSave = await galPost(
+    { action: "save", item: { ...galSaveValues, id: crypto.randomUUID() } },
+    galSessions.admin.cookie,
+  );
+  check(
+    "editing a photograph that is no longer there says so",
+    galUnknownSave.status === 409 && galUnknownSave.payload?.error?.field === "id",
+    JSON.stringify(galUnknownSave.payload).slice(0, 200),
+  );
+
+  const galUnknownAction = await galPost({ action: "publish", id: galFirst?.id }, galSessions.admin.cookie);
+  check(
+    "an action the endpoint does not implement is refused rather than guessed at",
+    galUnknownAction.status === 400,
+    `${galUnknownAction.status}`,
+  );
+  check("and a body that is not JSON is refused too", (await galPost("action=publish", galSessions.admin.cookie)).status === 400);
+
+  // ---- publishing moves the file --------------------------------------------------
+  const galPublished = await galPost(
+    { action: "status", id: galFirst?.id, status: "published" },
+    galSessions.admin.cookie,
+  );
+  check(
+    "publishing records the row's status and moves both files out of the inbox",
+    galPublished.status === 200 &&
+      galPublished.payload?.data?.status === "published" &&
+      galPublished.payload?.data?.moved === true &&
+      !galInboxKeys().some((key) => key.includes(String(galFirst?.id))) &&
+      galPublicKeys().filter((key) => key.includes(String(galFirst?.id))).length === 2,
+    `${galPublished.status} ${JSON.stringify(galPublished.payload).slice(0, 200)} — ${galObjects().join(", ")}`,
+  );
+
+  const galLiveUrl = galPaths.publicGalleryUrl(galFirst?.storagePath);
+  const galLiveFetch = await fetch(galLiveUrl);
+  const galLiveBytes = Buffer.from(await galLiveFetch.arrayBuffer());
+  check(
+    "and the published photograph is now served from its public address",
+    galLiveFetch.status === 200 &&
+      galLiveFetch.headers.get("content-type") === "image/webp" &&
+      galIsWebp(galLiveBytes),
+    `${galLiveFetch.status} ${galLiveUrl}`,
+  );
+
+  const galPublicNow = await gallery.listPublishedGallery(EVENT_ID);
+  const galPublicItem = galPublicNow.ok ? galPublicNow.data.find((item) => item.id === galFirst?.id) : undefined;
+  check(
+    "the public gallery query returns it, with the thumbnail the grid loads first",
+    galPublicNow.ok &&
+      Boolean(galPublicItem) &&
+      galPublicItem?.src === galLiveUrl &&
+      galPublicItem?.thumbnailSrc === galPaths.publicGalleryUrl(galFirst?.thumbnailPath) &&
+      galPublicItem?.caption === "The circle opens",
+    JSON.stringify(galPublicItem ?? galPublicNow).slice(0, 300),
+  );
+
+  const galUnpublished = await galPost({ action: "status", id: galFirst?.id, status: "draft" }, galSessions.admin.cookie);
+  const galPublicAfterUnpublish = await gallery.listPublishedGallery(EVENT_ID);
+  const galDraftFetchAfterUnpublish = await fetch(galLiveUrl);
+  check(
+    "unpublishing moves the files back and takes the photograph off the site",
+    galUnpublished.status === 200 &&
+      galUnpublished.payload?.data?.moved === true &&
+      galPublicAfterUnpublish.ok &&
+      !galPublicAfterUnpublish.data.some((item) => item.id === galFirst?.id) &&
+      galDraftFetchAfterUnpublish.status === 400 &&
+      galInboxKeys().filter((key) => key.includes(String(galFirst?.id))).length === 2,
+    `${galUnpublished.status} public=${galDraftFetchAfterUnpublish.status} — ${galObjects().join(", ")}`,
+  );
+
+  const galArchived = await galPost({ action: "status", id: galFirst?.id, status: "archived" }, galSessions.admin.cookie);
+  const galPublicAfterArchive = await gallery.listPublishedGallery(EVENT_ID);
+  check(
+    "archiving is a third state, not a delete — it is off the site and still in the list",
+    galArchived.status === 200 &&
+      galArchived.payload?.data?.status === "archived" &&
+      galPublicAfterArchive.ok &&
+      !galPublicAfterArchive.data.some((item) => item.id === galFirst?.id) &&
+      (await dbQuery(`select status from public.gallery where id = $1`, [galFirst?.id]))[0].status === "archived",
+    `${galArchived.status}`,
+  );
+
+  const galBadStatus = await galPost({ action: "status", id: galFirst?.id, status: "hidden" }, galSessions.admin.cookie);
+  check(
+    "a status the database does not have is refused",
+    galBadStatus.status === 400,
+    JSON.stringify(galBadStatus.payload).slice(0, 200),
+  );
+
+  // ---- the running order ----------------------------------------------------------
+  const galOrderBefore = await galOrder();
+  check(
+    "the running order is the sort order, then the newest inside a tie",
+    galOrderBefore[0] === galBig?.id &&
+      galOrderBefore[1] === galSecond?.id &&
+      galOrderBefore.indexOf(galFirst?.id) === galOrderBefore.length - 1 &&
+      galOrderBefore.filter((id) => [galFirst?.id, galSecond?.id, galBig?.id].includes(id)).length === 3,
+    galOrderBefore.join(", "),
+  );
+
+  const galMoveUp = await galPost({ action: "move", id: galSecond?.id, direction: "up" }, galSessions.admin.cookie);
+  const galOrderAfterMove = await galOrder();
+  check(
+    "moving a photograph up renumbers the list and says it moved",
+    galMoveUp.status === 200 &&
+      galMoveUp.payload?.data?.moved === true &&
+      galOrderAfterMove.indexOf(galSecond?.id) === galOrderBefore.indexOf(galSecond?.id) - 1,
+    `${JSON.stringify(galMoveUp.payload)} — ${galOrderAfterMove.join(", ")}`,
+  );
+
+  const galMoveTop = await galPost({ action: "move", id: galSecond?.id, direction: "up" }, galSessions.admin.cookie);
+  check(
+    "a photograph already at the top is left where it is",
+    galMoveTop.status === 200 && galMoveTop.payload?.data?.moved === false,
+    JSON.stringify(galMoveTop.payload),
+  );
+
+  const galMoveDown = await galPost({ action: "move", id: galSecond?.id, direction: "down" }, galSessions.admin.cookie);
+  check(
+    "and moving it down puts it back behind its neighbour",
+    galMoveDown.status === 200 &&
+      galMoveDown.payload?.data?.moved === true &&
+      (await galOrder()).indexOf(galSecond?.id) === 1,
+    JSON.stringify(galMoveDown.payload),
+  );
+
+  const galBadDirection = await galPost({ action: "move", id: galBig?.id, direction: "sideways" }, galSessions.admin.cookie);
+  check(
+    "a direction that is not up or down is refused with the field to fix",
+    galBadDirection.status === 400 && galBadDirection.payload?.error?.field === "order",
+    JSON.stringify(galBadDirection.payload).slice(0, 200),
+  );
+
+  const galMoveUnknown = await galPost(
+    { action: "move", id: crypto.randomUUID(), direction: "up" },
+    galSessions.admin.cookie,
+  );
+  check(
+    "moving a photograph that is gone says so",
+    galMoveUnknown.status === 409 && galMoveUnknown.payload?.error?.field === "id",
+    JSON.stringify(galMoveUnknown.payload).slice(0, 200),
+  );
+
+  // ---- deleting ------------------------------------------------------------------
+  await galPost({ action: "status", id: galFirst?.id, status: "published" }, galSessions.admin.cookie);
+  const galBeforeDelete = galObjects().length;
+  const galDelete = await galPost({ action: "delete", id: galFirst?.id }, galSessions.admin.cookie);
+  check(
+    "deleting removes the row and both files it named",
+    galDelete.status === 200 &&
+      galDelete.payload?.data?.filesDeleted === 2 &&
+      (await dbQuery(`select count(*)::int as n from public.gallery where id = $1`, [galFirst?.id]))[0].n === 0 &&
+      galObjects().length === galBeforeDelete - 2 &&
+      (await fetch(galLiveUrl)).status === 400,
+    `${galDelete.status} ${JSON.stringify(galDelete.payload)} — ${galObjects().join(", ")}`,
+  );
+
+  const galDeleteAgain = await galPost({ action: "delete", id: galFirst?.id }, galSessions.admin.cookie);
+  check(
+    "deleting it twice answers \"that photograph is no longer in the gallery\"",
+    galDeleteAgain.status === 409 &&
+      galDeleteAgain.payload?.error?.code === "PG006" &&
+      /no longer in the gallery/.test(galDeleteAgain.payload?.error?.message ?? ""),
+    JSON.stringify(galDeleteAgain.payload).slice(0, 200),
+  );
+
+  const galDeleteSecond = await galPost({ action: "delete", id: galSecond?.id }, galSessions.admin.cookie);
+  const galDeleteBig = await galPost({ action: "delete", id: galBig?.id }, galSessions.admin.cookie);
+  check(
+    "the rest of this section's photographs are removed too, leaving storage as it was found",
+    galDeleteSecond.payload?.data?.filesDeleted === 2 && galDeleteBig.payload?.data?.filesDeleted === 2 && galObjects().length === 0,
+    galObjects().join(", "),
+  );
+  check(
+    "and the gallery rows the run started with are untouched",
+    (await dbQuery(`select count(*)::int as n from public.gallery where event_id = $1`, [EVENT_ID]))[0].n === 3,
+  );
+
+  // ---- the public page ------------------------------------------------------------
+  const galPublicPageRaw = await fetchPage("/gallery");
+  const galPublicPageText = visibleText(galPublicPageRaw);
+  const galPublicPageHtml = stripScripts(galPublicPageRaw);
+  check(
+    "the public gallery renders the published photographs and their albums",
+    galPublicPageText.includes("Garba circle at full spin") &&
+      galPublicPageText.includes("Stage and LED wall") &&
+      galPublicPageText.includes("Night 1"),
+  );
+  check(
+    "the draft the run started with is not on it, in words or in markup",
+    !galPublicPageText.includes("must never") && !galPublicPageHtml.includes("draft.jpg"),
+  );
+  check(
+    "the grid is responsive and every offscreen tile is lazy-loaded",
+    galPublicPageHtml.includes("loading=\"lazy\"") &&
+      galPublicPageHtml.includes("grid-cols-2") &&
+      galPublicPageHtml.includes("lg:grid-cols-4"),
+  );
+  check(
+    "and every tile is a button that names what it opens, so the lightbox is reachable by keyboard",
+    galPublicPageHtml.includes("larger view") && galPublicPageHtml.includes("Open “"),
   );
 
   // ---------------------------------------------------------------------------

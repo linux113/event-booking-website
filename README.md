@@ -22,8 +22,9 @@ fits within free tiers for development and small-scale launch.
 | 10 | Booking management — searchable, filterable list, one booking in full, CSV export, payment statuses that only the gateway can move | ✅ done |
 | 11 | Payments and passes — the gateway's own record, the rows that contradict themselves, and the door list with a CSV export | ✅ done |
 | 12 | Pass and date management — create and edit passes, prices, limits and age; add nights, set capacity, hold seats back, open and close booking | ✅ done |
-| 13 | Operations screens — publish events, gallery, settings | ⏳ next |
-| 14 | Hardening — rate limiting, analytics, perf budget | ⏳ |
+| 13 | Gallery management — upload to private storage, describe, order, publish into the public bucket, delete the files with the row | ✅ done |
+| 14 | Operations screens — publishing events, event settings | ⏳ next |
+| 15 | Hardening — rate limiting, analytics, perf budget | ⏳ |
 
 Step 3 is two halves of one job — the Supabase schema/RLS layer, then replacing every
 hard-coded value in the UI with database reads. Both are done and verified against real
@@ -62,7 +63,8 @@ signature — never by the browser saying so.
 | `/admin/passes/export` | The door list as a CSV file, with the same filters as the screen and up to 5,000 rows in one download. Token-free: a pass is admitted by scanning it, not by reading it out |
 | `/admin/settings` | The event, venue and deployment values the public site reads. Admin and super admin |
 | `/admin/staff` | Who may sign in and with which role, plus how to add somebody. Super admin only |
-| `/gallery` | Published photos and videos from the `gallery` table, grouped by album |
+| `/admin/gallery` | Gallery management: upload photographs (resized to WebP on the server), write the caption and the alternative text, reorder them, publish/unpublish/archive, and delete one along with its stored files. Guarded by `gallery:view`; only `gallery:edit` roles are offered the controls |
+| `/gallery` | Published photos and videos from the `gallery` table, in a responsive grid with a keyboard-driven lightbox. Thumbnails lazy-load, drafts are not reachable at all |
 | `/contact` | Contact channels derived from the event row (WhatsApp, phone, email, map), venue block, support hours, FAQ |
 | `/events` | Published events from the database, each with its nights and passes |
 
@@ -501,6 +503,68 @@ an age restriction as `18+ only` on the pass card and in the wizard's pass step.
 closed night cannot be selected in the wizard, and the API refuses a booking on it with
 `this night is no longer open for booking` — the browser is never the thing that decides.
 
+## Gallery management (`/admin/gallery`, `/gallery`)
+
+The first step that owns *files* rather than rows. `/admin/gallery` uploads photographs,
+edits their words, orders them, publishes and unpublishes them, and deletes them;
+`/gallery` is what a visitor sees of it.
+
+**Two buckets, and the row's status decides which one holds the file.** An upload lands
+in `gallery-inbox`, which is private: no policy grants `anon` or `authenticated` any
+access to `storage.objects`, so an unpublished photograph is not merely unlisted — there
+is no address that serves it, and a URL that leaked would still return nothing.
+Publishing flips the row to `published` and *then* moves the object into `gallery`, the
+public bucket; unpublishing or archiving moves it back. The object key never changes —
+`<event id>/<item id>/full.webp` and `…/thumb.webp` are derived from the row — so a
+caption can be edited, a photo republished and a delete aimed without anything storing a
+URL that could drift from the file it points at. Nothing but the service-role key touches
+either bucket: the browser never holds a key that could put a file anywhere.
+
+**The database still owns the rules.** Nothing writes the `gallery` table directly. Every
+change goes through a `service_role` function — `admin_gallery_items`,
+`admin_add_gallery_item`, `admin_update_gallery_item`, `admin_move_gallery_item`,
+`admin_set_gallery_status`, `admin_delete_gallery_item` — which re-checks what it was
+given and raises `PG001`–`PG011` with the field in `detail`: alt text required, title /
+description / album inside their column limits, a storage key that is a relative path
+rather than a URL or a `..`, a status that exists, dimensions and byte size in range,
+and one row per object (partial unique indexes on both path columns, so a retried upload
+cannot become a second row for the same file). `src/lib/admin/catalogue.ts` carries a
+sentence and a field for every one of those codes, so a refusal arrives as "this field,
+here is what to do" instead of as a server error.
+
+**Uploads are optimised once, on the server.** sharp reads the real format from the bytes
+(the declared content type is not trusted), applies the EXIF orientation and drops the
+metadata — a guest's GPS coordinates never reach the public site — then writes two WebP
+files: the full image at most 2400 px on its long edge (quality 82) and a 640 px
+thumbnail (quality 74). Objects are cached for a year, because a key contains the item's
+id and a replaced file gets a new key rather than new bytes behind an old address.
+Anything smaller than 400 px on its short edge, larger than 8 MB, or not an image at all
+is refused per file with the reason, and in a batch the photographs that can be taken
+still land.
+
+**Order is renumbered, not dragged.** `admin_move_gallery_item(p_id, p_direction)` moves
+one photograph one place up or down and renumbers the whole event list inside one
+transaction, having locked the rows first, so two organisers moving photos at the same
+moment cannot leave two items claiming the same position. At either end it answers
+`moved = false` rather than shuffling the list for nothing.
+
+**Deleting takes the row first, then the files it named.** `admin_delete_gallery_item`
+returns `removed_paths`, and the service removes exactly those objects from the bucket the
+row's status pointed at. A file that cannot be deleted is logged, not raised: the public
+page is already correct and an orphaned object is a cleaning job, not a guest-facing
+problem.
+
+**The management screen never hands the browser a draft's address.** Thumbnails come
+through `GET /api/admin/gallery/preview?id=…&variant=thumb`, guarded by `gallery:view`,
+which reads the object with the service-role key; a signed URL would put a working address
+for an unpublished photograph into the page source. The *public* page loads published
+thumbnails straight from the `gallery` bucket — they are public, cacheable and
+CDN-friendly — into a responsive grid (two columns on a phone, four on a desktop) where
+every tile is a button with an `aria-label`, off-screen images are `loading="lazy"` with a
+`sizes` hint, and the lightbox takes focus, closes on `Escape`, steps with `←`/`→` and
+gives focus back to the tile that opened it. `/gallery` revalidates every five minutes, so
+publishing the night's photographs does not need a deploy.
+
 ## Gate check-in (`/admin/scanner`)
 
 The scanner is the only part of the site that *changes* a pass, so it is built around one
@@ -615,23 +679,25 @@ src/
 │   └── globals.css             # Tailwind entry + @theme design tokens
 ├── assets/images/              # Original generated artwork (no stock, no faces)
 ├── components/
-│   ├── admin/                  # admin header/nav, scanner panel, filters, tables, and the pass/date forms + panels
+│   ├── admin/                  # admin header/nav, scanner panel, filters, tables, the pass/date forms + panels, and the gallery uploader/cards
 │   ├── booking/                # checkout wizard: steps, pass choice, summary, confirmation panel
 │   ├── brand/logo.tsx          # Inline brand mark (no image request)
 │   ├── contact/contact-card.tsx
 │   ├── events/                 # pass-card, night-list, gallery-tile
+│   ├── gallery/                # gallery-grid.tsx: the public grid + keyboard lightbox
 │   ├── icons/index.tsx         # Original inline icon set (stroke-based, 24×24)
 │   ├── layout/                 # header, footer, mobile nav, page hero, WhatsApp button
 │   ├── sections/               # hero, feature strip, about, passes/gallery preview, CTA
 │   └── ui/                     # Button, Card, Badge, Container, Section, EmptyState, Skeleton, ErrorState
 ├── config/                     # env.ts (only reader of process.env), site.ts, contact.ts
 ├── lib/
-│   ├── admin/                  # verdict.ts, bookings.ts, operations.ts and catalogue.ts (list filters, paging, CSV vocabulary, form rules, refusal wording)
+│   ├── admin/                  # verdict.ts, bookings.ts, operations.ts, catalogue.ts and gallery.ts (list filters, paging, CSV vocabulary, form rules, refusal wording)
 │   ├── auth/                   # permissions.ts (roles + capabilities), guard.ts, staff.ts
 │   ├── booking/                # shared validation, idempotency keys (browser + server)
 │   ├── gate/                   # night.ts: which night the gate is working, in the venue's timezone
 │   ├── pass/                   # links, status, QR rendering (server) and QR decoding (browser)
-│   ├── services/               # events.ts, gallery.ts, bookings.ts, payments.ts, passes.ts, check-in.ts, admin.ts, admin-operations.ts, admin-catalogue.ts, result.ts
+│   ├── gallery/                # paths.ts (buckets, object keys, public URLs), images.ts (sharp: resize, re-encode, strip EXIF)
+│   ├── services/               # events.ts, gallery.ts, gallery-admin.ts, bookings.ts, payments.ts, passes.ts, check-in.ts, admin.ts, admin-operations.ts, admin-catalogue.ts, result.ts
 │   ├── event-copy.ts           # what the site says about a night or a pass (seats on sale, booking closed, age)
 │   ├── supabase/               # browser / server / admin clients + public.ts (memoised anon client)
 │   ├── payments/               # razorpay.ts (orders + signatures), mode.ts (test/live guard), checkout.ts (browser loader)
@@ -781,7 +847,9 @@ production. `src/config/env.ts` is the only module that reads `process.env`.
 - Replace demo contact numbers, email, address and the WhatsApp number
   (`siteConfig.contact.whatsappNumber`, international format, digits only).
 - Swap the placeholder artwork in `src/assets/images/` for real event photography
-  (gallery media already comes from Supabase Storage).
+  (gallery media already comes from Supabase Storage, in the `gallery` and
+  `gallery-inbox` buckets — see `supabase/README.md` if your deployment could not let
+  the migration create them).
 - Update the event, nights and prices in the database (or `supabase/seed.sql`) rather
   than in the frontend — the DB is now the source of truth.
 - Add `SUPABASE_SERVICE_ROLE_KEY` to the deployment environment: booking creation

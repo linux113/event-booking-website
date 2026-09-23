@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 
-import { GalleryTile } from "@/components/events/gallery-tile";
+import { GalleryGrid } from "@/components/gallery/gallery-grid";
 import { PageHero } from "@/components/layout/page-hero";
 import { CtaBand } from "@/components/sections/cta-band";
 import { Button } from "@/components/ui/button";
@@ -33,7 +33,6 @@ export default async function GalleryPage() {
   }
 
   const items = result.data;
-  const [feature, ...rest] = items;
   const albums = Array.from(new Set(items.map((item) => item.tag)));
 
   return (
@@ -89,15 +88,7 @@ export default async function GalleryPage() {
             </>
           ) : (
             <>
-              <div className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
-                {feature ? <GalleryTile item={feature} size="feature" priority /> : null}
-
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
-                  {rest.map((item) => (
-                    <GalleryTile key={item.id} item={item} />
-                  ))}
-                </div>
-              </div>
+              <GalleryGrid items={items} />
 
               <p className="text-muted/80 text-xs">
                 {items.length} {items.length === 1 ? "item" : "items"} published

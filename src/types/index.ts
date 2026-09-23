@@ -119,12 +119,21 @@ export type MediaType = "image" | "video";
 
 export interface GalleryItem {
   id: string;
+  /** The full image: the row's own URL, or the public object built from its key. */
   src: string;
+  /** The grid-sized version, when one was stored alongside the full image. */
   thumbnailSrc: string | null;
   alt: string;
   caption: string;
   tag: string;
   mediaType: MediaType;
+  /**
+   * Pixel size of the stored image, used to reserve space before it loads. Null for
+   * rows added before the gallery recorded dimensions, and for externally hosted
+   * media.
+   */
+  width: number | null;
+  height: number | null;
 }
 
 // -----------------------------------------------------------------------------

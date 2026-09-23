@@ -1,4 +1,5 @@
 import { siteConfig } from "@/config/site";
+import { publicGalleryUrl } from "@/lib/gallery/paths";
 import type {
   EventFeature,
   EventHighlight,
@@ -129,8 +130,21 @@ export function toEventFeature(row: EventFeatureRow): EventFeature {
  * without a signed URL, which needs the service role — so such rows are omitted
  * until the organiser supplies a public URL).
  */
+/**
+ * One gallery row, as the public site needs it.
+ *
+ * The URL is **derived, not stored**: an uploaded photograph's row holds the object
+ * key inside the gallery bucket, and the public address is that key under
+ * `/storage/v1/object/public/gallery/`. Only externally hosted media (a video on a
+ * CDN, a photo added straight from a URL) carries its own `url`, and that wins when
+ * it is set.
+ *
+ * A row with neither is dropped rather than rendered as a broken image — which is
+ * also what keeps a draft honest: a draft's file lives in the private bucket, so
+ * there is no public address for it even if somebody published the row by hand.
+ */
 export function toGalleryItem(row: GalleryRow): GalleryItem | null {
-  const src = row.url ?? null;
+  const src = row.url ?? publicGalleryUrl(row.storage_path);
 
   if (!src) {
     return null;
@@ -139,11 +153,13 @@ export function toGalleryItem(row: GalleryRow): GalleryItem | null {
   return {
     id: row.id,
     src,
-    thumbnailSrc: row.thumbnail_url,
+    thumbnailSrc: row.thumbnail_url ?? publicGalleryUrl(row.thumbnail_path),
     alt: row.alt_text,
     caption: row.title ?? row.album ?? "Festival moment",
     tag: row.album ?? (row.media_type === "video" ? "Video" : "Photo"),
     mediaType: row.media_type as MediaType,
+    width: row.width ?? null,
+    height: row.height ?? null,
   };
 }
 

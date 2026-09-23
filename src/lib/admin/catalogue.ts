@@ -379,6 +379,28 @@ export const CATALOGUE_REFUSALS: Record<string, RefusalCopy> = {
   PC009: { field: "composition", message: "Say who the pass admits, e.g. \"2 Girls\"." },
   PC010: { field: "name", message: "There is no event to attach a pass to yet." },
   PC011: { field: "sortOrder", message: "Order is a whole number from 0 to 9999." },
+
+  // --- gallery ------------------------------------------------------------------
+  PG001: {
+    field: "altText",
+    message: "Describe the picture in words — guests who cannot see it read this, so it is required.",
+  },
+  PG002: { field: "title", message: "That title is too long for the gallery." },
+  PG003: { field: "description", message: "That description is too long — keep it to a short caption." },
+  PG004: { field: "album", message: "That album name is too long." },
+  PG005: {
+    field: "image",
+    message: "That file could not be stored — upload it again from the gallery screen.",
+  },
+  PG006: { field: "id", message: "That photo is no longer in the gallery — reload the page." },
+  PG007: { field: "sortOrder", message: "Order is a whole number from 0 to 9999." },
+  PG008: { field: "status", message: "Pick one of the three states: draft, published or archived." },
+  PG009: {
+    field: "image",
+    message: "That image is too small to use. Upload one at least 400 pixels on its short edge.",
+  },
+  PG010: { field: "image", message: "That file is too big. Images have to be 8 MB or smaller." },
+  PG011: { field: "image", message: "That image is already in the gallery — reload the page to see it." },
 };
 
 /**

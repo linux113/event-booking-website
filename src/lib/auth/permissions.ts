@@ -39,7 +39,10 @@ export type Permission =
   | "dates:view"
   /** Add and edit nights, set capacity, open and close booking. */
   | "dates:edit"
+  /** Open the gallery screen. */
   | "gallery:view"
+  /** Upload, publish, order and delete gallery items. */
+  | "gallery:edit"
   | "scanner:use"
   | "settings:view"
   | "staff:manage";
@@ -54,6 +57,7 @@ const PERMISSIONS_BY_ROLE: Record<StaffRole, readonly Permission[]> = {
     "dates:view",
     "dates:edit",
     "gallery:view",
+    "gallery:edit",
     "scanner:use",
     "settings:view",
     "staff:manage",
@@ -67,6 +71,7 @@ const PERMISSIONS_BY_ROLE: Record<StaffRole, readonly Permission[]> = {
     "dates:view",
     "dates:edit",
     "gallery:view",
+    "gallery:edit",
     "scanner:use",
     "settings:view",
   ],
@@ -146,7 +151,7 @@ export const ADMIN_SECTIONS: readonly AdminSection[] = [
     description: "Publish, hide and order the photos on the public gallery.",
     href: "/admin/gallery",
     permission: "gallery:view",
-    built: false,
+    built: true,
   },
   {
     key: "settings",

@@ -50,16 +50,22 @@ const ADMIN_HOME = "/admin";
 function permissionForPath(pathname: string): Permission | null {
   // The write endpoints of the management screens. They are named after the screen
   // they serve, plus the capability that is specific to changing something — so a
-  // role that may read a screen is not thereby allowed to post to it.
+  // role that may read a screen is not thereby allowed to post to it. The longest
+  // matching prefix wins, which is how the gallery's read-only preview sits under a
+  // write-only endpoint's URL without inheriting its permission.
   const API_PERMISSIONS: Record<string, Permission> = {
     "/api/admin/passes": "passes:edit",
     "/api/admin/dates": "dates:edit",
+    "/api/admin/gallery": "gallery:edit",
+    "/api/admin/gallery/preview": "gallery:view",
   };
 
-  for (const [prefix, permission] of Object.entries(API_PERMISSIONS)) {
-    if (pathname === prefix || pathname.startsWith(`${prefix}/`)) {
-      return permission;
-    }
+  const matches = Object.entries(API_PERMISSIONS)
+    .filter(([prefix]) => pathname === prefix || pathname.startsWith(`${prefix}/`))
+    .sort(([left], [right]) => right.length - left.length);
+
+  if (matches.length > 0) {
+    return matches[0][1];
   }
 
   const section = ADMIN_SECTIONS.find(
