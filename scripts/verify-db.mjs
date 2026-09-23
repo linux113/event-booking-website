@@ -556,9 +556,100 @@ async function main() {
 
   await run(`set request.jwt.claim.sub = '${scannerId}';`);
   check(
-    "staff can read bookings (gate duty)",
-    (await asRole("authenticated", `select count(*)::int as n from public.bookings;`))[0].n >= 2,
+    "staff cannot read bookings",
+    (await asRole("authenticated", `select count(*)::int as n from public.bookings;`))[0].n === 0,
   );
+  check(
+    "staff cannot read digital passes",
+    (await asRole("authenticated", `select count(*)::int as n from public.digital_passes;`))[0].n === 0,
+  );
+  check(
+    "staff cannot read admin_users",
+    (await asRole("authenticated", `select count(*)::int as n from public.admin_users;`))[0].n === 0,
+  );
+  check(
+    "staff can read the night's check-in log",
+    (await asRole("authenticated", `select count(*)::int as n from public.check_ins;`))[0].n >= 1,
+  );
+
+  // A gate scanner holds a real session on a phone, so the database must be the
+  // second lock: none of these writes may land, whoever is holding the phone. The
+  // attempt is allowed to throw (a refusal) — what is checked is the stored value
+  // afterwards, because "affected 0 rows" and "rejected" are different answers and
+  // only the second one means the row is safe.
+  async function staffWriteFails(label, sql, verifySql) {
+    await run(`set request.jwt.claim.sub = '${scannerId}';`);
+    let refused = false;
+
+    await run("set role authenticated;");
+    try {
+      await q(sql);
+    } catch {
+      refused = true;
+    } finally {
+      await run("reset role;");
+    }
+
+    const after = await q(verifySql);
+    check(label, after[0].v === true, `${refused ? "refused" : "statement ran"} → stored ${JSON.stringify(after[0].v)}`);
+  }
+
+  await run(`
+    update public.digital_passes
+       set checked_in = true, checked_in_at = now(), status = 'used'
+     where id = '${digitalPass.id}';
+  `);
+
+  await staffWriteFails(
+    "staff cannot mark a booking paid",
+    `update public.bookings set payment_status = 'paid' where id = '${booking.id}';`,
+    `select (payment_status = 'unpaid') as v from public.bookings where id = '${booking.id}';`,
+  );
+  await staffWriteFails(
+    "staff cannot cancel somebody's booking",
+    `update public.bookings set booking_status = 'cancelled' where id = '${booking.id}';`,
+    `select (booking_status = 'pending') as v from public.bookings where id = '${booking.id}';`,
+  );
+  await staffWriteFails(
+    "staff cannot reset a used pass",
+    `update public.digital_passes set checked_in = false, checked_in_at = null, status = 'active' where id = '${digitalPass.id}';`,
+    `select (checked_in and status = 'used') as v from public.digital_passes where id = '${digitalPass.id}';`,
+  );
+  await staffWriteFails(
+    "staff cannot move a pass to another night",
+    `update public.digital_passes set valid_date = '2026-10-19' where id = '${digitalPass.id}';`,
+    `select (valid_date = '2026-10-11') as v from public.digital_passes where id = '${digitalPass.id}';`,
+  );
+  await staffWriteFails(
+    "staff cannot forge a check-in",
+    `insert into public.check_ins (digital_pass_id, event_date_id, gate) values ('${digitalPass.id}', '${NIGHT_1}', 'forged');`,
+    `select (count(*) = 0) as v from public.check_ins where digital_pass_id = '${digitalPass.id}' and gate = 'forged';`,
+  );
+  await staffWriteFails(
+    "staff cannot promote themselves",
+    `update public.admin_users set role = 'super_admin' where user_id = '${scannerId}';`,
+    `select (role = 'staff') as v from public.admin_users where user_id = '${scannerId}';`,
+  );
+
+  // The same writes must still be available to an admin, so this is a role split
+  // rather than a lock-out.
+  await run(`set request.jwt.claim.sub = '${ownerId}';`);
+  const adminTouch = await (async () => {
+    await run("set role authenticated;");
+    try {
+      await q(`update public.bookings set notes = 'admin touch' where id = '${booking.id}';`);
+      return (await q(`select notes from public.bookings where id = '${booking.id}';`))[0].notes;
+    } catch (error) {
+      return `refused: ${error.message}`;
+    } finally {
+      await run("reset role;");
+    }
+  })();
+  check("an admin can still update a booking", adminTouch === "admin touch", String(adminTouch));
+
+  // Back to the scanner for the next check: the event edit below must be attempted
+  // as the gate role, not as the admin we just used.
+  await run(`set request.jwt.claim.sub = '${scannerId}';`);
 
   const scannerEdit = await (async () => {
     await run("set role authenticated;");

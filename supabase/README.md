@@ -20,7 +20,8 @@ supabase/
 │   ├── 20260922091100_admin_payments_and_passes.sql # gateway delivery log, attention list, door list
 │   ├── 20260922091200_admin_pass_and_date_management.sql  # pass catalogue + night/capacity writers
 │   ├── 20260922091300_gallery_management.sql     # the two storage buckets, gallery columns + writers
-│   └── 20260922091400_contact_and_social_links.sql  # the event's contact block, social links and support hours
+│   ├── 20260922091400_contact_and_social_links.sql  # the event's contact block, social links and support hours
+│   └── 20260922091500_security_hardening.sql      # RLS for the gate role: staff may read the log, not change state
 └── seed.sql                                      # event, 9 nights, 5 passes, features, highlights
 ```
 
@@ -278,6 +279,20 @@ word on what they mean:
   check against `admin_users` does not recurse through that table's own policies, and
   all three ship with `execute` granted to `anon`, `authenticated` and `service_role`.
 - **Only a super admin may write `admin_users`** (`admin_users_super_admin_manage`).
+- **A `staff` session reads the check-in log and nothing else.** `bookings` and
+  `digital_passes` are readable and writable by `admin`/`super_admin` only
+  (`20260922091500_security_hardening.sql`). Before that migration the staff policies
+  used `is_staff()` for *reads and writes* of both tables, which meant a scanner's own
+  session could mark a booking paid, cancel a booking, reset a used pass
+  (`checked_in = false, status = 'active'`) so the same QR code was admitted twice, move
+  a pass to another night, or read every guest's mobile number and every pass's
+  `qr_token`. Nothing in the app ever did any of that — the gate and the admin screens
+  call `SECURITY DEFINER` functions with the service role after checking the role on the
+  server, and no code reads those tables with a user session — so narrowing the
+  policies removed a privilege without removing a feature. `check_ins` keeps a staff
+  `SELECT` (the night's entry log: pass ids, gate, timestamp) and its `INSERT` is
+  admin-only, because the row is written by `check_in_pass()` in the same transaction
+  that flips the pass.
   There is no policy that lets an admin change their own row, which is what makes
   "an admin cannot promote themselves" a database fact rather than a UI convention.
 - **`current_staff_role()`** returns the caller's own role — one word, never a row, and

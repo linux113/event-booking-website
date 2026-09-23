@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { getSupabasePublicEnv, isSupabaseConfigured } from "@/config/env";
 import { ADMIN_SECTIONS, can, isStaffRole, type Permission, type StaffRole } from "@/lib/auth/permissions";
+import { SESSION_COOKIE_OPTIONS } from "@/lib/supabase/cookies";
 import type { Database } from "@/types/database";
 
 /**
@@ -99,6 +100,9 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
   const { url, anonKey } = getSupabasePublicEnv();
 
   const supabase = createServerClient<Database>(url, anonKey, {
+    // The same options the server client uses, so a cookie refreshed here and one
+    // refreshed in a Server Component are the same cookie — attributes included.
+    cookieOptions: SESSION_COOKIE_OPTIONS,
     cookies: {
       getAll() {
         return request.cookies.getAll();

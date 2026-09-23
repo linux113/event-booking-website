@@ -88,6 +88,8 @@ export type BookingFailureKind =
   | "not-configured"
   /** Razorpay is not configured, or a live key was blocked. */
   | "gateway-unavailable"
+  /** Too many attempts from one address in the window. Wait, then try again. */
+  | "rate-limited"
   /** Anything unexpected. */
   | "server-error";
 

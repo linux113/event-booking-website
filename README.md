@@ -89,8 +89,8 @@ runs — each route renders a "Database not connected" state instead of event da
 | `npm run start`     | Serve the production build                                         |
 | `npm run lint`      | ESLint (Next core-web-vitals + TypeScript rules)                   |
 | `npm run typecheck` | `next typegen && tsc --noEmit` (route types must exist first)      |
-| `npm run db:verify` | Run the migrations + seed against PostgreSQL (WASM) and assert schema, constraints and RLS |
-| `npm run verify:web` | End-to-end check against a real database: boots PostgreSQL, serves it over a PostgREST-compatible shim, calls the real services, then builds and serves the real pages and exercises the whole booking, **payment** and **gate** flow — validation, capacity, pricing, duplicate submissions, order creation, signature verification, webhooks, refunds, refresh-safe status and the live-key guard, then signs in as staff, an admin and a super admin, proves each role reaches exactly what it should and nothing else, scans a pass, admits it once, races two check-ins against the same code and refuses every kind of bad pass, searches and filters the booking list, the delivery log and the door list, opens one booking in full and downloads each of two CSV exports — payments run against a local stub gateway and staff sign-in against a local Auth double, so no credentials are needed |
+| `npm run db:verify` | Run the migrations + seed against PostgreSQL (WASM) and assert schema, constraints and RLS — including what each role may change, and what a gate scanner's session cannot |
+| `npm run verify:web` | End-to-end check against a real database: boots PostgreSQL, serves it over a PostgREST-compatible shim, calls the real services, then builds and serves the real pages and exercises the whole booking, **payment** and **gate** flow — validation, capacity, pricing, duplicate submissions, order creation, signature verification, webhooks, refunds, refresh-safe status and the live-key guard, then signs in as staff, an admin and a super admin, proves each role reaches exactly what it should and nothing else, scans a pass, admits it once, races two check-ins against the same code and refuses every kind of bad pass, searches and filters the booking list, the delivery log and the door list, opens one booking in full and downloads each of two CSV exports, checks the rate limiter, the session-cookie attributes and the response headers, and uploads/orders/publishes/deletes gallery files against a local storage double — payments run against a local stub gateway and staff sign-in against a local Auth double, so no credentials are needed |
 | `npm run check`     | typecheck → lint → build, in one command                           |
 
 ## Booking flow
@@ -793,10 +793,10 @@ for the full table reference, roles and setup steps.
 | `pass_categories` | Pass types + prices + age restriction, per event | ✅ every row of a published event — `is_active` gates the sale, not the visibility |
 | `event_highlights` | "What to expect" bullets per event | ✅ rows of a published event |
 | `event_features` | Production inclusions (anchor, DJ, drone…) | ✅ rows of a published event |
-| `bookings` | One booking = pass category × night, plus its Razorpay ids and a random `public_token` | ❌ staff only |
-| `payment_events` | One row per Razorpay webhook delivery — the duplicate guard | ❌ staff only |
-| `digital_passes` | QR passes issued after payment | ❌ staff only |
-| `check_ins` | Gate scan log (one row per pass, ever) | ❌ staff only |
+| `bookings` | One booking = pass category × night, plus its Razorpay ids and a random `public_token` | ❌ admin only (a `staff` session gets a limited lookup through a service-role function) |
+| `payment_events` | One row per Razorpay webhook delivery — the duplicate guard | ❌ service role only (no grant to any session role) |
+| `digital_passes` | QR passes issued after payment | ❌ admin only (the row carries the `qr_token` that admits its holder) |
+| `check_ins` | Gate scan log (one row per pass, ever) | ❌ `staff` may read the night's log; writing one is admin-gated and the gate writes it as the service role |
 | `gallery` | Photo/video metadata (files in Storage) | ✅ published only |
 | `admin_users` | Auth users allow-listed as staff: `super_admin` / `admin` / `staff` | ❌ super admins only |
 
@@ -843,6 +843,58 @@ neither fabricate a booking nor read anyone else's.
 ```bash
 npm run db:verify   # applies migrations + seed to PostgreSQL and asserts all of the above
 ```
+
+## Security
+
+Nobody has to be trusted for the site to be safe: there are four layers, and each one
+assumes the layer above may be wrong.
+
+| Layer | Where | What it settles |
+| ----- | ----- | --------------- |
+| Request | `src/proxy.ts` | An admin page or admin API is answered with a real `307`/`403` *before* the response starts, using the caller's role from `current_staff_role()` — a redirect issued mid-stream cannot change a status code, so the decision is made here |
+| Page / route | `src/lib/auth/guard.ts`, every `src/app/api/**/route.ts` | Each page re-checks the permission it needs; each route re-checks `getStaffMember()` and `can(role, capability)` before it reads a body |
+| Row | `supabase/migrations/*rls_policies*.sql`, `…_security_hardening.sql` | What a session may read or change, per role: `anon` sees published rows only, a `staff` session reads the check-in log, and `bookings`/`digital_passes` belong to `admin`/`super_admin` |
+| Data | `SECURITY DEFINER` functions | Prices, capacity, pass state, admission and payment confirmation are decided inside Postgres, in one transaction under a row lock — never in the browser, never in Node |
+
+**Secrets.** `SUPABASE_SERVICE_ROLE_KEY`, `RAZORPAY_KEY_SECRET` and
+`RAZORPAY_WEBHOOK_SECRET` are read only in `server-only` modules
+(`src/lib/supabase/admin.ts`, `src/lib/payments/razorpay.ts`): importing one from a client
+component fails the build. No `NEXT_PUBLIC_` variable holds a secret — the two public ones
+are the anon key (RLS-protected by definition) and the Razorpay key **id**, which Checkout
+needs in the browser anyway. `src/config/env.ts` is the only module that reads
+`process.env`, `.env*` is git-ignored apart from `.env.example`, and `.env.example` ships
+empty placeholders — never a credential.
+
+**Money.** A payment is confirmed in exactly one place: `confirm_booking_payment()`, called
+by `/api/payment/verify` after an HMAC check of the Checkout signature, or by
+`/api/payment/webhook` after an HMAC check of the raw body (time-constant comparison, before
+any parsing). The amount comes from the booking row, so a client cannot send one. Each
+webhook delivery is deduplicated on `event_id` (`payment_events`), each booking on
+`idempotency_key`, and each pass has a unique id and a 64-hex-character QR token that is
+never rendered into an admin list. Live keys are refused unless `RAZORPAY_ALLOW_LIVE=true`.
+
+**Uploads.** A gallery file is decoded, resized and re-encoded with `sharp` before anything
+is written — a file that is not an image is refused, and EXIF/ICC metadata never reaches
+Storage. Object keys are built from ids the server generates, drafts live in a private
+bucket, and the public bucket holds published objects only. The request is refused on its
+`content-length` before the body is buffered, and each file is capped at 8 MB.
+
+**Abuse.** The two public write endpoints (`/api/bookings`, `/api/payment/create-order`) sit
+behind a small fixed-window limiter (`src/lib/rate-limit.ts`). It is deliberately modest:
+one process, one address at a time, best-effort. What actually protects the database is
+that capacity counts **paid** bookings, that a repeated submission collapses onto one row,
+and that a payment is only believed when a signature verifies. Supabase Auth rate-limits
+sign-in attempts.
+
+**Browser.** The session cookie is `HttpOnly` + `SameSite=Lax`
+(`src/lib/supabase/cookies.ts`). Every response carries `X-Content-Type-Options: nosniff`
+and a referrer policy that keeps a pass URL out of another site's logs, and the staff area
+cannot be framed (`X-Frame-Options: DENY` + `frame-ancestors 'none'`) while the public site
+stays embeddable. There is no `dangerouslySetInnerHTML` in the app, and the one place that
+builds markup by hand — the downloadable pass SVG — escapes every value it interpolates.
+
+The database half of this is spelled out in
+[supabase/README.md](./supabase/README.md#roles-and-authorisation).
 
 ## Environment variables
 

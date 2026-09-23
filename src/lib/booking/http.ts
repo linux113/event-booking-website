@@ -14,6 +14,7 @@ import type { BookingApiError } from "@/types/booking";
  *   409 already-paid         there is nothing left to collect for this booking
  *   503 not-configured       no database credentials on the server
  *   503 gateway-unavailable  Razorpay is not configured (or a live key was blocked)
+ *   429 rate-limited         too many attempts from one address (see lib/rate-limit)
  *   500 server-error         anything unexpected
  */
 const STATUS_BY_KIND: Record<BookingApiError["kind"], number> = {
@@ -23,6 +24,7 @@ const STATUS_BY_KIND: Record<BookingApiError["kind"], number> = {
   "already-paid": 409,
   "not-configured": 503,
   "gateway-unavailable": 503,
+  "rate-limited": 429,
   "server-error": 500,
 };
 
@@ -31,9 +33,9 @@ export function statusForBookingError(kind: BookingApiError["kind"]): number {
 }
 
 /** Never cached: every one of these responses depends on live booking state. */
-export function noStoreJson<T>(body: T, status: number): NextResponse<T> {
+export function noStoreJson<T>(body: T, status: number, headers: Record<string, string> = {}): NextResponse<T> {
   return NextResponse.json(body, {
     status,
-    headers: { "cache-control": "no-store" },
+    headers: { "cache-control": "no-store", ...headers },
   });
 }

@@ -6856,6 +6856,179 @@ async function main() {
       "919000000000",
   );
 
+  // ---------------------------------------------------------------------------
+  section("Rate limiting: the window, the key, and the two endpoints that use it");
+  // ---------------------------------------------------------------------------
+  // `src/lib/rate-limit.ts` is a Map in one process, and this section does not
+  // pretend otherwise. What is checked is the arithmetic (a window that counts and
+  // then resets), the key (the caller's address, never an identity), the bound that
+  // stops a spoofed flotilla of addresses from growing the table without end, and
+  // that the two public write endpoints actually stand behind it. The HTTP half is
+  // exercised by the sections above: every booking and order this run created went
+  // through these limiters and none of them was refused.
+
+  const rlModule = await import("../src/lib/rate-limit.ts");
+  let rlNow = 1_000_000;
+
+  const rlLimiter = rlModule.createRateLimiter({ limit: 3, windowMs: 60_000, now: () => rlNow });
+  const rlFirst = rlLimiter.check("a");
+  const rlSecond = rlLimiter.check("a");
+  const rlThird = rlLimiter.check("a");
+  const rlFourth = rlLimiter.check("a");
+
+  check(
+    "three attempts are allowed, and the remaining count goes down",
+    rlFirst.allowed && rlFirst.remaining === 2 && rlSecond.remaining === 1 && rlThird.remaining === 0,
+    `${rlFirst.remaining} / ${rlSecond.remaining} / ${rlThird.remaining}`,
+  );
+
+  check(
+    "the next one is refused, with the seconds to wait for the window to reset",
+    rlFourth.allowed === false && rlFourth.remaining === 0 && rlFourth.retryAfterSeconds === 60,
+    JSON.stringify(rlFourth),
+  );
+
+  check(
+    "another address is counted separately",
+    rlLimiter.check("b").allowed === true && rlLimiter.check("b").remaining === 1,
+  );
+
+  rlNow += 60_000;
+  const rlAfterWindow = rlLimiter.check("a");
+  check(
+    "once the window is over the address is welcome again",
+    rlAfterWindow.allowed === true && rlAfterWindow.remaining === 2,
+    JSON.stringify(rlAfterWindow),
+  );
+
+  const rlBounded = rlModule.createRateLimiter({ limit: 2, windowMs: 60_000, now: () => rlNow, maxKeys: 3 });
+
+  for (const key of ["k1", "k2", "k3", "k4", "k5", "k6"]) {
+    rlBounded.check(key);
+  }
+
+  check(
+    "the table of open windows is bounded, whatever keys arrive",
+    rlBounded.size <= 3,
+    `${rlBounded.size} windows for 6 keys`,
+  );
+
+  check(
+    "the client key is the first forwarded address, is truncated, and never an identity",
+    rlModule.clientKeyFrom(new Headers({ "x-forwarded-for": "203.0.113.9, 10.0.0.1" })) === "203.0.113.9" &&
+      rlModule.clientKeyFrom(new Headers({ "x-real-ip": "198.51.100.4" })) === "198.51.100.4" &&
+      rlModule.clientKeyFrom(new Headers()) === "unknown" &&
+      rlModule.clientKeyFrom(new Headers({ "x-forwarded-for": "x".repeat(500) })).length === 64,
+  );
+
+  const rlBookingRoute = readFileSync(join(REPO_ROOT, "src", "app", "api", "bookings", "route.ts"), "utf8");
+  const rlOrderRoute = readFileSync(
+    join(REPO_ROOT, "src", "app", "api", "payment", "create-order", "route.ts"),
+    "utf8",
+  );
+
+  check(
+    "the booking endpoint limits before it reads the body, and answers 429 with Retry-After",
+    rlBookingRoute.indexOf("bookingLimiter.check(clientKeyFrom(request.headers))") !== -1 &&
+      rlBookingRoute.indexOf("bookingLimiter.check") < rlBookingRoute.indexOf("request.text()") &&
+      rlBookingRoute.includes('"rate-limited"') &&
+      /"retry-after": String\(limit\.retryAfterSeconds\)/.test(rlBookingRoute),
+  );
+
+  check(
+    "so does the endpoint that creates the pending booking and the Razorpay order",
+    rlOrderRoute.indexOf("paymentOrderLimiter.check(clientKeyFrom(request.headers))") !== -1 &&
+      rlOrderRoute.indexOf("paymentOrderLimiter.check") < rlOrderRoute.indexOf("request.text()") &&
+      rlOrderRoute.includes('"rate-limited"') &&
+      /"retry-after": String\(limit\.retryAfterSeconds\)/.test(rlOrderRoute),
+  );
+
+  const rlGalleryRoute = readFileSync(
+    join(REPO_ROOT, "src", "app", "api", "admin", "gallery", "route.ts"),
+    "utf8",
+  );
+
+  check(
+    "the gallery upload refuses an oversized request before buffering the whole body",
+    /MAX_UPLOAD_REQUEST_BYTES/.test(rlGalleryRoute) &&
+      // The `await` matters: the prose in that file mentions `request.formData()`
+      // too, and the check is about where the code reads it.
+      rlGalleryRoute.indexOf('headers.get("content-length")') <
+        rlGalleryRoute.indexOf("await request.formData()"),
+    "content-length is read before the body is buffered",
+  );
+
+  // ---------------------------------------------------------------------------
+  section("Session cookies and response headers");
+  // ---------------------------------------------------------------------------
+  // The session cookie is the one credential a browser holds, so the attributes it
+  // is written with are checked here the same way the app writes them: through the
+  // library, with the app's own options object. (The harness signs in with its own
+  // cookie jar, which is why this is the place to check it.)
+
+  const vsecCookies = await import("../src/lib/supabase/cookies.ts");
+  const vsecJar = [];
+  const vsecClient = createServerClient(shim.url, "test-anon-key", {
+    cookieOptions: vsecCookies.SESSION_COOKIE_OPTIONS,
+    cookies: {
+      getAll: () => vsecJar.map(({ name, value }) => ({ name, value })),
+      setAll: (cookies) => {
+        for (const cookie of cookies) {
+          vsecJar.push(cookie);
+        }
+      },
+    },
+  });
+
+  const vsecSignIn = await vsecClient.auth.signInWithPassword({
+    email: "scanner@example.com",
+    password: STAFF_PASSWORD,
+  });
+
+  const vsecSessionCookies = vsecJar.filter((cookie) => cookie.options?.httpOnly !== undefined);
+
+  check(
+    "the session cookie is written HttpOnly, so a script on the page cannot read it",
+    vsecSignIn.error === null &&
+      vsecSessionCookies.length > 0 &&
+      vsecSessionCookies.every((cookie) => cookie.options.httpOnly === true),
+    `${vsecSignIn.error?.message ?? "signed in"} / ${JSON.stringify(
+      vsecJar.map((cookie) => ({ name: cookie.name, options: cookie.options })),
+    ).slice(0, 200)}`,
+  );
+
+  check(
+    "and it stays same-site and path-wide, so the browser sends it and a cross-site form cannot",
+    vsecSessionCookies.length > 0 &&
+      vsecSessionCookies.every((cookie) => cookie.options.sameSite === "lax" && cookie.options.path === "/"),
+  );
+
+  const vsecServerSource = readFileSync(join(REPO_ROOT, "src", "lib", "supabase", "server.ts"), "utf8");
+  const vsecProxySource = readFileSync(join(REPO_ROOT, "src", "proxy.ts"), "utf8");
+
+  check(
+    "both server clients use that one options object, so a refreshed cookie is the same cookie",
+    /cookieOptions: SESSION_COOKIE_OPTIONS/.test(vsecServerSource) &&
+      /cookieOptions: SESSION_COOKIE_OPTIONS/.test(vsecProxySource),
+  );
+
+  const vsecConfig = readFileSync(join(REPO_ROOT, "next.config.ts"), "utf8");
+
+  check(
+    "every response is nosniff, hides the referrer cross-origin, and grants the camera to this site only",
+    /"x-content-type-options",\s*value: "nosniff"/.test(vsecConfig) &&
+      /"referrer-policy",\s*value: "strict-origin-when-cross-origin"/.test(vsecConfig) &&
+      /"permissions-policy",\s*value: "camera=\(self\), microphone=\(\), geolocation=\(\)"/.test(vsecConfig),
+    "headers() present",
+  );
+
+  check(
+    "the staff area cannot be framed, while the public site stays embeddable",
+    /source: "\/admin\/:path\*"/.test(vsecConfig) &&
+      /x-frame-options/.test(vsecConfig) &&
+      /frame-ancestors 'none'/.test(vsecConfig),
+  );
+
   section("Result");
   // ---------------------------------------------------------------------------
   console.log(`\n  ${passed} passed, ${failures.length} failed\n`);

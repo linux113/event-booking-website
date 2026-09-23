@@ -50,6 +50,17 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** The upload's own ceiling: the same number the buckets and the form state. */
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 
+/**
+ * Ceiling for one request, checked before the body is read.
+ *
+ * `request.formData()` buffers the whole request in memory, so the per-file check
+ * below it is too late to bound anything: without this, a client decides how much of
+ * the server's memory to use. Three full-size photographs is a real batch, and a
+ * ceiling is also honest about the platform: Vercel caps a function's request body
+ * well below this, so in production the smaller limit applies first.
+ */
+const MAX_UPLOAD_REQUEST_BYTES = 3 * MAX_UPLOAD_BYTES;
+
 export async function POST(request: Request): Promise<NextResponse> {
   const staff = await getStaffMember();
 
@@ -143,6 +154,16 @@ export async function POST(request: Request): Promise<NextResponse> {
  * would be the wrong behaviour, and silently skipping it would be worse.
  */
 async function uploadMany(request: Request): Promise<NextResponse> {
+  const declared = Number(request.headers.get("content-length") ?? "");
+
+  if (Number.isFinite(declared) && declared > MAX_UPLOAD_REQUEST_BYTES) {
+    return catalogueError(
+      "invalid-input",
+      "That upload is larger than 24 MB in one go. Send fewer photographs at a time.",
+      { field: "file" },
+    );
+  }
+
   let form: FormData;
 
   try {

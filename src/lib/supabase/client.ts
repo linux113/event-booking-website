@@ -13,6 +13,12 @@ import type { Database } from "@/types/database";
  * from here (it lives in `./admin.ts`, which is server-only).
  *
  * Memoised so hot reloads and multiple components share one client.
+ *
+ * Note: this client cannot see the staff session. Session cookies are HttpOnly
+ * (`./cookies.ts`), and signing in happens through the server action in
+ * `src/app/admin/actions.ts` — which is why nothing in the app imports this module
+ * today. Use it for public data (RLS still applies), not for anything that needs the
+ * signed-in user.
  */
 let browserClient: SupabaseClient<Database> | undefined;
 

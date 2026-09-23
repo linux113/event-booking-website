@@ -17,6 +17,38 @@ const nextConfig: NextConfig = {
   // preview host is *.e2b.app; add your own tunnel/LAN host here if needed.
   allowedDevOrigins: ["*.e2b.app"],
 
+  // Security headers.
+  //
+  // Three are for every response: `nosniff` (we serve an SVG file and user-uploaded
+  // images, and neither should ever be sniffed into something executable),
+  // `strict-origin-when-cross-origin` (a pass URL in a referrer is a credential), and
+  // a permissions policy that hands out the camera — which the scanner needs — and
+  // nothing else.
+  //
+  // Frame protection is deliberately scoped to the staff area. The public site is
+  // meant to be embeddable (a preview pane, a venue's own portal), while a framed
+  // gallery or pass screen is exactly how an admin gets tricked into clicking
+  // "Delete": the frame *is* our origin, so no cookie attribute stops that click.
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [
+          { key: "x-content-type-options", value: "nosniff" },
+          { key: "referrer-policy", value: "strict-origin-when-cross-origin" },
+          { key: "permissions-policy", value: "camera=(self), microphone=(), geolocation=()" },
+        ],
+      },
+      {
+        source: "/admin/:path*",
+        headers: [
+          { key: "x-frame-options", value: "DENY" },
+          { key: "content-security-policy", value: "frame-ancestors 'none'" },
+        ],
+      },
+    ];
+  },
+
   // Remote images come from Supabase Storage. The wildcard covers every project
   // ref (the ref is not known at build time) and is limited to the public
   // storage path, so nothing else can be proxied through the image optimiser.
