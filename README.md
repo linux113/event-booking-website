@@ -13,6 +13,7 @@ fits within free tiers for development and small-scale launch.
 | [`docs/connect-free-supabase.md`](./docs/connect-free-supabase.md) | Creating the database on Supabase's free tier: the 16 migrations in order (SQL editor or CLI), which key goes in which variable after the 2026 rename, the first admin account, replacing the seed data with your real event, free-tier limits and the 7-day pause |
 | [`docs/deploy-vercel.md`](./docs/deploy-vercel.md) | Deploying: importing the repo, the Production Branch trap, the environment variables, the Razorpay webhook, Hobby-plan reality, and the five checks that prove the deployment is real |
 | [`docs/how-it-works.md`](./docs/how-it-works.md) | The whole flow — customer, organiser, gate — how the pieces fit, every URL that must be configured and what breaks if it is wrong, and the one URL needed to have a deployment verified |
+| [`docs/neon-setup.md`](./docs/neon-setup.md) | Running the schema on Neon (or any bare PostgreSQL): creating the project, `npm run db:setup`, and an honest account of what still depends on Supabase — sign-in, file storage, and the HTTP data API |
 | [`supabase/README.md`](./supabase/README.md) | The database reference: tables, roles, RLS rules, storage buckets, every `SECURITY DEFINER` function |
 
 ## Status
