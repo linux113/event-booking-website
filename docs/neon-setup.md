@@ -85,31 +85,62 @@ DATABASE_URL='postgresql://neondb_owner:…@ep-xxx.ap-southeast-1.aws.neon.tech/
   npm run db:setup -- --seed
 ```
 
-`npm run db:setup` applies `supabase/prelude.sql` (the identity shim, below), then all 16
-migrations **in filename order, each in its own transaction, stopping at the first failure**
-so the database is never left half-migrated — and because every migration is idempotent, a
-re-run is safe. With `--seed` it also loads the demo data. Then it asserts the end state:
+`npm run db:setup` applies `supabase/prelude.sql` (the identity shim, below), then every
+migration in `supabase/migrations/` **in filename order**, then — with `--seed` — the demo
+data, and finally asserts the end state:
 
 ```
-  01/16  20260922090000_init_schema.sql
+  ✓ applied  prelude.sql
+  ✓ applied  20260922090000_init_schema.sql
   …
-  16/16  20260922091500_security_hardening.sql
-  seed: one event, nine nights, five pass types
+  ✓ applied  20260922091500_security_hardening.sql
+  ✓ applied  seed.sql
+
+  18 applied, 0 skipped, of 18 section(s).
 
 The schema as it now stands:
   ✓ 11 public tables, 26 policies, RLS on every table
-  ✓ 44 SECURITY DEFINER functions, each with a fixed search_path
+  ✓ 44 SECURITY DEFINER functions — 44 found
   ✓ the identity shim answers (auth.uid() is callable)
-  ✓ a stranger can read the published event
+  ✓ seed: one event, nine nights, five pass types
+  ✓ a stranger can read the published event — 1 row(s)
   ✓ a stranger is refused on bookings (permission denied)
+  ✓ the security hardening is present
 ```
 
-Use **`--verify-only`** to check a database without applying anything, and `--skip-prelude`
-if you have already created the `auth` schema yourself. The connection string is read from
-the environment, never written to disk, and its password is masked in every message.
+Nothing is applied twice. Each file is recorded in **`setup.applied_migrations`** — the same
+idea as Supabase's own `supabase_migrations.schema_migrations`, kept in its own schema so
+`public` holds exactly the 11 tables the application expects. That record is what makes a
+second run work at all: **migrations are forward-only**, because two of them deliberately
+restate `create_pending_booking` with a different return shape, and replaying an applied file
+would fail on the first restatement. So:
 
-> Use the **direct** (non-pooler) string to migrate. The pooler is for the app's runtime
-> queries; migrations are happier without it.
+| Situation | What a run does |
+| --------- | --------------- |
+| Fresh database | applies all 18 sections |
+| Already applied | `· skipped`, 18 of them, and re-checks the end state |
+| Stopped part-way | resumes at the first file that is not recorded |
+| A file changed after it was applied | `! filename changed since it was applied — left alone` |
+| Schema present but no record (set up before this bookkeeping existed) | warns and points at `--mark-all-applied` |
+
+Each file commits in its own transaction **together with its record**, so a failure leaves
+neither. The connection string is read from the environment, never written to disk, and its
+password is masked in every message.
+
+Also useful:
+
+- **`--verify-only`** — check the end state and apply nothing (safe on a live database).
+- **`--mark-all-applied`** — record every file as applied without running it. Only for a
+  database you know is already fully migrated.
+- **`--skip-prelude`** — if you created the `auth` schema yourself.
+- `npm run db:setup:test` proves all of the above against a throwaway PostgreSQL: fresh run,
+  re-run, resume, edited file, no-record warning, and the one-shot paste below. **20 checks,
+  no database needed.**
+
+> Use the **direct** (non-pooler) connection string. The pooler is for the app's runtime
+> queries; migrations are happier without it. `channel_binding=require` is a libpq parameter
+> the Node driver does not take — the script strips it, and `sslmode=require` still encrypts
+> the connection.
 
 ### Option A2 — from GitHub, with no local tooling at all
 
@@ -132,6 +163,30 @@ locked-down network, a phone, someone else's laptop):
 It is manual-only (`workflow_dispatch`), so it can never fire on a push, and it holds
 `contents: read`. GitHub masks the secret in logs, and the script masks the password too.
 To check a database without touching it, run it with **verify_only** ticked.
+
+### Option A3 — one paste, no tooling at all
+
+[`docs/one-shot-schema.sql`](./one-shot-schema.sql) is the entire schema — prelude, all 16
+migrations and the seed — as a **single 309 KB statement batch wrapped in one transaction**.
+
+1. Open your provider's SQL editor (Neon: **SQL Editor**).
+2. Paste the whole file.
+3. Run it. Expect "Success"; the notices about storage buckets are the gallery section
+   correctly skipping what a plain Postgres does not have.
+
+It is the same thing `db:setup` does, for when you are on a phone, a locked-down laptop, or a
+network that cannot reach the database. Two properties matter:
+
+- **It either all applies or none of it does** — one transaction. Nothing in the migrations
+  needs to run outside one (`create index concurrently`, `vacuum`, `create database` are all
+  absent; the generator refuses to build if that ever changes).
+- **It records what it applied**, in `setup.applied_migrations`, exactly as `db:setup` does —
+  so a later `npm run db:setup` skips this work instead of replaying forward-only migrations.
+  Run it **once**: a second paste fails harmlessly on the first restated function and changes
+  nothing.
+
+Generated, never hand-edited: `node scripts/build-one-shot-schema.mjs --seed` rebuilds it
+after a new migration is added (drop `--seed` for a version without the demo data).
 
 ### Option B — `psql`, by hand
 
@@ -194,7 +249,9 @@ reset role;
 ```
 
 Tables expected: `admin_users, bookings, check_ins, digital_passes, event_dates,
-event_features, event_highlights, events, gallery, pass_categories, payment_events`.
+event_features, event_highlights, events, gallery, pass_categories, payment_events` — and
+nothing else. The setup bookkeeping lives in its own `setup` schema, which is why the count
+above stays 11.
 
 ## Step 5 · Create a staff account (only meaningful once sign-in exists)
 
