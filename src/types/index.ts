@@ -56,10 +56,14 @@ export interface EventNight {
   endTime: string | null;
   status: NightStatus;
   capacity: number;
+  /** Seats the organiser withheld from online sale (gate, crew, sponsors). */
+  capacityHeld: number;
   bookedPeople: number;
   remaining: number;
   isFullyBooked: boolean;
-  /** False when the night is sold out, cancelled or completed. */
+  /** False while the organiser has booking closed on this night. */
+  isBookingOpen: boolean;
+  /** False when the night is sold out, cancelled, finished, or booking is closed. */
   isBookable: boolean;
 }
 
@@ -77,6 +81,8 @@ export interface PassOption {
   priceInr: number;
   numberOfPeople: number;
   maxPerBooking: number;
+  /** Minimum age in years; 0 means no restriction. */
+  minAge: number;
   isActive: boolean;
   /** Why the pass cannot be booked, or `{ enabled: true }`. */
   availability: PassEnabledState;

@@ -1,4 +1,5 @@
 import { NightSelector } from "@/components/booking/night-selector";
+import { seatsOnSale } from "@/lib/event-copy";
 import { CheckIcon } from "@/components/icons";
 import { formatEventDate, formatTimeRange } from "@/lib/format";
 import type { EventNight } from "@/types";
@@ -40,7 +41,7 @@ export function StepDates({ nights, value, onChange, error, disabled }: StepDate
               {timeRange ? ` · ${timeRange}` : ""}
             </span>
             <span className="text-muted">
-              {selected.remaining} of {selected.capacity} places left · selected
+              {selected.remaining} of {seatsOnSale(selected)} places left · selected
             </span>
           </span>
         ) : (

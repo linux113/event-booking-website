@@ -1010,7 +1010,16 @@ async function main() {
   // silently drop a paid booking.
   const payC = await createBooking({ p_customer_mobile: "+919800000103", p_idempotency_key: "pay-key-3" });
   await rpc("attach_razorpay_order", { p_booking_id: payC.booking_uuid, p_razorpay_order_id: ORDER_3 });
-  await run(`update public.event_dates set capacity = 1 where id = '${NIGHT_FREE}';`);
+
+  // The organiser re-counts the room and finds it holds exactly what is already
+  // sold. Lowering the capacity *to* the people paid for is allowed — it takes
+  // nothing away from anybody — while lowering it below them is refused (PT004,
+  // checked further down). The pending booking now has nowhere to go.
+  const [nightRoom] = await q(`
+    select coalesce(sum(b.number_of_people) filter (where b.payment_status = 'paid'), 0)::integer as paid
+      from public.bookings b where b.event_date_id = '${NIGHT_FREE}';
+  `);
+  await run(`update public.event_dates set capacity = ${nightRoom.paid} where id = '${NIGHT_FREE}';`);
   const overflow = (await rpc("confirm_booking_payment", {
     p_razorpay_order_id: ORDER_3,
     p_razorpay_payment_id: PAYMENT_3,
@@ -4049,6 +4058,1024 @@ async function main() {
     "and nothing on these screens can move a payment status, because the database still refuses the write",
     typeof screenCannotMarkPaid === "string" && /payment_status may only change/.test(screenCannotMarkPaid),
     screenCannotMarkPaid ?? "the update succeeded",
+  );
+
+  // ---------------------------------------------------------------------------
+  section("Admin pass and date management: prices, capacity and the booking window");
+  // ---------------------------------------------------------------------------
+  // The two screens an organiser runs the event from: the pass catalogue (what is on
+  // sale, at what price, for whom) and the nights (how many seats, how many held back,
+  // whether booking is open). Every rule is checked from both sides — do the valid
+  // thing, then try to break it — because a form that refuses is worth nothing if a
+  // hand-written UPDATE can write the same bad row, and a capacity rule is worth
+  // nothing unless the booking path obeys it too.
+  const pdmDay1 = "2099-05-01";
+  const pdmDay2 = "2099-05-02";
+  const pdmDay3 = "2099-05-03";
+
+  /** Pays for a booking the way the site does: attach the order, then confirm it. */
+  const pdmPay = async (booking, orderId, paymentId) => {
+    await rpc("attach_razorpay_order", { p_booking_id: booking.booking_uuid, p_razorpay_order_id: orderId });
+    await rpc("confirm_booking_payment", {
+      p_razorpay_order_id: orderId,
+      p_razorpay_payment_id: paymentId,
+      p_amount_paise: booking.total_amount * 100,
+    });
+  };
+
+  // ---- 1. the row shape, and the constraints behind it ------------------------
+  const pdmDateColumns = await q(`
+    select column_name, is_nullable, column_default
+      from information_schema.columns
+     where table_schema = 'public' and table_name = 'event_dates'
+       and column_name in ('capacity_held', 'booking_open')
+     order by column_name;
+  `);
+  const pdmMinAgeColumn = (
+    await q(`
+      select column_default from information_schema.columns
+       where table_schema = 'public' and table_name = 'pass_categories' and column_name = 'min_age';
+    `)
+  )[0];
+
+  check(
+    "a night can hold seats back from online sale, and can have booking closed",
+    pdmDateColumns.length === 2 &&
+      pdmDateColumns.every((row) => row.is_nullable === "NO") &&
+      /true/.test(pdmDateColumns.find((row) => row.column_name === "booking_open")?.column_default ?? ""),
+    pdmDateColumns.map((row) => `${row.column_name}=${row.column_default}`).join(" "),
+  );
+  check(
+    "and a pass carries its age restriction as a number, meaning none by default",
+    /0/.test(pdmMinAgeColumn?.column_default ?? "missing"),
+    pdmMinAgeColumn?.column_default ?? "column missing",
+  );
+
+  const pdmConstraints = (
+    await q(`
+      select conname from pg_constraint
+       where conrelid in ('public.event_dates'::regclass, 'public.pass_categories'::regclass)
+         and conname in ('event_dates_capacity_held_range', 'event_dates_capacity_held_within_capacity',
+                         'pass_categories_min_age_range')
+       order by conname;
+    `)
+  ).map((row) => row.conname);
+  check(
+    "the impossible rows are unrepresentable, not merely discouraged",
+    pdmConstraints.length === 3,
+    pdmConstraints.join(","),
+  );
+
+  const pdmHeldAboveCapacity = await expectError(`
+    update public.event_dates set capacity_held = capacity + 1 where id = '${NIGHT_1}';
+  `);
+  check(
+    "a hand-written update cannot hold back more seats than the night has",
+    /capacity_held_above_capacity/.test(pdmHeldAboveCapacity ?? ""),
+    pdmHeldAboveCapacity ?? "the update succeeded",
+  );
+  const pdmZeroCapacity = await expectError(`
+    update public.event_dates set capacity = 0 where id = '${NIGHT_1}';
+  `);
+  check(
+    "nor shrink a night to nothing",
+    /capacity_below_one/.test(pdmZeroCapacity ?? ""),
+    pdmZeroCapacity ?? "the update succeeded",
+  );
+  const pdmBadAge = await expectError(`
+    update public.pass_categories set min_age = 121 where id = '${COUPLE}';
+  `);
+  check(
+    "nor set an age restriction no guest could satisfy",
+    /pass_categories_min_age_range/.test(pdmBadAge ?? ""),
+    pdmBadAge ?? "the update succeeded",
+  );
+
+  // ---- 2. creating a pass -----------------------------------------------------
+  const pdmCreated = (
+    await rpc("admin_save_pass_category", {
+      p_id: null,
+      p_event_id: null,
+      p_code: "Test Duo 4",
+      p_name: "Verification Table Pass",
+      p_composition: "4 Guests",
+      p_description: "Created by the verification run.",
+      p_price_inr: 1499,
+      p_number_of_people: 4,
+      p_max_per_booking: 3,
+      p_min_age: 18,
+      p_sort_order: 90,
+      p_is_active: true,
+    })
+  )[0];
+
+  check(
+    "an organiser can create a pass, and the code is hyphenated on the way in",
+    pdmCreated?.code === "Test-Duo-4" &&
+      pdmCreated?.name === "Verification Table Pass" &&
+      pdmCreated?.price_inr === 1499 &&
+      pdmCreated?.number_of_people === 4 &&
+      pdmCreated?.max_per_booking === 3 &&
+      pdmCreated?.min_age === 18,
+    JSON.stringify(pdmCreated ?? null).slice(0, 200),
+  );
+  check(
+    "a pass that has just been created has nothing sold on it",
+    (await q(`select count(*)::int as n from public.bookings where pass_category_id = '${pdmCreated.pass_uuid}';`))[0]
+      .n === 0,
+  );
+
+  const pdmDuplicateCode = await rpcError("admin_save_pass_category", {
+    p_id: null,
+    p_event_id: null,
+    p_code: "TEST DUO 4",
+    p_name: "Another Table Pass",
+    p_composition: "4 Guests",
+    p_description: null,
+    p_price_inr: 999,
+    p_number_of_people: 4,
+    p_max_per_booking: 2,
+    p_min_age: 0,
+    p_sort_order: 91,
+    p_is_active: true,
+  });
+  check(
+    "and the same code spelled differently is still a duplicate",
+    pdmDuplicateCode?.code === "PC003" && pdmDuplicateCode?.detail === "code",
+    `${pdmDuplicateCode?.code} / ${pdmDuplicateCode?.detail}`,
+  );
+
+  const pdmBadPasses = [
+    ["a pass with no name", { p_name: "  " }, "PC001", "name"],
+    ["a code that is punctuation", { p_code: "!!!" }, "PC002", "code"],
+    ["a composition that says nothing", { p_composition: " " }, "PC009", "composition"],
+    ["a free pass", { p_price_inr: 0 }, "PC004", "price_inr"],
+    ["a pass priced above the ceiling", { p_price_inr: 500001 }, "PC004", "price_inr"],
+    ["a pass that admits nobody", { p_number_of_people: 0 }, "PC005", "number_of_people"],
+    ["a pass admitting fifty-one people", { p_number_of_people: 51 }, "PC005", "number_of_people"],
+    ["a booking limit of zero", { p_max_per_booking: 0 }, "PC006", "max_per_booking"],
+    ["an age restriction of 121", { p_min_age: 121 }, "PC007", "min_age"],
+    ["a sort order of 10000", { p_sort_order: 10000 }, "PC011", "sort_order"],
+  ];
+
+  for (const [pdmLabel, pdmOverrides, pdmCode, pdmField] of pdmBadPasses) {
+    const pdmRefused = await rpcError("admin_save_pass_category", {
+      p_id: null,
+      p_event_id: null,
+      p_code: "verification-refused",
+      p_name: "Refused Pass",
+      p_composition: "2 Guests",
+      p_description: null,
+      p_price_inr: 500,
+      p_number_of_people: 2,
+      p_max_per_booking: 2,
+      p_min_age: 0,
+      p_sort_order: 99,
+      p_is_active: true,
+      ...pdmOverrides,
+    });
+
+    check(
+      `${pdmLabel} is refused with ${pdmCode}, naming the field`,
+      pdmRefused?.code === pdmCode && pdmRefused?.detail === pdmField,
+      `${pdmRefused?.code} / ${pdmRefused?.detail} — ${pdmRefused?.message ?? "no error"}`,
+    );
+  }
+  check(
+    "and none of those attempts left a row behind",
+    (await q(`select count(*)::int as n from public.pass_categories where code = 'VERIFICATION-REFUSED';`))[0].n === 0,
+  );
+
+  // ---- 3. editing a pass: price, description, limit, age ----------------------
+  const pdmEdited = (
+    await rpc("admin_save_pass_category", {
+      p_id: pdmCreated.pass_uuid,
+      p_event_id: null,
+      p_code: "test-duo-4",
+      p_name: "Verification Table Pass",
+      p_composition: "4 Guests",
+      p_description: "Repriced for the second weekend.",
+      p_price_inr: 1199,
+      p_number_of_people: 4,
+      p_max_per_booking: 5,
+      p_min_age: 21,
+      p_sort_order: 90,
+      p_is_active: true,
+    })
+  )[0];
+
+  check(
+    "an organiser can change the price, the description, the limit and the age restriction",
+    pdmEdited?.price_inr === 1199 &&
+      pdmEdited?.description === "Repriced for the second weekend." &&
+      pdmEdited?.max_per_booking === 5 &&
+      pdmEdited?.min_age === 21 &&
+      // Editing with the code re-typed in another case keeps the row as one row, and
+      // stores the spelling it was given.
+      pdmEdited?.code === "test-duo-4",
+    JSON.stringify(pdmEdited ?? null).slice(0, 220),
+  );
+
+  const pdmUnknownPass = await rpcError("admin_save_pass_category", {
+    p_id: "00000000-0000-4000-8000-0000000000ff",
+    p_event_id: null,
+    p_code: "ghost",
+    p_name: "Ghost Pass",
+    p_composition: "2 Guests",
+    p_description: null,
+    p_price_inr: 100,
+    p_number_of_people: 2,
+    p_max_per_booking: 2,
+    p_min_age: 0,
+    p_sort_order: 99,
+    p_is_active: true,
+  });
+  check(
+    "editing a pass that does not exist is refused",
+    pdmUnknownPass?.code === "PC008",
+    pdmUnknownPass?.code ?? "no error",
+  );
+
+  // ---- 4. enabling and disabling a pass ---------------------------------------
+  const pdmDisabled = (await rpc("admin_set_pass_category_active", { p_id: pdmCreated.pass_uuid, p_is_active: false }))[0];
+  check(
+    "an organiser can take a pass off sale without deleting it",
+    pdmDisabled?.is_active === false &&
+      pdmDisabled?.pass_uuid === pdmCreated.pass_uuid &&
+      (await q(`select count(*)::int as n from public.pass_categories where id = '${pdmCreated.pass_uuid}';`))[0].n === 1,
+    JSON.stringify(pdmDisabled ?? null).slice(0, 160),
+  );
+
+  const pdmAnonCatalogueRow = await asRole(
+    "anon",
+    `select count(*)::int as n from public.pass_categories where id = '${pdmCreated.pass_uuid}' and is_active;`,
+  );
+  check("and an off-sale pass stops being offered to the booking page", pdmAnonCatalogueRow[0].n === 0);
+
+  const pdmOffSaleBooking = await createBookingError({
+    p_event_date_id: NIGHT_FREE,
+    p_pass_category_id: pdmCreated.pass_uuid,
+    p_customer_name: "Off Sale",
+    p_customer_mobile: "+919800001910",
+    p_customer_email: "off.sale@example.com",
+    p_quantity: 1,
+    p_number_of_people: 4,
+    p_idempotency_key: "pdm-off-sale",
+  });
+  check(
+    "and cannot be booked, even by somebody who kept the link",
+    pdmOffSaleBooking?.code === "PB003",
+    pdmOffSaleBooking?.code ?? "no error",
+  );
+
+  const pdmReEnabled = (await rpc("admin_set_pass_category_active", { p_id: pdmCreated.pass_uuid, p_is_active: true }))[0];
+  check("putting it back on sale is one call that touches nothing else", pdmReEnabled?.is_active === true);
+
+  const pdmUnknownToggle = await rpcError("admin_set_pass_category_active", {
+    p_id: "00000000-0000-4000-8000-0000000000fe",
+    p_is_active: false,
+  });
+  check("toggling a pass that does not exist is refused", pdmUnknownToggle?.code === "PC008", pdmUnknownToggle?.code ?? "");
+
+  // Repricing a pass that has already sold: the money already taken must not move.
+  const pdmBookingsBeforeReprice = await q(`
+    select booking_id, subtotal, total_amount, payment_status
+      from public.bookings where pass_category_id = '${COUPLE}' order by created_at limit 1;
+  `);
+  const pdmCoupleBefore = (await q(`select price_inr from public.pass_categories where id = '${COUPLE}';`))[0].price_inr;
+
+  await rpc("admin_save_pass_category", {
+    p_id: COUPLE,
+    p_event_id: null,
+    p_code: "couple",
+    p_name: "Couple Pass",
+    p_composition: "1 Boy + 1 Girl",
+    p_description: null,
+    p_price_inr: 777,
+    p_number_of_people: 2,
+    p_max_per_booking: 10,
+    p_min_age: 18,
+    p_sort_order: 2,
+    p_is_active: true,
+  });
+
+  const pdmBookingsAfterReprice = await q(`
+    select booking_id, subtotal, total_amount, payment_status
+      from public.bookings where pass_category_id = '${COUPLE}' order by created_at limit 1;
+  `);
+  check(
+    "repricing a pass that has already sold applies to the next guest, not the last one",
+    JSON.stringify(pdmBookingsBeforeReprice) === JSON.stringify(pdmBookingsAfterReprice) &&
+      Number(pdmCoupleBefore) === 499,
+    `${JSON.stringify(pdmBookingsBeforeReprice)} → ${JSON.stringify(pdmBookingsAfterReprice)}`,
+  );
+
+  const pdmBookingOnRepriced = await createBooking({
+    p_event_date_id: NIGHT_FREE,
+    p_pass_category_id: COUPLE,
+    p_customer_name: "Repriced Guest",
+    p_customer_mobile: "+919800001911",
+    p_customer_email: "repriced@example.com",
+    p_quantity: 1,
+    p_number_of_people: 2,
+    p_idempotency_key: "pdm-repriced",
+  });
+  check(
+    "and the next guest is charged the new price, computed in the database",
+    Number(pdmBookingOnRepriced.total_amount) === 777,
+    `${pdmBookingOnRepriced.total_amount}`,
+  );
+
+  await run(`
+    update public.bookings set booking_status = 'cancelled' where id = '${pdmBookingOnRepriced.booking_uuid}';
+    update public.pass_categories set price_inr = ${pdmCoupleBefore}, min_age = 0 where id = '${COUPLE}';
+  `);
+  check(
+    "the price is put back, so the rest of the run reads the seed price",
+    (await q(`select price_inr from public.pass_categories where id = '${COUPLE}';`))[0].price_inr === 499,
+  );
+
+  // ---- 5. the catalogue read ---------------------------------------------------
+  const pdmCatalogue = await rpc("admin_pass_catalogue", { p_event_id: null });
+  const pdmCatalogueExplicit = await rpc("admin_pass_catalogue", { p_event_id: EVENT });
+  const pdmLedger = (
+    await q(`
+      select
+        (select count(*)::int from public.pass_categories where event_id = '${EVENT}') as types,
+        (select count(*)::int from public.bookings where pass_category_id = '${COUPLE}') as couple_bookings,
+        (select count(*)::int from public.bookings
+          where pass_category_id = '${COUPLE}' and payment_status = 'paid') as couple_paid,
+        (select coalesce(sum(total_amount) filter (where payment_status = 'paid'), 0)::int
+           from public.bookings where pass_category_id = '${COUPLE}') as couple_revenue,
+        (select coalesce(sum(number_of_people) filter (where payment_status = 'paid'), 0)::int
+           from public.bookings where pass_category_id = '${COUPLE}') as couple_people,
+        (select count(*)::int from public.digital_passes dp
+           join public.bookings b on b.id = dp.booking_id
+          where b.pass_category_id = '${COUPLE}' and b.payment_status = 'paid') as couple_passes;
+    `)
+  )[0];
+  const pdmCoupleRow = pdmCatalogue.find((row) => row.pass_uuid === COUPLE);
+
+  check(
+    "the catalogue lists every pass type of the event, on sale or not, by id or by default",
+    pdmCatalogue.length === pdmLedger.types && pdmCatalogue.length === pdmCatalogueExplicit.length,
+    `${pdmCatalogue.length} rows / ${pdmLedger.types} types`,
+  );
+  check(
+    "with the selling numbers counted in the database, not in the screen",
+    Number(pdmCoupleRow?.bookings_count) === Number(pdmLedger.couple_bookings) &&
+      Number(pdmCoupleRow?.paid_bookings) === Number(pdmLedger.couple_paid) &&
+      Number(pdmCoupleRow?.revenue_inr) === Number(pdmLedger.couple_revenue) &&
+      Number(pdmCoupleRow?.people_sold) === Number(pdmLedger.couple_people) &&
+      Number(pdmCoupleRow?.passes_issued) === Number(pdmLedger.couple_passes),
+    JSON.stringify({
+      bookings: pdmCoupleRow?.bookings_count,
+      paid: pdmCoupleRow?.paid_bookings,
+      revenue: pdmCoupleRow?.revenue_inr,
+      people: pdmCoupleRow?.people_sold,
+      passes: pdmCoupleRow?.passes_issued,
+    }),
+  );
+  check(
+    "and in the order the booking page lists them: sort order, then price",
+    pdmCatalogue.every(
+      (row, index) =>
+        index === 0 ||
+        row.sort_order > pdmCatalogue[index - 1].sort_order ||
+        (row.sort_order === pdmCatalogue[index - 1].sort_order && row.price_inr >= pdmCatalogue[index - 1].price_inr),
+    ),
+    pdmCatalogue.map((row) => `${row.code}:${row.sort_order}/${row.price_inr}`).join(" "),
+  );
+
+  // ---- 6. creating a night -----------------------------------------------------
+  const pdmNight = (
+    await rpc("admin_save_event_date", {
+      p_id: null,
+      p_event_id: null,
+      p_event_date: pdmDay1,
+      p_start_time: "20:00",
+      p_end_time: "23:45",
+      p_capacity: 400,
+      p_capacity_held: 50,
+      p_status: "scheduled",
+      p_booking_open: true,
+      p_notes: "Created by the verification run.",
+    })
+  )[0];
+
+  check(
+    "an organiser can add a night and hold seats back from online sale",
+    pdmNight?.event_date === pdmDay1 &&
+      Number(pdmNight?.capacity) === 400 &&
+      Number(pdmNight?.capacity_held) === 50 &&
+      Number(pdmNight?.seats_available) === 350 &&
+      pdmNight?.booking_open === true,
+    JSON.stringify(pdmNight ?? null).slice(0, 220),
+  );
+
+  const pdmNightId = pdmNight.date_uuid;
+
+  const pdmDuplicateNight = await rpcError("admin_save_event_date", {
+    p_id: null,
+    p_event_id: null,
+    p_event_date: pdmDay1,
+    p_start_time: "20:00",
+    p_end_time: "23:45",
+    p_capacity: 100,
+    p_capacity_held: 0,
+    p_status: "scheduled",
+    p_booking_open: true,
+    p_notes: null,
+  });
+  check(
+    "the same event cannot have two nights on one date",
+    pdmDuplicateNight?.code === "PT006" && pdmDuplicateNight?.detail === "event_date",
+    `${pdmDuplicateNight?.code} / ${pdmDuplicateNight?.detail}`,
+  );
+
+  const pdmBadNights = [
+    ["a night with no capacity", { p_capacity: 0 }, "PT001", "capacity"],
+    ["a negative capacity", { p_capacity: -10 }, "PT001", "capacity"],
+    ["negative held-back seats", { p_capacity_held: -1 }, "PT002", "capacity_held"],
+    ["more seats held back than the night holds", { p_capacity_held: 401 }, "PT003", "capacity_held"],
+    ["a status the schema does not know", { p_status: "maybe" }, "PT010", "status"],
+    ["a night that ends before it starts", { p_end_time: "19:00" }, "PT008", "end_time"],
+    ["a night with no date at all", { p_event_date: null }, "PT009", "event_date"],
+  ];
+
+  for (const [pdmLabel, pdmOverrides, pdmCode, pdmField] of pdmBadNights) {
+    const pdmRefused = await rpcError("admin_save_event_date", {
+      p_id: pdmNightId,
+      p_event_id: null,
+      p_event_date: pdmDay1,
+      p_start_time: "20:00",
+      p_end_time: "23:45",
+      p_capacity: 400,
+      p_capacity_held: 50,
+      p_status: "scheduled",
+      p_booking_open: true,
+      p_notes: null,
+      ...pdmOverrides,
+    });
+
+    check(
+      `${pdmLabel} is refused with ${pdmCode}, naming the field`,
+      pdmRefused?.code === pdmCode && pdmRefused?.detail === pdmField,
+      `${pdmRefused?.code} / ${pdmRefused?.detail} — ${pdmRefused?.message ?? "no error"}`,
+    );
+  }
+
+  const pdmNightAfterRefusals = (
+    await q(`
+      select event_date::text as d, capacity, capacity_held, status, booking_open
+        from public.event_dates where id = '${pdmNightId}';
+    `)
+  )[0];
+  check(
+    "and every refusal left the night exactly as it was",
+    pdmNightAfterRefusals.d === pdmDay1 &&
+      Number(pdmNightAfterRefusals.capacity) === 400 &&
+      Number(pdmNightAfterRefusals.capacity_held) === 50 &&
+      pdmNightAfterRefusals.status === "scheduled" &&
+      pdmNightAfterRefusals.booking_open === true,
+    JSON.stringify(pdmNightAfterRefusals),
+  );
+
+  const pdmUnknownNight = await rpcError("admin_save_event_date", {
+    p_id: "00000000-0000-4000-8000-0000000000fd",
+    p_event_id: null,
+    p_event_date: pdmDay2,
+    p_start_time: null,
+    p_end_time: null,
+    p_capacity: 100,
+    p_capacity_held: 0,
+    p_status: "scheduled",
+    p_booking_open: true,
+    p_notes: null,
+  });
+  check(
+    "editing a night that does not exist is refused",
+    pdmUnknownNight?.code === "PT007",
+    pdmUnknownNight?.code ?? "no error",
+  );
+
+  // ---- 7. the public figure and the booking path agree --------------------------
+  const pdmAvailability = (await rpc("get_event_night_availability", { p_event_id: EVENT })).find(
+    (row) => row.event_date_id === pdmNightId,
+  );
+  check(
+    "the website is offered capacity minus the seats held back, not the raw capacity",
+    Number(pdmAvailability?.capacity) === 400 &&
+      Number(pdmAvailability?.capacity_held) === 50 &&
+      Number(pdmAvailability?.remaining) === 350 &&
+      pdmAvailability?.is_bookable === true,
+    JSON.stringify(pdmAvailability ?? null),
+  );
+
+  const pdmBooking = await createBooking({
+    p_event_date_id: pdmNightId,
+    p_pass_category_id: COUPLE,
+    p_customer_name: "Capacity Guest",
+    p_customer_mobile: "+919800001920",
+    p_customer_email: "capacity@example.com",
+    p_quantity: 1,
+    p_number_of_people: 2,
+    p_idempotency_key: "pdm-capacity",
+  });
+  check(
+    "and a booking taken on the new night is priced from the catalogue, not from the request",
+    Number(pdmBooking.total_amount) === 499,
+    `${pdmBooking.total_amount}`,
+  );
+
+  // ---- 8. seats held back are not on sale ---------------------------------------
+  const pdmLowered = (
+    await rpc("admin_set_event_date_capacity", { p_id: pdmNightId, p_capacity: 350, p_capacity_held: 50 })
+  )[0];
+  check(
+    "capacity can be lowered to exactly what is on sale — that takes nothing from anyone",
+    Number(pdmLowered.capacity) === 350 &&
+      Number(pdmLowered.capacity_held) === 50 &&
+      Number(pdmLowered.seats_available) === 300,
+    JSON.stringify(pdmLowered ?? null),
+  );
+
+  const pdmHeldTooHigh = await rpcError("admin_set_event_date_capacity", {
+    p_id: pdmNightId,
+    p_capacity: 49,
+    p_capacity_held: 50,
+  });
+  check(
+    "but not below the seats already held back for the gate",
+    pdmHeldTooHigh?.code === "PT003" && pdmHeldTooHigh?.detail === "capacity_held",
+    `${pdmHeldTooHigh?.code} / ${pdmHeldTooHigh?.detail}`,
+  );
+
+  const pdmAllHeld = (
+    await rpc("admin_set_event_date_capacity", { p_id: pdmNightId, p_capacity: 50, p_capacity_held: 50 })
+  )[0];
+  check(
+    "a night whose seats are all held back has nothing left to sell, and says so",
+    Number(pdmAllHeld.seats_available) === 0,
+    JSON.stringify(pdmAllHeld ?? null),
+  );
+
+  const pdmBookingWhenAllHeld = await createBookingError({
+    p_event_date_id: pdmNightId,
+    p_pass_category_id: COUPLE,
+    p_customer_name: "Held Back",
+    p_customer_mobile: "+919800001921",
+    p_customer_email: "held.back@example.com",
+    p_quantity: 1,
+    p_number_of_people: 2,
+    p_idempotency_key: "pdm-all-held",
+  });
+  check(
+    "and the booking path refuses it with no places left — held seats are not online seats",
+    pdmBookingWhenAllHeld?.code === "PB001" && pdmBookingWhenAllHeld?.detail === "0",
+    `${pdmBookingWhenAllHeld?.code} / ${pdmBookingWhenAllHeld?.detail}`,
+  );
+
+  const pdmRaised = (
+    await rpc("admin_set_event_date_capacity", { p_id: pdmNightId, p_capacity: 900, p_capacity_held: 50 })
+  )[0];
+  check(
+    "raising the capacity is always allowed — the queue is longer than we thought",
+    Number(pdmRaised.capacity) === 900 && Number(pdmRaised.seats_available) === 850,
+    JSON.stringify(pdmRaised ?? null),
+  );
+
+  const pdmCapacityZero = await rpcError("admin_set_event_date_capacity", { p_id: pdmNightId, p_capacity: 0 });
+  check("a capacity of zero is refused whatever else is set", pdmCapacityZero?.code === "PT001");
+  const pdmNegativeCapacity = await rpcError("admin_set_event_date_capacity", { p_id: pdmNightId, p_capacity: -5 });
+  check("and so is a negative one", pdmNegativeCapacity?.code === "PT001");
+  const pdmUnknownCapacity = await rpcError("admin_set_event_date_capacity", {
+    p_id: "00000000-0000-4000-8000-0000000000fc",
+    p_capacity: 100,
+  });
+  check("setting the capacity of a night that does not exist is refused", pdmUnknownCapacity?.code === "PT007");
+
+  const pdmInvariants = (
+    await q(`
+      select
+        count(*)::int                                          as nights,
+        count(*) filter (where capacity < 1)::int              as below_one,
+        count(*) filter (where capacity_held < 0)::int         as negative_held,
+        count(*) filter (where capacity_held > capacity)::int  as held_above_capacity
+        from public.event_dates;
+    `)
+  )[0];
+  check(
+    "no night in the database has an impossible capacity",
+    pdmInvariants.below_one === 0 &&
+      pdmInvariants.negative_held === 0 &&
+      pdmInvariants.held_above_capacity === 0 &&
+      pdmInvariants.nights > 9,
+    `${pdmInvariants.nights} nights checked`,
+  );
+
+  const pdmAvailabilityFigures = await rpc("get_event_night_availability", { p_event_id: EVENT });
+  check(
+    "and the public availability figure is never negative, on any night",
+    pdmAvailabilityFigures.every(
+      (row) =>
+        Number(row.remaining) >= 0 &&
+        Number(row.capacity_held) >= 0 &&
+        Number(row.booked_people) >= 0 &&
+        Number(row.capacity_held) <= Number(row.capacity),
+    ),
+    `${pdmAvailabilityFigures.length} nights`,
+  );
+
+  const pdmAdminNights = await rpc("admin_event_dates", { p_event_id: null });
+  const pdmNightsLedger = await q(`
+    select
+      d.id,
+      coalesce(sum(b.number_of_people) filter (where b.payment_status = 'paid'), 0)::int as paid,
+      count(b.id) filter (where b.payment_status = 'paid')::int as paid_bookings,
+      (select count(*)::int from public.digital_passes dp
+         join public.bookings pb on pb.id = dp.booking_id
+        where pb.event_date_id = d.id and pb.payment_status = 'paid') as passes
+      from public.event_dates d
+      left join public.bookings b on b.event_date_id = d.id
+     where d.event_id = '${EVENT}'
+     group by d.id;
+  `);
+  const pdmNightsAgree = pdmAdminNights.every((night) => {
+    const ledger = pdmNightsLedger.find((row) => row.id === night.date_uuid);
+    return (
+      ledger &&
+      Number(night.booked_people) === Number(ledger.paid) &&
+      Number(night.booked_bookings) === Number(ledger.paid_bookings) &&
+      Number(night.passes_issued) === Number(ledger.passes) &&
+      Number(night.seats_on_sale) === Number(night.capacity) - Number(night.capacity_held) &&
+      Number(night.seats_available) ===
+        Math.max(Number(night.capacity) - Number(night.capacity_held) - Number(ledger.paid), 0) &&
+      night.is_full ===
+        (night.night_status === "sold_out" ||
+          Number(ledger.paid) + Number(night.capacity_held) >= Number(night.capacity))
+    );
+  });
+  check(
+    "the nights screen is handed the same figures a ledger query computes",
+    pdmNightsAgree && pdmAdminNights.length === pdmNightsLedger.length,
+    `${pdmAdminNights.length} nights / ${pdmNightsLedger.length} in the ledger`,
+  );
+
+  // ---- 9. a night people have paid for ------------------------------------------
+  await pdmPay(pdmBooking, "order_PDMNIGHT000000001", "pay_PDMNIGHT000000001");
+  const pdmPaidPeople = (
+    await q(`
+      select coalesce(sum(number_of_people), 0)::int as paid
+        from public.bookings
+       where event_date_id = '${pdmNightId}' and payment_status = 'paid';
+    `)
+  )[0].paid;
+
+  const pdmShrinkBelowPaid = await rpcError("admin_set_event_date_capacity", {
+    p_id: pdmNightId,
+    p_capacity: Number(pdmPaidPeople) - 1,
+    p_capacity_held: 0,
+  });
+  check(
+    "capacity cannot be cut below the people who have already paid",
+    pdmShrinkBelowPaid?.code === "PT004" && Number(pdmShrinkBelowPaid?.detail) === Number(pdmPaidPeople),
+    `${pdmShrinkBelowPaid?.code} / floor ${pdmShrinkBelowPaid?.detail} (paid ${pdmPaidPeople})`,
+  );
+
+  const pdmExactlyPaid = (
+    await rpc("admin_set_event_date_capacity", {
+      p_id: pdmNightId,
+      p_capacity: pdmPaidPeople,
+      p_capacity_held: 0,
+    })
+  )[0];
+  check(
+    "while a capacity of exactly what is paid for is allowed, and reads as no seats left",
+    Number(pdmExactlyPaid.capacity) === Number(pdmPaidPeople) && Number(pdmExactlyPaid.seats_available) === 0,
+    JSON.stringify(pdmExactlyPaid ?? null),
+  );
+
+  const pdmRawShrink = await expectError(`
+    update public.event_dates set capacity = 1 where id = '${pdmNightId}';
+  `);
+  check(
+    "and a hand-written UPDATE cannot take those seats away either — the guard is on the table, not on the function",
+    /capacity_below_taken/.test(pdmRawShrink ?? ""),
+    pdmRawShrink ?? "the update succeeded",
+  );
+
+  const pdmRawRaise = (
+    await q(`
+      update public.event_dates set capacity = 5000 where id = '${pdmNightId}'
+      returning capacity, capacity_held, capacity - capacity_held - ${pdmPaidPeople} as seats_available;
+    `)
+  )[0];
+  await run(`update public.event_dates set capacity = ${pdmPaidPeople} where id = '${pdmNightId}';`);
+  check(
+    "while raising it by hand is still allowed, so a busy night can always be made bigger",
+    Number(pdmRawRaise.capacity) === 5000 && Number(pdmRawRaise.seats_available) === 5000 - Number(pdmPaidPeople),
+    JSON.stringify(pdmRawRaise),
+  );
+
+  const pdmDateMove = await rpcError("admin_save_event_date", {
+    p_id: pdmNightId,
+    p_event_id: null,
+    p_event_date: pdmDay2,
+    p_start_time: "20:00",
+    p_end_time: "23:45",
+    p_capacity: Number(pdmPaidPeople),
+    p_capacity_held: 0,
+    p_status: "scheduled",
+    p_booking_open: true,
+    p_notes: null,
+  });
+  check(
+    "a night with paid bookings cannot be moved to another date — the passes carry the date",
+    pdmDateMove?.code === "PT005" && Number(pdmDateMove?.detail) === Number(pdmPaidPeople),
+    `${pdmDateMove?.code} / ${pdmDateMove?.detail}`,
+  );
+
+  const pdmStillEditable = (
+    await rpc("admin_save_event_date", {
+      p_id: pdmNightId,
+      p_event_id: null,
+      p_event_date: pdmDay1,
+      p_start_time: "20:30",
+      p_end_time: "23:45",
+      p_capacity: Number(pdmPaidPeople),
+      p_capacity_held: 0,
+      p_status: "sold_out",
+      p_booking_open: false,
+      p_notes: "Full — gate sales only.",
+    })
+  )[0];
+  check(
+    "but everything that takes nothing away still works: times, status, notes, booking window",
+    pdmStillEditable?.night_status === "sold_out" &&
+      pdmStillEditable?.booking_open === false &&
+      String(pdmStillEditable?.start_time).startsWith("20:30") &&
+      pdmStillEditable?.notes === "Full — gate sales only." &&
+      Number(pdmStillEditable?.capacity) === Number(pdmPaidPeople),
+    JSON.stringify(pdmStillEditable ?? null).slice(0, 220),
+  );
+
+  const pdmFullNight = (await rpc("admin_event_dates", { p_event_id: null })).find(
+    (row) => row.date_uuid === pdmNightId,
+  );
+  check(
+    "and the night reads as full, with nothing left on sale",
+    pdmFullNight?.is_full === true && Number(pdmFullNight?.seats_available) === 0,
+    JSON.stringify({ is_full: pdmFullNight?.is_full, seats_available: pdmFullNight?.seats_available }),
+  );
+
+  // ---- 10. opening and closing booking -----------------------------------------
+  const pdmClosed = (await rpc("admin_set_event_date_booking", { p_id: pdmNightId, p_booking_open: false }))[0];
+  check(
+    "booking can be closed on a single night without cancelling it",
+    pdmClosed?.booking_open === false && pdmClosed?.night_status === "sold_out",
+    JSON.stringify(pdmClosed ?? null).slice(0, 200),
+  );
+
+  const pdmReopened = (await rpc("admin_set_event_date_booking", { p_id: pdmNightId, p_booking_open: true }))[0];
+  check(
+    "and reopened later with the capacity and the bookings untouched",
+    pdmReopened?.booking_open === true &&
+      Number(pdmReopened?.capacity) === Number(pdmPaidPeople) &&
+      Number(pdmReopened?.booked_people) === Number(pdmPaidPeople),
+    JSON.stringify(pdmReopened ?? null).slice(0, 200),
+  );
+
+  const pdmUnknownBookingToggle = await rpcError("admin_set_event_date_booking", {
+    p_id: "00000000-0000-4000-8000-0000000000fb",
+    p_booking_open: false,
+  });
+  check("opening or closing a night that does not exist is refused", pdmUnknownBookingToggle?.code === "PT007");
+
+  // A night that is otherwise wide open, with booking closed on it: the website must
+  // stop offering it and the booking path must refuse it with the same code a
+  // cancelled night gives.
+  const pdmClosedNight = (
+    await rpc("admin_save_event_date", {
+      p_id: null,
+      p_event_id: null,
+      p_event_date: pdmDay3,
+      p_start_time: "20:00",
+      p_end_time: "23:45",
+      p_capacity: 500,
+      p_capacity_held: 0,
+      p_status: "scheduled",
+      p_booking_open: true,
+      p_notes: null,
+    })
+  )[0];
+  const pdmClosedId = pdmClosedNight.date_uuid;
+
+  await rpc("admin_set_event_date_booking", { p_id: pdmClosedId, p_booking_open: false });
+  const pdmAvailabilityClosed = (await rpc("get_event_night_availability", { p_event_id: EVENT })).find(
+    (row) => row.event_date_id === pdmClosedId,
+  );
+  check(
+    "the website stops offering a night the moment booking closes",
+    pdmAvailabilityClosed?.is_booking_open === false &&
+      pdmAvailabilityClosed?.is_bookable === false &&
+      pdmAvailabilityClosed?.is_fully_booked === false,
+    JSON.stringify(pdmAvailabilityClosed ?? null),
+  );
+
+  const pdmBookingOnClosed = await createBookingError({
+    p_event_date_id: pdmClosedId,
+    p_pass_category_id: COUPLE,
+    p_customer_name: "Closed Night",
+    p_customer_mobile: "+919800001930",
+    p_customer_email: "closed@example.com",
+    p_quantity: 1,
+    p_number_of_people: 2,
+    p_idempotency_key: "pdm-closed-night",
+  });
+  check(
+    "and the booking path refuses it, with the same code a cancelled night gives",
+    pdmBookingOnClosed?.code === "PB002",
+    pdmBookingOnClosed?.code ?? "no error",
+  );
+
+  const pdmStillClosed = (await q(`select booking_open from public.event_dates where id = '${pdmClosedId}';`))[0];
+  check("and a refused booking does not reopen the night", pdmStillClosed.booking_open === false);
+
+  // ---- 11. capacity is defended by the booking path too ------------------------
+  // One pass fits: capacity 2, no seats held back, a two-person pass. The first
+  // booking takes it and pays; the three after it must all be refused with the
+  // remaining count, or a capacity would mean nothing to customers.
+  const pdmLastSeatNight = (
+    await rpc("admin_save_event_date", {
+      p_id: null,
+      p_event_id: null,
+      p_event_date: pdmDay2,
+      p_start_time: "20:00",
+      p_end_time: "23:45",
+      p_capacity: 2,
+      p_capacity_held: 0,
+      p_status: "scheduled",
+      p_booking_open: true,
+      p_notes: null,
+    })
+  )[0];
+
+  const pdmLastSeatAttempts = [];
+  for (const pdmAttempt of [1, 2, 3, 4]) {
+    const pdmTried = await createBookingError({
+      p_event_date_id: pdmLastSeatNight.date_uuid,
+      p_pass_category_id: COUPLE,
+      p_customer_name: `Last Seat ${pdmAttempt}`,
+      p_customer_mobile: `+91980000194${pdmAttempt}`,
+      p_customer_email: `last.seat.${pdmAttempt}@example.com`,
+      p_quantity: 1,
+      p_number_of_people: 2,
+      p_idempotency_key: `pdm-last-seat-${pdmAttempt}`,
+    });
+    pdmLastSeatAttempts.push(pdmTried);
+
+    if (pdmTried === null) {
+      const [pdmPlaced] = await q(`
+        select id, total_amount from public.bookings
+         where event_date_id = '${pdmLastSeatNight.date_uuid}' and idempotency_key = 'pdm-last-seat-${pdmAttempt}';
+      `);
+      await pdmPay(
+        { booking_uuid: pdmPlaced.id, total_amount: pdmPlaced.total_amount },
+        `order_PDMLAST00000000${pdmAttempt}`,
+        `pay_PDMLAST00000000${pdmAttempt}`,
+      );
+    }
+  }
+
+  const pdmLastSeatTaken = (
+    await q(`
+      select count(*) filter (where payment_status = 'paid')::int as paid_bookings,
+             coalesce(sum(number_of_people) filter (where payment_status = 'paid'), 0)::int as paid_people
+        from public.bookings where event_date_id = '${pdmLastSeatNight.date_uuid}';
+    `)
+  )[0];
+  check(
+    "a night with room for one pass takes exactly one pass, whatever else arrives",
+    Number(pdmLastSeatTaken.paid_bookings) === 1 && Number(pdmLastSeatTaken.paid_people) === 2,
+    `${pdmLastSeatTaken.paid_bookings} paid booking(s) / ${pdmLastSeatTaken.paid_people} people`,
+  );
+  check(
+    "and every attempt after the room ran out is refused by the capacity rule, with no places left",
+    pdmLastSeatAttempts.filter((error) => error === null).length === 1 &&
+      pdmLastSeatAttempts.filter((error) => error?.code === "PB001").length === 3 &&
+      pdmLastSeatAttempts.filter((error) => error?.code === "PB001").every((error) => error.detail === "0"),
+    pdmLastSeatAttempts.map((error) => `${error?.code ?? "accepted"}:${error?.detail ?? "-"}`).join(" "),
+  );
+
+  const pdmLastSeatAvailability = (await rpc("get_event_night_availability", { p_event_id: EVENT })).find(
+    (row) => row.event_date_id === pdmLastSeatNight.date_uuid,
+  );
+  check(
+    "and the website says the same thing the booking path just did",
+    pdmLastSeatAvailability?.is_fully_booked === true &&
+      pdmLastSeatAvailability?.is_bookable === false &&
+      Number(pdmLastSeatAvailability?.remaining) === 0,
+    JSON.stringify(pdmLastSeatAvailability ?? null),
+  );
+
+  // PGlite runs one connection, so a genuine race cannot be staged here. What can be
+  // checked — and what the concurrency claim actually rests on — is that every writer
+  // that counts seats for a night takes that night's row lock first, and that the
+  // booking path still refuses when the seats are gone. That is a fact about the SQL,
+  // and it is the difference between "the rule held in this run" and "the rule is
+  // enforced for whoever calls it".
+  const pdmWriters = await q(`
+    select p.proname, pg_get_functiondef(p.oid) as body
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public'
+       and p.proname in ('create_pending_booking', 'admin_save_event_date',
+                         'admin_set_event_date_capacity', 'admin_set_event_date_booking');
+  `);
+  const pdmLockers = pdmWriters
+    .filter((row) => /for update/i.test(row.body))
+    .map((row) => row.proname)
+    .sort();
+  check(
+    "every writer that counts a night's seats locks the night row first",
+    pdmLockers.length === 4,
+    pdmLockers.join(", ") || "none",
+  );
+  check(
+    "and the booking path still refuses under that lock when the seats are gone",
+    /capacity_unavailable/.test(pdmWriters.find((row) => row.proname === "create_pending_booking")?.body ?? "") &&
+      /for update/i.test(pdmWriters.find((row) => row.proname === "create_pending_booking")?.body ?? ""),
+  );
+
+  // ---- 12. who may do any of this ----------------------------------------------
+  const pdmFunctions = [
+    "public.admin_default_event_id()",
+    "public.admin_pass_catalogue(uuid)",
+    "public.admin_save_pass_category(uuid, uuid, text, text, text, text, integer, integer, integer, integer, integer, boolean)",
+    "public.admin_set_pass_category_active(uuid, boolean)",
+    "public.admin_event_dates(uuid)",
+    "public.admin_save_event_date(uuid, uuid, date, time, time, integer, integer, text, boolean, text)",
+    "public.admin_set_event_date_capacity(uuid, integer, integer)",
+    "public.admin_set_event_date_booking(uuid, boolean)",
+  ];
+
+  for (const pdmFunction of pdmFunctions) {
+    const [pdmGrants] = await q(`
+      select has_function_privilege('anon', '${pdmFunction}', 'execute')           as anon_can,
+             has_function_privilege('authenticated', '${pdmFunction}', 'execute')  as authenticated_can,
+             has_function_privilege('service_role', '${pdmFunction}', 'execute')   as service_can;
+    `);
+
+    check(
+      `${pdmFunction.split("(")[0].replace("public.", "")} is service-role only`,
+      pdmGrants.anon_can === false && pdmGrants.authenticated_can === false && pdmGrants.service_can === true,
+      JSON.stringify(pdmGrants),
+    );
+  }
+
+  const [pdmAvailabilityGrants] = await q(`
+    select has_function_privilege('anon', 'public.get_event_night_availability(uuid)', 'execute') as anon_can,
+           has_function_privilege('service_role', 'public.get_event_night_availability(uuid)', 'execute') as service_can;
+  `);
+  check(
+    "while the website can still ask how full a night is, and only that",
+    pdmAvailabilityGrants.anon_can === true && pdmAvailabilityGrants.service_can === true,
+    JSON.stringify(pdmAvailabilityGrants),
+  );
+
+  const pdmAnonCapacity = await expectError(`
+    set role anon;
+    select public.admin_set_event_date_capacity('${pdmNightId}', 1, 0);
+  `);
+  await run("reset role;");
+  check(
+    "an anonymous session cannot change a capacity even by calling the function by name",
+    /permission denied/i.test(pdmAnonCapacity ?? ""),
+    pdmAnonCapacity ?? "the call succeeded",
+  );
+
+  const pdmAnonCatalogue = await expectError(`set role anon; select * from public.admin_pass_catalogue();`);
+  await run("reset role;");
+  check(
+    "and cannot enumerate the catalogue or its takings",
+    /permission denied/i.test(pdmAnonCatalogue ?? ""),
+    pdmAnonCatalogue ?? "the read succeeded",
+  );
+
+  const pdmAuthPass = await expectError(`
+    set role authenticated;
+    select public.admin_save_pass_category(null, null, 'x', 'X Pass', '1 Guest', null, 100, 1, 1, 0, 1, true);
+  `);
+  await run("reset role;");
+  check(
+    "a signed-in-but-not-admin session cannot write a price either",
+    /permission denied/i.test(pdmAuthPass ?? ""),
+    pdmAuthPass ?? "the call succeeded",
+  );
+
+  check(
+    "and nothing in this section left the seeded price changed",
+    (await q(`select price_inr from public.pass_categories where id = '${COUPLE}';`))[0].price_inr === 499,
   );
 
   // ---------------------------------------------------------------------------

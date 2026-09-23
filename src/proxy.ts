@@ -33,7 +33,7 @@ import type { Database } from "@/types/database";
 
 /** Where a session can matter. Public pages never pay for this. */
 export const config = {
-  matcher: ["/admin/:path*", "/api/staff/:path*"],
+  matcher: ["/admin/:path*", "/api/staff/:path*", "/api/admin/:path*"],
 };
 
 const SIGN_IN_PATH = "/admin/login";
@@ -48,6 +48,20 @@ const ADMIN_HOME = "/admin";
  * permission — the map is not maintained by hand.
  */
 function permissionForPath(pathname: string): Permission | null {
+  // The write endpoints of the management screens. They are named after the screen
+  // they serve, plus the capability that is specific to changing something — so a
+  // role that may read a screen is not thereby allowed to post to it.
+  const API_PERMISSIONS: Record<string, Permission> = {
+    "/api/admin/passes": "passes:edit",
+    "/api/admin/dates": "dates:edit",
+  };
+
+  for (const [prefix, permission] of Object.entries(API_PERMISSIONS)) {
+    if (pathname === prefix || pathname.startsWith(`${prefix}/`)) {
+      return permission;
+    }
+  }
+
   const section = ADMIN_SECTIONS.find(
     (candidate) =>
       candidate.href !== null && (pathname === candidate.href || pathname.startsWith(`${candidate.href}/`)),
@@ -149,8 +163,14 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
       return jsonError(401, "not-authorized", "Sign in as event staff to use this endpoint.");
     }
 
-    if (!can(role, "scanner:use")) {
-      return jsonError(403, "forbidden", "Your role cannot check passes in.");
+    // The gate endpoints need `scanner:use`; the management endpoints need the
+    // capability that belongs to the screen they serve. Which one applies is read
+    // from the same map the pages use, so an endpoint cannot be added without its
+    // permission being named.
+    const required = permissionForPath(pathname) ?? "scanner:use";
+
+    if (!can(role, required)) {
+      return jsonError(403, "forbidden", "Your role cannot change this.");
     }
 
     return response;

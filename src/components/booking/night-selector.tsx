@@ -2,6 +2,7 @@
 
 import { ClockIcon, UsersIcon } from "@/components/icons";
 import { Badge } from "@/components/ui/badge";
+import { nightAvailabilityCopy, nightStateLabel, nightUnavailableReason } from "@/lib/event-copy";
 import { formatEventDate, formatTimeRange } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { EventNight } from "@/types";
@@ -63,7 +64,8 @@ function NightOption({ night, selected, onSelect }: NightOptionProps) {
   const timeRange = formatTimeRange(night.startTime, night.endTime);
   const isDisabled = !night.isBookable;
   const inputId = `night-${night.id}`;
-  const reason = disabledReason(night);
+  const reason = nightUnavailableReason(night);
+  const capacityLine = nightAvailabilityCopy(night);
 
   return (
     <div
@@ -86,12 +88,10 @@ function NightOption({ night, selected, onSelect }: NightOptionProps) {
 
         {night.isFullyBooked ? (
           <Badge variant="rani">Fully booked</Badge>
-        ) : night.status === "cancelled" ? (
-          <Badge variant="neutral">Cancelled</Badge>
-        ) : night.status === "completed" ? (
-          <Badge variant="neutral">Finished</Badge>
+        ) : night.isBookable ? (
+          <Badge variant="marigold">{nightStateLabel(night)}</Badge>
         ) : (
-          <Badge variant="marigold">Available</Badge>
+          <Badge variant="neutral">{nightStateLabel(night)}</Badge>
         )}
       </div>
 
@@ -102,10 +102,10 @@ function NightOption({ night, selected, onSelect }: NightOptionProps) {
         </p>
       ) : null}
 
-      {capacityCopy(night) ? (
+      {capacityLine ? (
         <p className="text-muted flex items-center gap-1.5 text-xs">
           <UsersIcon className="size-3.5" />
-          {capacityCopy(night)}
+          {capacityLine}
         </p>
       ) : null}
 
@@ -139,38 +139,4 @@ function NightOption({ night, selected, onSelect }: NightOptionProps) {
       ) : null}
     </div>
   );
-}
-
-/**
- * Capacity line for a night, or null when a remaining count would mislead.
- *
- * A cancelled or finished night keeps its capacity in the database, so printing
- * "1500 of 1500 places left" next to "Cancelled" would read as availability.
- */
-function capacityCopy(night: EventNight): string | null {
-  if (night.isFullyBooked) {
-    return "No passes left for this night";
-  }
-
-  if (night.status === "cancelled" || night.status === "completed") {
-    return null;
-  }
-
-  return `${night.remaining} of ${night.capacity} places left`;
-}
-
-function disabledReason(night: EventNight): string {
-  if (night.isFullyBooked) {
-    return "Fully booked";
-  }
-
-  if (night.status === "cancelled") {
-    return "Cancelled";
-  }
-
-  if (night.status === "completed") {
-    return "Finished";
-  }
-
-  return "Unavailable";
 }

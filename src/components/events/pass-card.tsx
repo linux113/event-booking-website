@@ -1,6 +1,7 @@
 import { CheckIcon } from "@/components/icons";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { passAgeCopy } from "@/lib/event-copy";
 import { formatInr } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { Route } from "next";
@@ -72,6 +73,7 @@ export function PassCard({ pass, bookHref = "/book", variant = "full", popular, 
       <p className="text-muted/90 text-xs font-medium">
         Admits {pass.numberOfPeople} {pass.numberOfPeople === 1 ? "person" : "people"} · up to{" "}
         {pass.maxPerBooking} per booking
+        {passAgeCopy(pass) ? ` · ${passAgeCopy(pass)}` : ""}
       </p>
 
       <ul className={cn("flex flex-col gap-2", isPreview && "text-sm")}>

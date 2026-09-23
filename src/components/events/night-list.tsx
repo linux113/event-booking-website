@@ -1,5 +1,6 @@
 import { ClockIcon, UsersIcon } from "@/components/icons";
 import { Badge } from "@/components/ui/badge";
+import { nightAvailabilityCopy, nightStateLabel } from "@/lib/event-copy";
 import { formatEventDate, formatTimeRange } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { EventNight } from "@/types";
@@ -52,10 +53,12 @@ export function NightCard({ night }: { night: EventNight }) {
         </p>
       ) : null}
 
-      <p className="text-muted mt-auto flex items-center gap-1.5 text-xs">
-        <UsersIcon className="size-3.5" />
-        {availabilityCopy(night)}
-      </p>
+      {nightAvailabilityCopy(night) ? (
+        <p className="text-muted mt-auto flex items-center gap-1.5 text-xs">
+          <UsersIcon className="size-3.5" />
+          {nightAvailabilityCopy(night)}
+        </p>
+      ) : null}
 
       {!night.isBookable ? (
         <p
@@ -64,7 +67,7 @@ export function NightCard({ night }: { night: EventNight }) {
             night.isFullyBooked ? "bg-rani/12 text-rani-soft" : "bg-surface-raised/60 text-muted",
           )}
         >
-          {night.isFullyBooked ? "Fully booked" : isCancelled ? "Cancelled" : "Not bookable"}
+          {nightStateLabel(night)}
         </p>
       ) : null}
     </div>
@@ -76,29 +79,9 @@ function StatusBadge({ night }: { night: EventNight }) {
     return <Badge variant="rani">Fully booked</Badge>;
   }
 
-  if (night.status === "cancelled") {
-    return <Badge variant="neutral">Cancelled</Badge>;
-  }
-
-  if (night.status === "completed") {
-    return <Badge variant="neutral">Finished</Badge>;
+  if (night.status === "cancelled" || night.status === "completed" || !night.isBookingOpen) {
+    return <Badge variant="neutral">{nightStateLabel(night)}</Badge>;
   }
 
   return <Badge variant="marigold">Available</Badge>;
-}
-
-function availabilityCopy(night: EventNight): string {
-  if (night.isFullyBooked) {
-    return "No passes left for this night";
-  }
-
-  if (night.status === "cancelled") {
-    return "This night has been cancelled";
-  }
-
-  if (night.status === "completed") {
-    return "This night has ended";
-  }
-
-  return `${night.remaining} of ${night.capacity} places left`;
 }

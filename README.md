@@ -21,8 +21,9 @@ fits within free tiers for development and small-scale launch.
 | 9 | Admin dashboard — eight live statistics, charts, recent bookings, loading skeletons and error states | ✅ done |
 | 10 | Booking management — searchable, filterable list, one booking in full, CSV export, payment statuses that only the gateway can move | ✅ done |
 | 11 | Payments and passes — the gateway's own record, the rows that contradict themselves, and the door list with a CSV export | ✅ done |
-| 12 | Operations screens — publish events, capacity and dates, gallery, settings | ⏳ next |
-| 13 | Hardening — rate limiting, analytics, perf budget | ⏳ |
+| 12 | Pass and date management — create and edit passes, prices, limits and age; add nights, set capacity, hold seats back, open and close booking | ✅ done |
+| 13 | Operations screens — publish events, gallery, settings | ⏳ next |
+| 14 | Hardening — rate limiting, analytics, perf budget | ⏳ |
 
 Step 3 is two halves of one job — the Supabase schema/RLS layer, then replacing every
 hard-coded value in the UI with database reads. Both are done and verified against real
@@ -422,6 +423,84 @@ permission it was missing named in the URL, and can only read the bookings list 
 always been able to read. The export route repeats the check on the server before it
 queries anything, so a signed-out request is refused before a row is read.
 
+## Pass and date management (`/admin/passes`, `/admin/dates`)
+
+Everything up to step 11 could *report* on the event. This step is the organiser changing
+it: what is on sale, at what price, for how many people, from what age — and how many
+seats each night has, how many are held back from the website, and whether booking is
+open at all.
+
+**Both screens are one idea: the organiser owns the decision, the database owns what it
+means.** Nothing on either page writes a table. Each control calls a narrow
+`service_role` function — `admin_save_pass_category`, `admin_set_pass_category_active`,
+`admin_save_event_date`, `admin_set_event_date_capacity`, `admin_set_event_date_booking`
+— which re-checks what it was given, takes the row lock it needs, and returns the row as
+the database now holds it. A capacity change cannot quietly rewrite a date, a price
+cannot arrive attached to a whole form, and taking a pass off sale cannot alter its
+composition on the way past.
+
+**Rules that cannot be broken by hand either.** `capacity >= 1`,
+`capacity_held >= 0`, `capacity_held <= capacity` and `min_age` in range are table
+constraints; a trigger on `event_dates` refuses any write — this file, a migration, the
+SQL editor — that would take seats away from people who have already paid
+(`capacity_below_taken`, carrying the lowest capacity the night may now have) or move a
+night whose passes have its date printed on them. Capacity can therefore never go
+negative, and a night that has sold out can still be edited: raising the capacity,
+cancelling it, fixing a time or a note is always allowed.
+
+**Bookings cannot overshoot either.** `create_pending_booking` and the public
+`get_event_night_availability` were both restated in the same migration, so the number
+the website offers and the number the booking path enforces are the same arithmetic:
+`capacity − seats held back − people who have paid`. Held-back seats are not online
+seats; a night whose booking is closed is `not_bookable` on the site and refused with
+`night_not_bookable` by the database, whatever the browser shows.
+
+**Concurrency is row locks, not hope.** Every writer that counts a night's seats locks
+the night row `for update` first — the booking path, the capacity setter, the night
+saver, the open/close toggle — so an organiser lowering a capacity and a guest paying for
+the last seat cannot interleave: one waits for the other. `npm run db:verify` asserts the
+lock is in all four, because "the rule held in this run" and "the rule is enforced for
+whoever calls it" are different claims.
+
+**`/admin/passes` answers two questions on one route.** *Pass types* (`?view=types`) is
+the catalogue: name, composition, price, people per pass, the booking limit, the age
+restriction, how many have been sold and how much they have taken — with a form to create
+one, a form to edit one inline, and a switch to take one off sale. *Issued passes* is the
+door list from step 11, and it is still what the route opens with. A pass is never
+deleted: off sale is a state, not an erasure, because a pass with bookings on it is the
+record of what was sold.
+
+**A price change is for the next guest.** Repricing a pass leaves every booking already
+taken exactly as it was charged — the amount lives on the booking, computed by a trigger
+when the booking was made — which is asserted rather than assumed, because the opposite
+would silently rewrite what people already paid.
+
+**`/admin/dates` is the nights.** Each night shows its date and times, capacity, seats
+held back, seats on sale and seats left, a progress bar, and its state in words
+(`On sale`, `Booking closed`, `Full · booking closed`, `Over-committed`, `Cancelled`).
+The two controls an organiser reaches for mid-event are separate one-field actions: *set
+capacity* (with the seats-held-back field beside it, so the website's pool can be
+corrected without touching the night's size) and *open/close booking*. A refusal comes
+back as the field it belongs to and the number it needs — "at least 82 seats, counting
+the ones already paid for" — so the control can offer the right figure instead of a
+generic error.
+
+**Who may change what.** `passes:edit` and `dates:edit` are held by admin and super
+admin; the pages themselves need `passes:view` / `dates:view`, and a role without them is
+sent to the dashboard with the missing permission named in the URL. The endpoints
+(`POST /api/admin/passes`, `POST /api/admin/dates`) are matched by the same permission
+map at the edge, so a signed-out request is refused before a body is read, and a role
+that may read a screen is not thereby allowed to post to it. Bodies are capped at 8 KB,
+a `GET` is answered with 405, and the database's refusals arrive as `409` with the field
+and the sentence rather than as a 500.
+
+**The website says what the organiser decided.** The public night list and the booking
+wizard print `seats left` against the seats actually on sale ("1480 of 1480 places left ·
+20 held for the gate"), show `Booking closed` on a night that has been closed, and show
+an age restriction as `18+ only` on the pass card and in the wizard's pass step. A
+closed night cannot be selected in the wizard, and the API refuses a booking on it with
+`this night is no longer open for booking` — the browser is never the thing that decides.
+
 ## Gate check-in (`/admin/scanner`)
 
 The scanner is the only part of the site that *changes* a pass, so it is built around one
@@ -499,6 +578,10 @@ Supabase directly.
 | The rows that need attention | `admin_payment_attention()` — one rule per broken invariant (paid with no pass issued, paid but not confirmed, refunded with an active pass, failed with a pass, a delivery we could not act on), each carrying its reason code, a sentence and the action that fixes it |
 | The door list, its search, its filters and its paging | `admin_pass_list()` — the search runs over pass ID, booking reference, guest name and mobile; ordering and the page slice happen in SQL and the count of the whole match comes back with every row. It never selects `qr_token` |
 | The pass counts above the door list | `admin_pass_summary()` — passes by status, admitted today in the venue's timezone, gates in use, and the money behind the passes counted **once per booking** rather than once per pass |
+| What is on sale, at what price, and how many people a pass admits | `admin_pass_catalogue()` — every pass type of the event, on sale or not, with the bookings, the paid bookings, the passes issued and the money taken, counted in SQL |
+| The nights, their capacity and their state | `admin_event_dates()` — capacity, seats held back, paid people, seats on sale, seats left, and whether the night is full or over-committed |
+| A pass being created, repriced, re-limited or taken off sale | `admin_save_pass_category()` / `admin_set_pass_category_active()` — `service_role` only, one row returned as the database now holds it |
+| A night being added, edited, resized or opened and closed | `admin_save_event_date()` / `admin_set_event_date_capacity()` / `admin_set_event_date_booking()` — each one narrow, each locking the night before it counts |
 | The dashboard numbers | `admin_dashboard_stats()` — counted in the database, for the venue's today |
 | The dashboard's charts | `admin_booking_series()` (a row per day, quiet days included) and `admin_pass_breakdown()` (per pass category) — both aggregated in SQL |
 | The signed-in role, at the edge | `current_staff_role()` — the caller's own role and nothing else, so the request hook can refuse before a page renders |
@@ -519,7 +602,8 @@ src/
 ├── app/                        # App Router routes (routing + composition only)
 │   ├── about/ book/ contact/ events/ gallery/ passes/   # page.tsx (+ loading.tsx skeleton)
 │   ├── admin/(auth)/login/     # staff sign-in — no admin chrome, no session needed
-│   ├── admin/(shell)/          # dashboard, scanner, bookings, payments, passes, settings, staff (session + role required)
+│   ├── admin/(shell)/          # dashboard, scanner, bookings, payments, passes, dates, settings, staff (session + role required)
+│   ├── api/admin/              # pass and date writes: POST only, session + capability checked, refusals as JSON
 │   ├── api/bookings/route.ts   # POST only: create a pending booking (no-key fallback)
 │   ├── api/payment/            # create-order, verify, webhook, status — all POST/GET server routes
 │   ├── api/staff/              # scan + check-in: staff session required, gate night decided server-side
@@ -531,7 +615,7 @@ src/
 │   └── globals.css             # Tailwind entry + @theme design tokens
 ├── assets/images/              # Original generated artwork (no stock, no faces)
 ├── components/
-│   ├── admin/                  # admin header/nav, scanner panel (camera + jsQR), scan verdict card
+│   ├── admin/                  # admin header/nav, scanner panel, filters, tables, and the pass/date forms + panels
 │   ├── booking/                # checkout wizard: steps, pass choice, summary, confirmation panel
 │   ├── brand/logo.tsx          # Inline brand mark (no image request)
 │   ├── contact/contact-card.tsx
@@ -542,12 +626,13 @@ src/
 │   └── ui/                     # Button, Card, Badge, Container, Section, EmptyState, Skeleton, ErrorState
 ├── config/                     # env.ts (only reader of process.env), site.ts, contact.ts
 ├── lib/
-│   ├── admin/                  # verdict.ts (scanner wording), bookings.ts + operations.ts (list filters, paging, CSV vocabulary)
+│   ├── admin/                  # verdict.ts, bookings.ts, operations.ts and catalogue.ts (list filters, paging, CSV vocabulary, form rules, refusal wording)
 │   ├── auth/                   # permissions.ts (roles + capabilities), guard.ts, staff.ts
 │   ├── booking/                # shared validation, idempotency keys (browser + server)
 │   ├── gate/                   # night.ts: which night the gate is working, in the venue's timezone
 │   ├── pass/                   # links, status, QR rendering (server) and QR decoding (browser)
-│   ├── services/               # events.ts, gallery.ts, bookings.ts, payments.ts, passes.ts, check-in.ts, admin.ts, admin-operations.ts, result.ts
+│   ├── services/               # events.ts, gallery.ts, bookings.ts, payments.ts, passes.ts, check-in.ts, admin.ts, admin-operations.ts, admin-catalogue.ts, result.ts
+│   ├── event-copy.ts           # what the site says about a night or a pass (seats on sale, booking closed, age)
 │   ├── supabase/               # browser / server / admin clients + public.ts (memoised anon client)
 │   ├── payments/               # razorpay.ts (orders + signatures), mode.ts (test/live guard), checkout.ts (browser loader)
 │   ├── format.ts               # INR, dates, times — UTC-anchored, composed from Intl parts
@@ -560,7 +645,7 @@ src/
     └── database.ts             # Generated-shape Supabase types for every table
 
 supabase/
-├── migrations/                 # schema → RLS → public data API → pass visibility → booking → payments → check-in → roles → dashboard → booking management → payments and passes
+├── migrations/                 # schema → RLS → public data API → pass visibility → booking → payments → check-in → roles → dashboard → booking management → payments and passes → pass and date management
 ├── seed.sql                    # event, 9 nights, 5 pass categories, features, highlights
 └── README.md                   # how to apply, roles, what is/isn't seeded
 
@@ -610,8 +695,8 @@ for the full table reference, roles and setup steps.
 | Table | Purpose | Public read? |
 | ----- | ------- | ------------ |
 | `events` | One festival (venue, city, status) | ✅ published only |
-| `event_dates` | One night per row, with capacity and status | ✅ published event (status marks cancelled / sold-out nights) |
-| `pass_categories` | Pass types + prices, per event | ✅ every row of a published event — `is_active` gates the sale, not the visibility |
+| `event_dates` | One night per row, with capacity, seats held back from online sale, whether booking is open, and status | ✅ published event (status marks cancelled / sold-out nights) |
+| `pass_categories` | Pass types + prices + age restriction, per event | ✅ every row of a published event — `is_active` gates the sale, not the visibility |
 | `event_highlights` | "What to expect" bullets per event | ✅ rows of a published event |
 | `event_features` | Production inclusions (anchor, DJ, drone…) | ✅ rows of a published event |
 | `bookings` | One booking = pass category × night, plus its Razorpay ids and a random `public_token` | ❌ staff only |
@@ -645,7 +730,11 @@ database, so an API bug alone cannot admit anybody. The verdicts are `valid`, `c
 and `not_authorised`.
 
 Per-night availability comes from `get_event_night_availability(uuid)`: visitors get
-remaining counts, never booking rows. A pass the organiser has disabled stays visible
+remaining counts, never booking rows — and the same `capacity − held back − paid`
+arithmetic the booking path enforces. A guard trigger on `event_dates` makes the
+impossible rows unrepresentable (`capacity_below_one`, `capacity_held_negative`,
+`capacity_held_above_capacity`, `capacity_below_taken`, `night_date_locked`), so an
+organiser cannot cut a night below what has already been paid for, by any route. A pass the organiser has disabled stays visible
 and is labelled "Not on sale"; the booking step — which runs with the service role — is
 what actually refuses to sell it.
 

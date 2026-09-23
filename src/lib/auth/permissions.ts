@@ -32,8 +32,13 @@ export type Permission =
   /** See customer contact details, amounts and gateway ids. */
   | "bookings:view_contact"
   | "payments:view"
+  /** Open the pass list. */
   | "passes:view"
+  /** Create and edit pass types, prices, limits and availability. */
+  | "passes:edit"
   | "dates:view"
+  /** Add and edit nights, set capacity, open and close booking. */
+  | "dates:edit"
   | "gallery:view"
   | "scanner:use"
   | "settings:view"
@@ -45,7 +50,9 @@ const PERMISSIONS_BY_ROLE: Record<StaffRole, readonly Permission[]> = {
     "bookings:view_contact",
     "payments:view",
     "passes:view",
+    "passes:edit",
     "dates:view",
+    "dates:edit",
     "gallery:view",
     "scanner:use",
     "settings:view",
@@ -56,7 +63,9 @@ const PERMISSIONS_BY_ROLE: Record<StaffRole, readonly Permission[]> = {
     "bookings:view_contact",
     "payments:view",
     "passes:view",
+    "passes:edit",
     "dates:view",
+    "dates:edit",
     "gallery:view",
     "scanner:use",
     "settings:view",
@@ -118,7 +127,7 @@ export const ADMIN_SECTIONS: readonly AdminSection[] = [
   {
     key: "passes",
     label: "Passes",
-    description: "Every issued pass, its state and when it was admitted.",
+    description: "Every issued pass, and the pass types on sale with their prices.",
     href: "/admin/passes",
     permission: "passes:view",
     built: true,
@@ -126,10 +135,10 @@ export const ADMIN_SECTIONS: readonly AdminSection[] = [
   {
     key: "dates",
     label: "Dates & capacity",
-    description: "Per-night capacity, how full a night is, and closing a night.",
+    description: "The nights, how full each one is, capacity and booking open or closed.",
     href: "/admin/dates",
     permission: "dates:view",
-    built: false,
+    built: true,
   },
   {
     key: "gallery",

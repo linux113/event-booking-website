@@ -4315,6 +4315,814 @@ async function main() {
   );
 
   // ---------------------------------------------------------------------------
+  section("Pass and date management: the catalogue, the nights, and who may change them");
+  // ---------------------------------------------------------------------------
+  // Two screens the organiser runs the event from, plus the rules behind them. The
+  // database's own half of this step — the constraints, the guard trigger, the
+  // capacity floor, the locks — is verified in `db:verify`; what a page-level test
+  // can add is the part that only exists end to end: the form rules the browser and
+  // the server share, the copy the website shows a visitor when seats are held back
+  // or booking is closed, and the fact that a role which may *read* a screen is not
+  // thereby allowed to *post* to it.
+  const catalogueLib = await import("../src/lib/admin/catalogue.ts");
+  const nightCopyLib = await import("../src/lib/event-copy.ts");
+  const { formatEventDate: formatDate } = await import("../src/lib/format.ts");
+
+  // ---- the words, and the rules the two screens share ----------------------------
+  const goodPassForm = {
+    id: null,
+    code: "Family Pass",
+    name: "Family Pass",
+    composition: "2 Adults + 2 Children",
+    description: "Entry for four, priced for a family.",
+    priceInr: "1099",
+    numberOfPeople: "4",
+    maxPerBooking: "5",
+    minAge: "0",
+    sortOrder: "5",
+    isActive: true,
+  };
+
+  const goodPass = catalogueLib.parsePassForm(goodPassForm);
+  check(
+    "a well-filled pass form parses into numbers, with nothing to complain about",
+    catalogueLib.isClean(goodPass.errors) &&
+      goodPass.values.priceInr === 1099 &&
+      goodPass.values.numberOfPeople === 4 &&
+      goodPass.values.maxPerBooking === 5 &&
+      goodPass.values.minAge === 0 &&
+      goodPass.values.sortOrder === 5 &&
+      goodPass.values.isActive === true,
+    JSON.stringify(goodPass.values),
+  );
+
+  const badPassForms = [
+    ["a name nobody would recognise", { name: "   " }, "name"],
+    ["a composition that says nothing", { composition: "" }, "composition"],
+    ["a code that is punctuation", { code: "??" }, "code"],
+    ["a price with letters in it", { priceInr: "12abc" }, "priceInr"],
+    ["a price of zero", { priceInr: "0" }, "priceInr"],
+    ["a price above the ceiling", { priceInr: "500001" }, "priceInr"],
+    ["a pass that admits nobody", { numberOfPeople: "0" }, "numberOfPeople"],
+    ["more people than a pass can admit", { numberOfPeople: "51" }, "numberOfPeople"],
+    ["a booking limit of zero", { maxPerBooking: "0" }, "maxPerBooking"],
+    ["an age restriction of 121", { minAge: "121" }, "minAge"],
+    ["an age restriction that is not a number", { minAge: "eighteen" }, "minAge"],
+    ["a display order past the limit", { sortOrder: "10000" }, "sortOrder"],
+    ["a description longer than the column allows", { description: "x".repeat(300) }, "description"],
+  ];
+
+  for (const [label, overrides, field] of badPassForms) {
+    const pdmParsed = catalogueLib.parsePassForm({ ...goodPassForm, ...overrides });
+
+    check(
+      `${label} is refused on the ${field} field`,
+      Boolean(pdmParsed.errors[field]) && !catalogueLib.isClean(pdmParsed.errors),
+      JSON.stringify(pdmParsed.errors),
+    );
+  }
+  check(
+    "the form reports the first offending field, in the order the form reads",
+    catalogueLib.firstFieldError({ code: "a", name: "b" })?.field === "code" &&
+      catalogueLib.firstFieldError({}) === null,
+    JSON.stringify(catalogueLib.firstFieldError({ code: "a", name: "b" })),
+  );
+
+  const goodNightForm = {
+    id: null,
+    date: "2026-10-25",
+    startTime: "19:00",
+    endTime: "23:30",
+    capacity: "1200",
+    capacityHeld: "",
+    status: "scheduled",
+    bookingOpen: true,
+    notes: "Extra night added after the first sold out.",
+  };
+
+  const goodNight = catalogueLib.parseNightForm(goodNightForm);
+  check(
+    "a well-filled night form parses, and leaves seats held back at zero when the field is empty",
+    catalogueLib.isClean(goodNight.errors) &&
+      goodNight.values.date === "2026-10-25" &&
+      goodNight.values.capacity === 1200 &&
+      goodNight.values.capacityHeld === 0 &&
+      goodNight.values.status === "scheduled" &&
+      goodNight.values.bookingOpen === true,
+    JSON.stringify(goodNight.values),
+  );
+
+  const badNightForms = [
+    ["a capacity of zero", { capacity: "0" }, "capacity"],
+    ["a capacity with letters in it", { capacity: "1200 seats" }, "capacity"],
+    ["more seats held back than the night has", { capacity: "100", capacityHeld: "101" }, "capacityHeld"],
+    ["negative seats held back", { capacityHeld: "-5" }, "capacityHeld"],
+    ["a date that is not a real day", { date: "2026-02-31" }, "date"],
+    ["no date at all", { date: "" }, "date"],
+    ["a time that is not a time", { startTime: "7pm" }, "startTime"],
+    ["a night that ends before it starts", { startTime: "20:00", endTime: "19:00" }, "endTime"],
+    ["a note longer than the column allows", { notes: "x".repeat(300) }, "notes"],
+  ];
+
+  for (const [label, overrides, field] of badNightForms) {
+    const pdmParsed = catalogueLib.parseNightForm({ ...goodNightForm, ...overrides });
+
+    check(
+      `${label} is refused on the ${field} field`,
+      Boolean(pdmParsed.errors[field]) && !catalogueLib.isClean(pdmParsed.errors),
+      JSON.stringify(pdmParsed.errors),
+    );
+  }
+  check(
+    "a status the screens do not offer falls back to scheduled rather than reaching the database",
+    catalogueLib.parseNightForm({ ...goodNightForm, status: "maybe" }).values.status === "scheduled",
+  );
+
+  // The database's refusals, in the form's language: this is what turns a SQLSTATE
+  // into a field to highlight, and it must not guess when it does not know the code.
+  const capacityFloorRefusal = catalogueLib.refusalFromDatabase({ code: "PT004", details: "82" });
+  check(
+    "a capacity below what has been paid for comes back as the capacity field, with the floor named",
+    capacityFloorRefusal.kind === "refused" &&
+      capacityFloorRefusal.field === "capacity" &&
+      capacityFloorRefusal.floor === 82 &&
+      capacityFloorRefusal.message.includes("82"),
+    JSON.stringify(capacityFloorRefusal),
+  );
+  check(
+    "a duplicate pass code is blamed on the code, not on the form as a whole",
+    catalogueLib.refusalFromDatabase({ code: "PC003" }).field === "code" &&
+      catalogueLib.refusalFromDatabase({ code: "PC003" }).kind === "refused",
+  );
+  check(
+    "and a rule this deployment has never heard of is reported as a failure rather than blamed on a field",
+    catalogueLib.refusalFromDatabase({ code: "ZZ999" }).kind === "server-error" &&
+      catalogueLib.refusalFromDatabase({ code: "ZZ999" }).field === undefined,
+  );
+  check(
+    "every code the management migrations raise has words attached to it",
+    Object.keys(catalogueLib.CATALOGUE_REFUSALS).length >= 21 &&
+      Object.values(catalogueLib.CATALOGUE_REFUSALS).every((copy) => copy.field && copy.message.length > 10),
+    `${Object.keys(catalogueLib.CATALOGUE_REFUSALS).length} codes`,
+  );
+
+  // ---- what the screens say a night is -------------------------------------------
+  const nightFixture = (overrides) => ({
+    id: "n",
+    date: "2026-10-11",
+    startTime: "19:00:00",
+    endTime: "23:30:00",
+    status: "scheduled",
+    capacity: 1500,
+    capacityHeld: 0,
+    bookedPeople: 0,
+    remaining: 1500,
+    isFullyBooked: false,
+    isBookingOpen: true,
+    isBookable: true,
+    ...overrides,
+  });
+
+  check(
+    "the seats actually on sale are the capacity minus the ones held back — never negative",
+    nightCopyLib.seatsOnSale({ capacity: 1500, capacityHeld: 50 }) === 1450 &&
+      nightCopyLib.seatsOnSale({ capacity: 10, capacityHeld: 40 }) === 0,
+  );
+  check(
+    "a night with seats held back says so, rather than showing two numbers that disagree",
+    nightCopyLib.nightAvailabilityCopy(nightFixture({ capacityHeld: 20, remaining: 1480 })) ===
+      "1480 of 1480 places left · 20 held for the gate",
+    nightCopyLib.nightAvailabilityCopy(nightFixture({ capacityHeld: 20, remaining: 1480 })),
+  );
+  check(
+    "a night whose booking is closed says that instead of counting seats",
+    nightCopyLib.nightAvailabilityCopy(nightFixture({ isBookingOpen: false, isBookable: false })) ===
+      "Booking is closed for this night" &&
+      nightCopyLib.nightStateLabel(nightFixture({ isBookingOpen: false, isBookable: false })) === "Booking closed",
+  );
+  check(
+    "a sold-out night still reads as sold out, and a cancelled one prints no availability at all",
+    nightCopyLib.nightAvailabilityCopy(nightFixture({ isFullyBooked: true })) ===
+      "No passes left for this night" &&
+      nightCopyLib.nightAvailabilityCopy(nightFixture({ status: "cancelled" })) === null,
+    JSON.stringify({
+      soldOut: nightCopyLib.nightAvailabilityCopy(nightFixture({ isFullyBooked: true })),
+      cancelled: nightCopyLib.nightAvailabilityCopy(nightFixture({ status: "cancelled" })),
+    }),
+  );
+  check(
+    "the reason a night cannot be selected is a sentence, not a blank",
+    nightCopyLib.nightUnavailableReason(nightFixture({ isBookable: true })) === "Select this night" &&
+      nightCopyLib.nightUnavailableReason(nightFixture({ isFullyBooked: true, isBookable: false })) ===
+        "Fully booked" &&
+      nightCopyLib.nightUnavailableReason(nightFixture({ status: "cancelled", isBookable: false })) ===
+        "Cancelled" &&
+      nightCopyLib.nightUnavailableReason(nightFixture({ isBookingOpen: false, isBookable: false })) ===
+        "Booking closed",
+    [
+      nightCopyLib.nightUnavailableReason(nightFixture({ isBookable: true })),
+      nightCopyLib.nightUnavailableReason(nightFixture({ isFullyBooked: true, isBookable: false })),
+      nightCopyLib.nightUnavailableReason(nightFixture({ isBookingOpen: false, isBookable: false })),
+    ].join(" / "),
+  );
+  check(
+    "an age restriction of zero means no restriction, and is never printed as \"0+\"",
+    nightCopyLib.passAgeCopy({ minAge: 0 }) === null && nightCopyLib.passAgeCopy({ minAge: 18 }) === "18+ only",
+  );
+  check(
+    "the admin screen's own words for a night agree with the public page's",
+    (() => {
+      const adminCopy = catalogueLib.nightState({
+        status: "scheduled",
+        bookingOpen: false,
+        isFull: false,
+        overCommitted: false,
+      });
+      const publicCopy = nightCopyLib.nightStateLabel(nightFixture({ isBookingOpen: false, isBookable: false }));
+
+      return adminCopy === publicCopy;
+    })(),
+  );
+  check(
+    "the capacity bar is a percentage that cannot lie",
+    catalogueLib.capacityPercent({ capacity: 0, bookedPeople: 0 }) === 0 &&
+      catalogueLib.capacityPercent({ capacity: 100, bookedPeople: 250 }) === 100 &&
+      catalogueLib.capacityPercent({ capacity: 200, bookedPeople: 50 }) === 25,
+  );
+  check(
+    "the catalogue summary names the price range and what is off sale",
+    catalogueLib
+      .catalogueSummary([
+        { isActive: true, priceInr: 399 },
+        { isActive: true, priceInr: 1099 },
+        { isActive: false, priceInr: 599 },
+      ])
+      .startsWith("2 of 3 pass types on sale") &&
+      catalogueLib.catalogueSummary([]) === "No pass types yet.",
+    catalogueLib.catalogueSummary([
+      { isActive: true, priceInr: 399 },
+      { isActive: true, priceInr: 1099 },
+      { isActive: false, priceInr: 599 },
+    ]),
+  );
+
+  // ---- fixtures: a night with seats held back, a night with booking closed --------
+  const HELD_NIGHT = "d0000000-0000-4000-8000-000000000004"; // FREE_NIGHT, untouched but for bookings
+  const CLOSED_NIGHT = "d0000000-0000-4000-8000-000000000005";
+  const HELD_BACK = 20;
+
+  await dbRun(`update public.event_dates set capacity_held = ${HELD_BACK} where id = '${HELD_NIGHT}';`);
+  await dbRun(`update public.event_dates set booking_open = false where id = '${CLOSED_NIGHT}';`);
+  await dbRun(`update public.pass_categories set min_age = 18 where id = '${COUPLE_PASS}';`);
+
+  const [heldNightRow] = await dbQuery(
+    `select capacity, capacity_held, booked_people, remaining
+       from public.get_event_night_availability($1) where event_date_id = $2`,
+    [EVENT_ID, HELD_NIGHT],
+  );
+  const seatsOnSale = Number(heldNightRow.capacity) - HELD_BACK;
+  const heldLine = `${Number(heldNightRow.remaining)} of ${seatsOnSale} places left · ${HELD_BACK} held for the gate`;
+
+  const pdmPassesPage = visibleText(await fetchPage("/passes"));
+  check(
+    "the public page offers only the seats that are on sale, and says where the rest went",
+    pdmPassesPage.includes(heldLine),
+    contextAround(pdmPassesPage, "places left"),
+  );
+  check(
+    "and a night the organiser has closed reads as closed, not as available",
+    pdmPassesPage.includes("Booking is closed for this night") && pdmPassesPage.includes("Booking closed"),
+    contextAround(pdmPassesPage, "Booking closed"),
+  );
+  check(
+    "an age restriction set on a pass reaches the page a guest buys from",
+    pdmPassesPage.includes("18+ only"),
+    contextAround(pdmPassesPage, "18+ only"),
+  );
+
+  const bookPage = visibleText(await fetchPage("/book"));
+  check(
+    "the booking wizard shows the same held-back seats as the event page",
+    bookPage.includes(heldLine),
+    contextAround(bookPage, "places left"),
+  );
+  check(
+    "a closed night cannot be selected in the wizard, and the reason is attached to it",
+    bookPage.includes("Booking closed") && bookPage.includes("this night cannot be selected"),
+    contextAround(bookPage, "Booking closed"),
+  );
+  // The age restriction is decided by one helper, and shown by both passes a guest can
+  // see: the card on the event page (already asserted above) and the choice inside the
+  // booking wizard's pass step — which is step 2, so its markup is not in the first
+  // response a browser gets. The wiring is checked at the source, the rendering on the
+  // page that does render it.
+  const passCardSource = readFileSync(join(REPO_ROOT, "src/components/events/pass-card.tsx"), "utf8");
+  const passChoiceSource = readFileSync(join(REPO_ROOT, "src/components/booking/pass-choice.tsx"), "utf8");
+  check(
+    "and the wizard's pass step shows the same age restriction, through the same helper",
+    passCardSource.includes("passAgeCopy(pass)") && passChoiceSource.includes("passAgeCopy(pass)"),
+    `${passCardSource.includes("passAgeCopy(pass)")} / ${passChoiceSource.includes("passAgeCopy(pass)")}`,
+  );
+
+  const closedNightBooking = await postBooking({
+    eventId: EVENT_ID,
+    eventDateId: CLOSED_NIGHT,
+    passCategoryId: COUPLE_PASS,
+    quantity: 1,
+    numberOfPeople: 2,
+    customerName: "Closed Night Guest",
+    customerMobile: "+919800000301",
+    customerEmail: "closed.night@example.com",
+    idempotencyKey: "pdm-closed-night-web",
+  });
+  check(
+    "and the server refuses a booking on that night whatever the browser shows",
+    closedNightBooking.status === 409 &&
+      closedNightBooking.payload?.error?.message === "This night is no longer open for booking.",
+    `${closedNightBooking.status} ${JSON.stringify(closedNightBooking.payload)}`,
+  );
+  check(
+    "with nothing written for the attempt",
+    (
+      await dbQuery(`select count(*)::int as n from public.bookings where event_date_id = $1 and customer_mobile = $2`, [
+        CLOSED_NIGHT,
+        "+919800000301",
+      ])
+    )[0].n === 0,
+  );
+
+  // ---- who may open the screens, and who may change what is on them --------------
+  const pdmGuest = await signIn("guest@example.com", STAFF_PASSWORD);
+  const pdmStaff = await signIn("scanner@example.com", STAFF_PASSWORD);
+  const pdmAdmin = await signIn("admin@example.com", STAFF_PASSWORD);
+  const pdmSuper = await signIn("owner@example.com", STAFF_PASSWORD);
+
+  // The guard sends a signed-out visitor to the sign-in screen carrying where they
+  // were going, as a path — the query string is not part of that handshake, so the
+  // types tab arrives as /admin/passes and lands on the door list after signing in.
+  for (const [path, expected] of [
+    ["/admin/dates", "/admin/dates"],
+    ["/admin/passes?view=types", "/admin/passes"],
+  ]) {
+    const pdmAnonymous = await adminHtml(path);
+    check(
+      `${path} sends a signed-out visitor to the sign-in screen`,
+      requiresSignIn(pdmAnonymous, expected),
+      `${pdmAnonymous.status} ${pdmAnonymous.location ?? ""}`,
+    );
+    check(`and the redirect from ${path} carries no admin content`, !pdmAnonymous.html.includes("Dates & capacity"));
+  }
+
+  const staffDates = await adminHtml("/admin/dates", pdmStaff.cookie);
+  check(
+    "a staff member's role does not include the nights screen at all",
+    staffDates.status === 307 && String(staffDates.location ?? "").includes("denied=dates%3Aview"),
+    `${staffDates.status} ${staffDates.location ?? ""}`,
+  );
+
+  const staffCatalogue = await adminHtml("/admin/passes?view=types", pdmStaff.cookie);
+  check(
+    "nor the pass catalogue — a role that may read issued passes is not thereby allowed to price them",
+    staffCatalogue.status === 307 && String(staffCatalogue.location ?? "").includes("denied=passes%3Aview"),
+    `${staffCatalogue.status} ${staffCatalogue.location ?? ""}`,
+  );
+
+  const guestCatalogue = await adminHtml("/admin/passes?view=types", pdmGuest.cookie);
+  check(
+    "and a signed-in account with no role is told the same thing",
+    guestCatalogue.status === 307 && String(guestCatalogue.location ?? "").includes("/admin"),
+    `${guestCatalogue.status} ${guestCatalogue.location ?? ""}`,
+  );
+
+  const datesPage = await adminHtml("/admin/dates", pdmAdmin.cookie);
+  check(
+    "an admin opens the nights screen and is offered the controls, not a notice",
+    datesPage.status === 200 &&
+      datesPage.text.includes("Dates & capacity") &&
+      datesPage.text.includes("Nights") &&
+      datesPage.text.includes("Set capacity") &&
+      datesPage.text.includes("Add a night") &&
+      datesPage.text.includes("Edit night"),
+    `${datesPage.status}`,
+  );
+  check(
+    "which counts capacity in people, and says so",
+    datesPage.text.includes("capacity is counted in people"),
+    contextAround(datesPage.text, "capacity is counted"),
+  );
+  check(
+    "the closed night offers to open booking, and the open ones offer to close it",
+    datesPage.text.includes("Open booking") && datesPage.text.includes("Close booking"),
+  );
+  check(
+    "and the night with seats held back shows both what is left and what was withheld",
+    datesPage.text.includes(`${HELD_BACK} held back`) && datesPage.text.includes("seats left"),
+    contextAround(datesPage.text, "held back"),
+  );
+
+  const cataloguePage = await adminHtml("/admin/passes?view=types", pdmAdmin.cookie);
+  check(
+    "an admin opens the pass catalogue and sees the prices, the limits and the age column",
+    cataloguePage.status === 200 &&
+      cataloguePage.text.includes("Pass types") &&
+      cataloguePage.text.includes("Add a pass type") &&
+      cataloguePage.text.includes("Duo Pass") &&
+      cataloguePage.text.includes("girls-2"),
+    `${cataloguePage.status}`,
+  );
+  check(
+    "including what is on sale and what is not",
+    cataloguePage.text.includes("on sale") &&
+      cataloguePage.text.includes("off sale") &&
+      cataloguePage.text.includes("All ages") &&
+      cataloguePage.text.includes("18+"),
+    contextAround(cataloguePage.text, "off sale"),
+  );
+  check(
+    "the two views are links, so either one can be bookmarked or sent",
+    cataloguePage.html.includes('href="/admin/passes?view=types"') &&
+      cataloguePage.html.includes('href="/admin/passes"'),
+  );
+
+  const doorListPage = await adminHtml("/admin/passes", pdmAdmin.cookie);
+  check(
+    "and the door list is still what /admin/passes opens with, with the catalogue one tab away",
+    doorListPage.status === 200 &&
+      doorListPage.text.includes("Issued passes") &&
+      doorListPage.text.includes("Pass types") &&
+      !doorListPage.text.includes("Add a pass type"),
+    `${doorListPage.status}`,
+  );
+
+  // ---- the two management endpoints ----------------------------------------------
+  const adminPost = async (path, body, cookie = pdmAdmin.cookie) => {
+    const pdmResponse = await fetch(api(path), {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+    let pdmPayload = null;
+
+    try {
+      pdmPayload = await pdmResponse.json();
+    } catch {
+      pdmPayload = null;
+    }
+
+    return { status: pdmResponse.status, payload: pdmPayload };
+  };
+
+  const datesGet = await fetchWith("/api/admin/dates", pdmAdmin.cookie);
+  check(
+    "the nights endpoint answers JSON, and a GET is not one of its verbs",
+    datesGet.status === 405 && (await datesGet.json()).ok === false,
+    `${datesGet.status}`,
+  );
+
+  const anonymousWrite = await adminPost("/api/admin/dates", { action: "capacity", id: HELD_NIGHT, capacity: 10 }, null);
+  check(
+    "a signed-out write is refused before anything is read",
+    anonymousWrite.status === 401 && anonymousWrite.payload?.error?.kind === "not-authorized",
+    `${anonymousWrite.status} ${JSON.stringify(anonymousWrite.payload)}`,
+  );
+  check(
+    "and it changed nothing",
+    (await dbQuery(`select capacity from public.event_dates where id = $1`, [HELD_NIGHT]))[0].capacity === 1500,
+  );
+
+  const staffWrite = await adminPost("/api/admin/dates", { action: "capacity", id: HELD_NIGHT, capacity: 10 }, pdmStaff.cookie);
+  check(
+    "a role that cannot change a night is refused by the endpoint itself, not only by the page",
+    staffWrite.status === 403 && staffWrite.payload?.error?.kind === "forbidden",
+    `${staffWrite.status} ${JSON.stringify(staffWrite.payload)}`,
+  );
+  const staffPassWrite = await adminPost("/api/admin/passes", { action: "toggle", id: COUPLE_PASS, isActive: false }, pdmStaff.cookie);
+  check(
+    "and the same for the pass catalogue",
+    staffPassWrite.status === 403 &&
+      (await dbQuery(`select is_active from public.pass_categories where id = $1`, [COUPLE_PASS]))[0].is_active ===
+        true,
+    `${staffPassWrite.status}`,
+  );
+
+  const unknownAction = await adminPost("/api/admin/dates", { action: "delete", id: HELD_NIGHT });
+  check(
+    "an action the endpoint does not implement is refused rather than guessed at",
+    unknownAction.status === 400 && unknownAction.payload?.error?.field === "date",
+    JSON.stringify(unknownAction.payload),
+  );
+
+  const notJson = await adminPost("/api/admin/dates", "capacity=10");
+  check("a body that is not JSON is refused", notJson.status === 400, `${notJson.status}`);
+
+  const oversized = await adminPost("/api/admin/dates", { action: "capacity", id: HELD_NIGHT, capacity: 10, pad: "x".repeat(9000) });
+  check("and a body too large to be a form is refused unread", oversized.status === 400, `${oversized.status}`);
+
+  const zeroCapacity = await adminPost("/api/admin/dates", { action: "capacity", id: HELD_NIGHT, capacity: 0 });
+  check(
+    "a capacity of zero is refused with the field to highlight",
+    zeroCapacity.status === 400 &&
+      zeroCapacity.payload?.error?.field === "capacity" &&
+      zeroCapacity.payload?.error?.code === "PT001",
+    JSON.stringify(zeroCapacity.payload),
+  );
+  const negativeHeld = await adminPost("/api/admin/dates", {
+    action: "capacity",
+    id: HELD_NIGHT,
+    capacity: 1500,
+    capacityHeld: -5,
+  });
+  check(
+    "so is a negative number of seats held back",
+    negativeHeld.status === 400 && negativeHeld.payload?.error?.field === "capacityHeld",
+    JSON.stringify(negativeHeld.payload),
+  );
+
+  const belowSold = await adminPost("/api/admin/dates", { action: "capacity", id: NIGHT_1, capacity: 1 });
+  check(
+    "and a capacity below the seats already paid for is refused by the database, with the floor in the answer",
+    belowSold.status === 409 &&
+      belowSold.payload?.error?.kind === "refused" &&
+      belowSold.payload?.error?.code === "PT004" &&
+      belowSold.payload?.error?.field === "capacity" &&
+      belowSold.payload?.error?.floor === 4 &&
+      belowSold.payload?.error?.message.includes("4"),
+    JSON.stringify(belowSold.payload?.error ?? {}),
+  );
+  check(
+    "with the night left exactly as it was",
+    (await dbQuery(`select capacity, capacity_held from public.event_dates where id = $1`, [NIGHT_1]))[0].capacity === 4,
+  );
+
+  const [heldNightPaid] = await dbQuery(
+    `select coalesce(sum(number_of_people) filter (where payment_status = 'paid'), 0)::int as paid
+       from public.bookings where event_date_id = $1`,
+    [HELD_NIGHT],
+  );
+  const raisedCapacity = await adminPost("/api/admin/dates", {
+    action: "capacity",
+    id: HELD_NIGHT,
+    capacity: 800,
+    capacityHeld: HELD_BACK,
+  });
+  check(
+    "raising the capacity is allowed, and the answer carries the new arithmetic",
+    raisedCapacity.status === 200 &&
+      raisedCapacity.payload?.ok === true &&
+      raisedCapacity.payload?.data?.capacity === 800 &&
+      raisedCapacity.payload?.data?.capacityHeld === HELD_BACK &&
+      raisedCapacity.payload?.data?.seatsAvailable === 800 - HELD_BACK - Number(heldNightPaid.paid),
+    JSON.stringify(raisedCapacity.payload?.data ?? {}),
+  );
+  check(
+    "which is what the database now says",
+    (await dbQuery(`select capacity, capacity_held from public.event_dates where id = $1`, [HELD_NIGHT]))[0]
+      .capacity === 800,
+  );
+
+  const closedViaApi = await adminPost("/api/admin/dates", { action: "booking", id: HELD_NIGHT, bookingOpen: false });
+  check(
+    "booking can be closed from the endpoint, and the answer says so",
+    closedViaApi.status === 200 &&
+      closedViaApi.payload?.data?.bookingOpen === false &&
+      (await dbQuery(`select booking_open from public.event_dates where id = $1`, [HELD_NIGHT]))[0].booking_open ===
+        false,
+    JSON.stringify(closedViaApi.payload?.data ?? {}),
+  );
+  const reopenedViaApi = await adminPost("/api/admin/dates", { action: "booking", id: HELD_NIGHT, bookingOpen: true });
+  check(
+    "and opened again, without touching the capacity",
+    reopenedViaApi.status === 200 &&
+      reopenedViaApi.payload?.data?.bookingOpen === true &&
+      (await dbQuery(`select capacity from public.event_dates where id = $1`, [HELD_NIGHT]))[0].capacity === 800,
+  );
+
+  const badNightSave = await adminPost("/api/admin/dates", {
+    action: "save",
+    night: { date: "not-a-date", capacity: 500 },
+  });
+  check(
+    "a night form that does not parse is refused with the field it failed on",
+    badNightSave.status === 400 && badNightSave.payload?.error?.field === "date",
+    JSON.stringify(badNightSave.payload?.error ?? {}),
+  );
+
+  const savedNight = await adminPost("/api/admin/dates", {
+    action: "save",
+    night: {
+      date: "2027-02-14",
+      startTime: "19:30",
+      endTime: "23:45",
+      capacity: "600",
+      capacityHeld: "30",
+      status: "scheduled",
+      bookingOpen: true,
+      notes: "Added from the verification run.",
+    },
+  });
+  check(
+    "an organiser can add a night through the endpoint, and the row it returns is the database's",
+    savedNight.status === 200 &&
+      savedNight.payload?.ok === true &&
+      savedNight.payload?.data?.date === "2027-02-14" &&
+      savedNight.payload?.data?.capacity === 600 &&
+      savedNight.payload?.data?.capacityHeld === 30 &&
+      savedNight.payload?.data?.seatsAvailable === 570,
+    JSON.stringify(savedNight.payload?.data ?? {}),
+  );
+
+  const addedNightPage = await adminHtml("/admin/dates", pdmAdmin.cookie);
+  const addedNightLabel = formatDate("2027-02-14");
+  check(
+    "and it is on the screen the moment it exists, with its note and its own arithmetic",
+    addedNightPage.text.includes(addedNightLabel) &&
+      addedNightPage.text.includes("Added from the verification run.") &&
+      addedNightPage.text.includes("570 of 600 seats left"),
+    contextAround(addedNightPage.text, addedNightLabel),
+  );
+
+  const duplicateNightSave = await adminPost("/api/admin/dates", {
+    action: "save",
+    night: { date: "2027-02-14", capacity: "100", status: "scheduled", bookingOpen: true },
+  });
+  check(
+    "a second night on the same date is refused by the database's own constraint",
+    duplicateNightSave.status === 409 && duplicateNightSave.payload?.error?.code === "PT006",
+    JSON.stringify(duplicateNightSave.payload?.error ?? {}),
+  );
+
+  // ---- the pass catalogue through the endpoint ------------------------------------
+  const [passCountBefore] = await dbQuery(`select count(*)::int as n from public.pass_categories`);
+
+  const badPassSave = await adminPost("/api/admin/passes", {
+    action: "save",
+    pass: { code: "verification-pass", name: "Verification Pass", composition: "2 Guests", priceInr: 0, numberOfPeople: 2, maxPerBooking: 2 },
+  });
+  check(
+    "a pass with no price is refused with the price field flagged",
+    badPassSave.status === 400 && badPassSave.payload?.error?.field === "priceInr",
+    JSON.stringify(badPassSave.payload?.error ?? {}),
+  );
+  check(
+    "and no pass was created for it",
+    (await dbQuery(`select count(*)::int as n from public.pass_categories`))[0].n === passCountBefore.n,
+  );
+
+  const duplicatePassSave = await adminPost("/api/admin/passes", {
+    action: "save",
+    pass: {
+      code: "Girls 2",
+      name: "Another Duo",
+      composition: "2 Guests",
+      priceInr: 450,
+      numberOfPeople: 2,
+      maxPerBooking: 2,
+      minAge: 0,
+      sortOrder: 99,
+      isActive: true,
+    },
+  });
+  check(
+    "a code that is already taken is refused by the database, and blamed on the code",
+    duplicatePassSave.status === 409 &&
+      duplicatePassSave.payload?.error?.code === "PC003" &&
+      duplicatePassSave.payload?.error?.field === "code",
+    JSON.stringify(duplicatePassSave.payload?.error ?? {}),
+  );
+
+  const savedPass = await adminPost("/api/admin/passes", {
+    action: "save",
+    pass: {
+      code: "verification-pass",
+      name: "Verification Pass",
+      composition: "2 Guests",
+      description: "Added from the verification run.",
+      priceInr: "650",
+      numberOfPeople: "2",
+      maxPerBooking: "4",
+      minAge: "18",
+      sortOrder: "88",
+      isActive: true,
+    },
+  });
+  check(
+    "an organiser can create a pass, and the row that comes back is the database's own",
+    savedPass.status === 200 &&
+      savedPass.payload?.ok === true &&
+      // The spelling the organiser typed is kept: the code is hyphenated, not shouted.
+      savedPass.payload?.data?.code === "verification-pass" &&
+      savedPass.payload?.data?.priceInr === 650 &&
+      savedPass.payload?.data?.minAge === 18 &&
+      savedPass.payload?.data?.maxPerBooking === 4,
+    JSON.stringify(savedPass.payload?.data ?? {}),
+  );
+
+  const savedPassId = savedPass.payload?.data?.id;
+  check(
+    "which is on the booking page's list of passes, at the price that was set",
+    (await dbQuery(`select price_inr, min_age, is_active from public.pass_categories where id = $1`, [savedPassId]))[0]
+      .price_inr === 650,
+  );
+
+  const repricedPass = await adminPost("/api/admin/passes", {
+    action: "save",
+    pass: {
+      id: savedPassId,
+      code: "verification-pass",
+      name: "Verification Pass",
+      composition: "2 Guests",
+      description: "Repriced by the verification run.",
+      priceInr: "700",
+      numberOfPeople: "2",
+      maxPerBooking: "4",
+      minAge: "21",
+      sortOrder: "88",
+      isActive: true,
+    },
+  });
+  check(
+    "and editing it changes the price, the description and the age restriction in one call",
+    repricedPass.status === 200 &&
+      repricedPass.payload?.data?.priceInr === 700 &&
+      repricedPass.payload?.data?.minAge === 21 &&
+      repricedPass.payload?.data?.description === "Repriced by the verification run.",
+    JSON.stringify(repricedPass.payload?.data ?? {}),
+  );
+
+  const offSale = await adminPost("/api/admin/passes", { action: "toggle", id: savedPassId, isActive: false });
+  check(
+    "taking a pass off sale is one narrow call that leaves the rest of it alone",
+    offSale.status === 200 &&
+      offSale.payload?.data?.isActive === false &&
+      (
+        await dbQuery(`select price_inr, min_age, name from public.pass_categories where id = $1`, [savedPassId])
+      )[0].price_inr === 700,
+    JSON.stringify(offSale.payload?.data ?? {}),
+  );
+
+  const catalogueAfterToggle = await adminHtml("/admin/passes?view=types", pdmAdmin.cookie);
+  check(
+    "and the catalogue says so, on the row itself",
+    catalogueAfterToggle.text.includes("Verification Pass") &&
+      catalogueAfterToggle.text.includes("off sale") &&
+      catalogueAfterToggle.text.includes("Put on sale"),
+    contextAround(catalogueAfterToggle.text, "Verification Pass"),
+  );
+
+  const publicPassesAfterToggle = visibleText(await fetchPage("/passes"));
+  check(
+    "while the booking page greys it out rather than pretending it never existed",
+    publicPassesAfterToggle.includes("Verification Pass") && publicPassesAfterToggle.includes("Not on sale"),
+    contextAround(publicPassesAfterToggle, "Verification Pass"),
+  );
+
+  const unknownToggle = await adminPost("/api/admin/passes", {
+    action: "toggle",
+    id: "00000000-0000-4000-8000-0000000000fa",
+    isActive: false,
+  });
+  check(
+    "toggling a pass that no longer exists is refused with the sentence that says so",
+    unknownToggle.status === 409 &&
+      unknownToggle.payload?.error?.code === "PC008" &&
+      unknownToggle.payload?.error?.message.includes("no longer exists"),
+    JSON.stringify(unknownToggle.payload?.error ?? {}),
+  );
+
+  // The owner holds the same capabilities as an admin here: there is one way to run
+  // the desk, not two.
+  const superCapacity = await adminPost(
+    "/api/admin/dates",
+    { action: "capacity", id: "00000000-0000-4000-8000-0000000000fb", capacity: 100 },
+    pdmSuper.cookie,
+  );
+  check(
+    "a super admin reaches the same endpoint, and an unknown night is still not found",
+    pdmSuper.userId !== null &&
+      superCapacity.status === 409 &&
+      superCapacity.payload?.error?.code === "PT007",
+    `${superCapacity.status} ${JSON.stringify(superCapacity.payload?.error ?? {})}`,
+  );
+
+  // ---- and the fixtures are put back ---------------------------------------------
+  await dbRun(`update public.event_dates set capacity = 1500, capacity_held = 0 where id = '${HELD_NIGHT}';`);
+  await dbRun(`update public.event_dates set booking_open = true where id = '${CLOSED_NIGHT}';`);
+  await dbRun(`update public.pass_categories set min_age = 0 where id = '${COUPLE_PASS}';`);
+  check(
+    "the shared fixtures are put back the way the rest of the run found them",
+    (
+      await dbQuery(
+        `select (select capacity_held from public.event_dates where id = $1) as held,
+                (select booking_open from public.event_dates where id = $2) as open,
+                (select min_age from public.pass_categories where id = $3) as age`,
+        [HELD_NIGHT, CLOSED_NIGHT, COUPLE_PASS],
+      )
+    )[0].held === 0,
+  );
+
+  // ---------------------------------------------------------------------------
   section("Result");
   // ---------------------------------------------------------------------------
   console.log(`\n  ${passed} passed, ${failures.length} failed\n`);

@@ -182,6 +182,8 @@ export interface Database {
           start_time: string | null;
           end_time: string | null;
           capacity: number;
+          capacity_held: number;
+          booking_open: boolean;
           status: EventDateStatus;
           notes: string | null;
           created_at: string;
@@ -194,6 +196,8 @@ export interface Database {
           start_time?: string | null;
           end_time?: string | null;
           capacity?: number;
+          capacity_held?: number;
+          booking_open?: boolean;
           status?: EventDateStatus;
           notes?: string | null;
           created_at?: string;
@@ -206,6 +210,8 @@ export interface Database {
           start_time?: string | null;
           end_time?: string | null;
           capacity?: number;
+          capacity_held?: number;
+          booking_open?: boolean;
           status?: EventDateStatus;
           notes?: string | null;
           created_at?: string;
@@ -254,6 +260,7 @@ export interface Database {
           price_inr: number;
           number_of_people: number;
           max_per_booking: number;
+          min_age: number;
           is_active: boolean;
           sort_order: number;
           created_at: string;
@@ -269,6 +276,7 @@ export interface Database {
           price_inr: number;
           number_of_people: number;
           max_per_booking?: number;
+          min_age?: number;
           is_active?: boolean;
           sort_order?: number;
           created_at?: string;
@@ -284,6 +292,7 @@ export interface Database {
           price_inr?: number;
           number_of_people?: number;
           max_per_booking?: number;
+          min_age?: number;
           is_active?: boolean;
           sort_order?: number;
           created_at?: string;
@@ -886,6 +895,155 @@ export interface Database {
           event_count: number;
           created_at: string;
           total_count: number;
+        }[];
+      };
+      /**
+       * The two management screens' reads and writes. Every write takes the values
+       * the form sent and re-validates them in SQL; the app never writes a table
+       * directly, so there is one place where "a legal pass" and "a legal night"
+       * are defined — and it is the database.
+       */
+      admin_default_event_id: {
+        Args: Record<PropertyKey, never>;
+        Returns: string | null;
+      };
+      admin_pass_catalogue: {
+        Args: { p_event_id?: string | null };
+        Returns: {
+          pass_uuid: string;
+          code: string;
+          name: string;
+          composition: string;
+          description: string | null;
+          price_inr: number;
+          number_of_people: number;
+          max_per_booking: number;
+          min_age: number;
+          is_active: boolean;
+          sort_order: number;
+          bookings_count: number;
+          paid_bookings: number;
+          passes_issued: number;
+          people_sold: number;
+          revenue_inr: number;
+          created_at: string;
+          updated_at: string;
+        }[];
+      };
+      admin_save_pass_category: {
+        Args: {
+          p_id?: string | null;
+          p_event_id?: string | null;
+          p_code: string;
+          p_name: string;
+          p_composition: string;
+          p_description?: string | null;
+          p_price_inr: number;
+          p_number_of_people: number;
+          p_max_per_booking: number;
+          p_min_age: number;
+          p_sort_order: number;
+          p_is_active: boolean;
+        };
+        Returns: {
+          pass_uuid: string;
+          code: string;
+          name: string;
+          composition: string;
+          description: string | null;
+          price_inr: number;
+          number_of_people: number;
+          max_per_booking: number;
+          min_age: number;
+          is_active: boolean;
+          sort_order: number;
+          created_at: string;
+          updated_at: string;
+        }[];
+      };
+      admin_set_pass_category_active: {
+        Args: { p_id: string; p_is_active: boolean };
+        Returns: {
+          pass_uuid: string;
+          code: string;
+          name: string;
+          is_active: boolean;
+          updated_at: string;
+        }[];
+      };
+      admin_event_dates: {
+        Args: { p_event_id?: string | null };
+        Returns: {
+          date_uuid: string;
+          event_date: string;
+          start_time: string | null;
+          end_time: string | null;
+          night_status: string;
+          capacity: number;
+          capacity_held: number;
+          booking_open: boolean;
+          notes: string | null;
+          booked_people: number;
+          booked_bookings: number;
+          passes_issued: number;
+          seats_on_sale: number;
+          seats_available: number;
+          over_committed: boolean;
+          is_full: boolean;
+          created_at: string;
+          updated_at: string;
+        }[];
+      };
+      admin_save_event_date: {
+        Args: {
+          p_id?: string | null;
+          p_event_id?: string | null;
+          p_event_date: string;
+          p_start_time?: string | null;
+          p_end_time?: string | null;
+          p_capacity: number;
+          p_capacity_held?: number;
+          p_status: string;
+          p_booking_open?: boolean;
+          p_notes?: string | null;
+        };
+        Returns: {
+          date_uuid: string;
+          event_date: string;
+          start_time: string | null;
+          end_time: string | null;
+          night_status: string;
+          capacity: number;
+          capacity_held: number;
+          booking_open: boolean;
+          notes: string | null;
+          booked_people: number;
+          seats_available: number;
+          updated_at: string;
+        }[];
+      };
+      admin_set_event_date_capacity: {
+        Args: { p_id: string; p_capacity: number; p_capacity_held?: number | null };
+        Returns: {
+          date_uuid: string;
+          capacity: number;
+          capacity_held: number;
+          booked_people: number;
+          seats_available: number;
+          updated_at: string;
+        }[];
+      };
+      admin_set_event_date_booking: {
+        Args: { p_id: string; p_booking_open: boolean };
+        Returns: {
+          date_uuid: string;
+          booking_open: boolean;
+          night_status: string;
+          capacity: number;
+          capacity_held: number;
+          booked_people: number;
+          seats_available: number;
+          updated_at: string;
         }[];
       };
       admin_payment_summary: {

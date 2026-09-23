@@ -22,8 +22,8 @@ supabase/
 | Table | Purpose | Public read? |
 | ----- | ------- | ------------ |
 | `events` | One festival (venue, city, status) | ✅ published only |
-| `event_dates` | One night per row, with capacity and status | ✅ nights of a published event (status tells the UI it is cancelled or finished) |
-| `pass_categories` | Pass types + prices (per event) | ✅ every row of a published event — `is_active` decides whether it can be bought, not whether it is shown |
+| `event_dates` | One night per row, with capacity, `capacity_held` (seats withheld from online sale) and `booking_open` | ✅ nights of a published event (status tells the UI it is cancelled or finished) |
+| `pass_categories` | Pass types + prices + `min_age` (per event) | ✅ every row of a published event — `is_active` decides whether it can be bought, not whether it is shown |
 | `event_highlights` | "What to expect" bullets per event | ✅ rows of a published event |
 | `event_features` | Production inclusions (anchor, DJ, drone…) | ✅ rows of a published event |
 | `bookings` | One booking = one pass category on one night | ❌ staff only |
@@ -252,6 +252,14 @@ counts or filters rows by pulling a table into Node:
 | `admin_payment_attention(p_include_contact, p_limit)` | The rows whose payment state contradicts the rest of the row, each as `reason_code` + `reason` + `action`: `paid-no-pass`, `paid-not-confirmed`, `refunded-with-active-pass`, `failed-with-pass`, `event-ignored`. The reason and the action are sentences decided here, beside the rule they describe, and **nothing on the screen can fix them** — a payment status is only ever moved by a verified gateway event (`PB007`), so the fix is re-delivering the event or cancelling the pass |
 | `admin_payment_summary(p_include_contact)` | The counts above the log: deliveries by outcome (`confirmed`, `already_confirmed`, `failed`, `refunded`, `ignored`, `duplicate`), the bookings still awaiting a verified payment, when the last delivery arrived and was processed, and `captured_paise`/`refunded_paise` summed from **the gateway's own payload amounts** — deliberately not from the amounts stored on our bookings, which is what makes the two comparable. Both sums are `null` without `p_include_contact` |
 | `admin_pass_list(p_query, p_status, p_check_in, p_event_date_id, p_from, p_to, p_include_contact, p_limit, p_offset)` | `/admin/passes`: the door list — one row per issued pass, with its pass number, how many passes the booking holds, the booking, the guest, the night, the pass category, the booking's own statuses, and the entry record (checked in, when, gate, and the staff member who admitted it). Ordering is `created_at desc, booking_id desc, pass_number desc`, so a booking's passes stay together and in order, and every row carries `total_count` for the whole match. Search covers pass ID, booking reference, guest name and mobile. A status or entry value outside the schema's vocabulary narrows nothing. `p_limit` clamps to 1–100. **`qr_token` is never selected** — the credential that admits a guest is not on the list, in the CSV, or in any parameter | 
+| `admin_pass_catalogue(p_event_id)` | `/admin/passes?view=types`: every pass type of the event — on sale or not — with its name, composition, description, price, people per pass, booking limit, `min_age`, sort order, and what has been sold on it: bookings, paid bookings, passes issued, people sold and revenue taken, all counted in SQL. Defaults to the event `admin_default_event_id()` picks (the published one, else the oldest) |
+| `admin_save_pass_category(p_id, p_event_id, p_code, p_name, p_composition, p_description, p_price_inr, p_number_of_people, p_max_per_booking, p_min_age, p_sort_order, p_is_active)` | Creates (`p_id` null) or edits one pass type and returns the row as it now stands. Spaces and underscores in the code become dashes; the spelling the organiser typed is kept, and a case-folded unique index stops "Family-Pass" and "family-pass" becoming two rows at two prices (`PC003`). Price 1–500 000 (`PC004`), people 1–50 (`PC005`), at most 100 per booking (`PC006`), age 0–120 (`PC007`), and the event is not reassignable — a pass that sold belongs to the event it sold for |
+| `admin_set_pass_category_active(p_id, p_is_active)` | Takes one pass on or off sale and touches nothing else — deliberately narrow, so the switch cannot rewrite a price on its way past. Nothing is ever deleted: a pass with bookings on it is the record of what was sold |
+| `admin_event_dates(p_event_id)` | `/admin/dates`: every night of the event with `capacity`, `capacity_held`, `booking_open`, paid people, paid bookings, passes issued, `seats_on_sale`, `seats_available`, `over_committed` and `is_full` — aggregated in SQL so the screen counts nothing |
+| `admin_save_event_date(p_id, p_event_id, p_event_date, p_start_time, p_end_time, p_capacity, p_capacity_held, p_status, p_booking_open, p_notes)` | Creates or edits one night. Locks the night row before counting, refuses a capacity below the seats paid for plus the seats held back (`PT004`, with the floor in `detail`), an impossible held figure (`PT002`/`PT003`), a duplicate date (`PT006`) or a night that ends before it starts (`PT008`) |
+| `admin_set_event_date_capacity(p_id, p_capacity, p_capacity_held)` | `capacity_held` defaults to the value already stored, so a capacity can be corrected without disturbing what is held back. Locks the night, then refuses `paid + held > capacity` with `PT004` — the number the control needs to offer instead |
+| `admin_set_event_date_booking(p_id, p_booking_open)` | Opens or closes booking on one night without cancelling it, so the night stays on the site with its reason instead of disappearing |
+| `admin_default_event_id()` | The event the management screens operate on: the published one, else the oldest |
 | `admin_pass_summary(p_tz, p_include_contact)` | The counts above the door list: passes by status, checked-in totals, **checked in today in the venue's timezone** (`p_tz`, not the server's), how many gates are in use, the last entry, and the money behind the passes counted **once per booking** rather than once per pass — a group of four passes does not pay four times. `passes_revenue` is `null` without `p_include_contact` |
 
 Three conventions run through the dashboard functions:
@@ -307,6 +315,22 @@ event, and a scanned token at the gate.
   paying, the booking is still confirmed and an organiser note is recorded —
   `capacity exceeded when payment was confirmed — needs organiser review` — instead of
   dropping a booking that has already been paid for.
+- **A night cannot be made impossible.** `event_dates` carries `capacity >= 1`,
+  `capacity_held >= 0` and `capacity_held <= capacity` as constraints, and a trigger
+  (`event_dates_guard_capacity`) refuses any write — the admin function, a migration, the
+  SQL editor — that would take seats away from people who have already paid
+  (`PT004 capacity_below_taken`, with the lowest allowed capacity in `detail`) or move a
+  night whose issued passes have its date printed on them (`PT005 night_date_locked`).
+  Raising a capacity, cancelling a night, fixing a time or a note is always allowed; a
+  night that has sold out can therefore still be edited.
+- **Availability can never go negative, and the website and the booking path agree.**
+  `capacity - capacity_held - paid people` is computed the same way by
+  `get_event_night_availability()` (what the site offers) and `create_pending_booking()`
+  (what the site will honour), with `greatest(…, 0)` on the way out.
+- **Two writers counting the same night cannot interleave.** The booking path and all
+  three admin writers take the night row `for update` before counting seats, so an
+  organiser lowering a capacity and a guest paying for the last seat are serialised
+  rather than raced.
 - **Webhook deliveries are exactly-once.** `payment_events.event_id` is unique, and the
   claim happens in the same transaction as the side effect, so a retried delivery is
   recorded and reported as `duplicate` without touching the booking again.
@@ -344,7 +368,7 @@ Supabase **SQL editor**.
 | ---- | -------------- |
 | `anon` | Read published events, their nights, their pass categories (active or not), features, highlights and published gallery rows, plus per-night availability counts through `get_event_night_availability()`. Nothing else — no read or write access to bookings, passes, check-ins or admin users. |
 | `authenticated` | Same public reads. Gains admin powers only when present in `admin_users` with an active role: `is_admin()` for the management roles (super admin, admin), `is_staff()` to include gate staff, `is_super_admin()` for the bare `admin_users` access. |
-| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, the pass reads (`get_booking_passes`, `get_pass_by_token`), the gate functions (`scan_pass`, `check_in_pass`), the admin reads (`admin_search_bookings`, `admin_booking_detail`, `admin_dashboard_stats`, `admin_booking_series`, `admin_pass_breakdown`, `admin_recent_bookings`, `admin_payment_events`, `admin_payment_attention`, `admin_payment_summary`, `admin_pass_list`, `admin_pass_summary`) and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
+| `service_role` | Bypasses RLS. Server-only: booking creation (`create_pending_booking`), the payment functions above, the pass reads (`get_booking_passes`, `get_pass_by_token`), the gate functions (`scan_pass`, `check_in_pass`), the admin reads (`admin_search_bookings`, `admin_booking_detail`, `admin_dashboard_stats`, `admin_booking_series`, `admin_pass_breakdown`, `admin_recent_bookings`, `admin_payment_events`, `admin_payment_attention`, `admin_payment_summary`, `admin_pass_list`, `admin_pass_summary`, `admin_pass_catalogue`, `admin_event_dates`) and the pass/date writes (`admin_save_pass_category`, `admin_set_pass_category_active`, `admin_save_event_date`, `admin_set_event_date_capacity`, `admin_set_event_date_booking`) and Razorpay webhooks. Never sent to the browser — see `src/lib/supabase/admin.ts`, which imports `server-only`. |
 
 There is deliberately **no INSERT policy on `bookings`**: bookings are created by
 server code after recalculating the amount from `pass_categories`, so the browser

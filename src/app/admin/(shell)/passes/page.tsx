@@ -4,6 +4,7 @@ import type { Route } from "next";
 
 import { FilterActions, DateField, SelectField, TextField } from "@/components/admin/filter-fields";
 import { PassTable } from "@/components/admin/passes-table";
+import { PassTypesPanel } from "@/components/admin/pass-types-panel";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import {
@@ -22,7 +23,9 @@ import {
   passesHref,
 } from "@/lib/admin/operations";
 import { requirePermission } from "@/lib/auth/guard";
+import { can } from "@/lib/auth/permissions";
 import { formatInr, formatTimestamp } from "@/lib/format";
+import { listPassTypes } from "@/lib/services/admin-catalogue";
 import { getEventNights } from "@/lib/services/admin-events";
 import { getPassesSnapshot } from "@/lib/services/admin-operations";
 
@@ -38,46 +41,102 @@ type PassesPageProps = {
   searchParams: Promise<SearchParamsInput>;
 };
 
+/** One parameter as a string, whether it arrived once or several times. */
+function firstValue(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
+}
+
 /**
- * Passes — the door list.
+ * Passes — two jobs on one route, because both are about the same noun.
  *
- * One row per pass that exists, with the night it is valid for, the booking and guest it
- * belongs to, whether it has been admitted, and which gate and staff account let it in.
- * A screen for the person standing at a table with a phone in one hand and a guest in
- * front of them: the search box takes anything the guest can quote (pass ID, booking
- * reference, name, mobile) and the answer is one row.
+ * **Pass types** (`?view=types`) is the catalogue: what is on sale, at what price, for
+ * how many people, with what age restriction — and the form that creates, edits or
+ * retires one. It is the screen the organiser uses before the event, and the only
+ * place a price is set.
  *
- * The QR token is not on this page and cannot be asked for — `admin_pass_list` does not
- * select it. A list of live credentials sitting behind a shared tablet is exactly the
- * thing the token is not for; the pass is admitted by scanning, not by reading it out.
+ * **Issued passes** is the door list: one pass per row, searchable by anything a guest
+ * can quote, filterable by night and by whether it has been admitted. It is the
+ * default view, because it is the one that gets looked at in a hurry.
  *
- * The night filter is a select of the event's own nights rather than a date field,
- * because "which night" is the only question anybody asks here, and a night has an id,
- * a label and a capacity — the dates are not the operator's vocabulary, the nights are.
- * The date range stays for the edge case (a pass valid for a night that was since
- * removed from the calendar), and is stated as such.
+ * They are tabs rather than two routes because a pass type and the passes issued from
+ * it are the same thing at different moments.
+ *
+ * The QR token is not on this page and cannot be asked for — `admin_pass_list` does
+ * not select it, and the catalogue has no such column. A list of live credentials
+ * sitting behind a shared tablet is exactly what the token is not for; a pass is
+ * admitted by scanning it, not by reading it out.
+ *
+ * The night filter on the door list is a select of the event's own nights rather than
+ * a date field, because "which night" is the only question anybody asks at a table,
+ * and a night has an id, a label and a capacity — the dates are not the operator's
+ * vocabulary, the nights are.
+ *
+ * Guarded by `passes:view`; the forms inside are only offered to a role holding
+ * `passes:edit`, and the endpoint behind them checks that again for itself.
  */
 export default async function PassesPage({ searchParams }: PassesPageProps) {
   const staff = await requirePermission("passes:view");
-  const query = parsePassQuery(await searchParams);
+  const raw = await searchParams;
+  const viewingTypes = firstValue(raw.view) === "types";
+  const query = parsePassQuery(raw);
 
-  const [snapshot, nights] = await Promise.all([
-    getPassesSnapshot(query, staff.role),
-    getEventNights(),
-  ]);
+  // Only the view that was asked for is read. A tab that costs a query it does not
+  // need is a tab an organiser pays for on a phone at a venue with poor signal.
+  const [nights, catalogue] = await Promise.all([getEventNights(), listPassTypes()]);
 
-  if (!snapshot.ok) {
+  const canEdit = can(staff.role, "passes:edit");
+  const passTypes = catalogue.ok ? catalogue.data : [];
+
+  // ---- the catalogue -----------------------------------------------------------
+  if (viewingTypes) {
     return (
-      <ErrorState
-        error={{
-          kind: snapshot.error.kind === "not-configured" ? "not-configured" : "query-failed",
-          message: snapshot.error.message,
-        }}
-        title="The pass list is unavailable"
-      />
+      <>
+        <PassHeading view="types" />
+
+        <PassTabs view="types" passTypeCount={catalogue.ok ? passTypes.length : null} />
+
+        {catalogue.ok ? (
+          <PassTypesPanel passes={passTypes} canEdit={canEdit} />
+        ) : (
+          <ErrorState
+            error={{
+              kind: catalogue.error.kind === "not-configured" ? "not-configured" : "query-failed",
+              message: catalogue.error.message,
+            }}
+            title="The pass catalogue is unavailable"
+          />
+        )}
+
+        {canEdit ? null : (
+          <p className="text-muted/80 text-xs/5">
+            Your role can see what is on sale, but only an admin or a super admin can change a price, a limit or a
+            composition.
+          </p>
+        )}
+      </>
     );
   }
 
+  const snapshot = await getPassesSnapshot(query, staff.role);
+
+  if (!snapshot.ok) {
+    return (
+      <>
+        <PassHeading view="issued" />
+        <PassTabs view="issued" passTypeCount={catalogue.ok ? passTypes.length : null} />
+
+        <ErrorState
+          error={{
+            kind: snapshot.error.kind === "not-configured" ? "not-configured" : "query-failed",
+            message: snapshot.error.message,
+          }}
+          title="The pass list is unavailable"
+        />
+      </>
+    );
+  }
+
+  // ---- the door list -----------------------------------------------------------
   const { summary, list, includeContact } = snapshot.data;
   const summaryLine = pageSummary(list.page, list.pageSize, list.total);
   const filtering = isPassFiltered(query);
@@ -88,14 +147,9 @@ export default async function PassesPage({ searchParams }: PassesPageProps) {
 
   return (
     <>
-      <div className="flex flex-col gap-1">
-        <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Passes</h1>
-        <p className="text-muted text-sm/6">
-          Every pass issued for the event: which ticket is which, who it belongs to, and whether it has been admitted.
-          Search by pass ID, booking reference, guest name or mobile number.
-          {includeContact ? "" : " Contact details and amounts are hidden for your role."}
-        </p>
-      </div>
+      <PassHeading view="issued" includeContact={includeContact} />
+
+      <PassTabs view="issued" passTypeCount={catalogue.ok ? passTypes.length : null} />
 
       {summary ? (
         <section className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-5">
@@ -308,6 +362,50 @@ export default async function PassesPage({ searchParams }: PassesPageProps) {
         ) : null}
       </section>
     </>
+  );
+}
+
+/**
+ * The page's heading, which differs by view because the two screens answer different
+ * questions — and because the sentence naming what a staff role cannot see only
+ * applies to one of them.
+ */
+function PassHeading({ view, includeContact = true }: { view: "issued" | "types"; includeContact?: boolean }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Passes</h1>
+      <p className="text-muted text-sm/6">
+        {view === "types"
+          ? "What is on sale: the pass types, their prices, who each one admits and how many have been sold."
+          : "Every pass issued for the event: which ticket is which, who it belongs to, and whether it has been admitted. Search by pass ID, booking reference, guest name or mobile number."}
+        {view === "issued" && !includeContact ? " Contact details and amounts are hidden for your role." : ""}
+      </p>
+    </div>
+  );
+}
+
+/** The two views as links, so either one is a URL that can be bookmarked or sent. */
+function PassTabs({ view, passTypeCount }: { view: "issued" | "types"; passTypeCount: number | null }) {
+  const active = "bg-marigold/15 text-marigold-soft border-marigold/40 inline-flex h-9 items-center rounded-full border px-4 text-sm font-semibold";
+  const idle = "text-muted hover:text-foreground inline-flex h-9 items-center rounded-full px-4 text-sm font-semibold transition-colors";
+
+  return (
+    <div className="border-border bg-surface/40 inline-flex w-fit flex-wrap gap-1 rounded-full border p-1">
+      <Link
+        href={"/admin/passes" as Route}
+        aria-current={view === "issued" ? "page" : undefined}
+        className={view === "issued" ? active : idle}
+      >
+        Issued passes
+      </Link>
+      <Link
+        href={"/admin/passes?view=types" as Route}
+        aria-current={view === "types" ? "page" : undefined}
+        className={view === "types" ? active : idle}
+      >
+        Pass types{passTypeCount === null ? "" : ` (${passTypeCount})`}
+      </Link>
+    </div>
   );
 }
 

@@ -1,5 +1,6 @@
 import { UsersIcon } from "@/components/icons";
 import { Badge } from "@/components/ui/badge";
+import { passAgeCopy } from "@/lib/event-copy";
 import { formatInr } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { PassOption } from "@/types";
@@ -60,6 +61,7 @@ export function PassChoice({ pass, name, selected, onSelect, disabled }: PassCho
         <UsersIcon className="size-3.5" />
         Admits {pass.numberOfPeople} {pass.numberOfPeople === 1 ? "person" : "people"} · up to{" "}
         {pass.maxPerBooking} per booking
+        {passAgeCopy(pass) ? ` · ${passAgeCopy(pass)}` : ""}
       </p>
 
       <div className="mt-auto flex items-center gap-2 pt-1">

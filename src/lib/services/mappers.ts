@@ -53,9 +53,13 @@ export interface AvailabilityRow {
   end_time: string | null;
   night_status: string;
   capacity: number;
+  /** Seats withheld from online sale. Absent on rows from before 20260922091200. */
+  capacity_held?: number;
   booked_people: number;
   remaining: number;
   is_fully_booked: boolean;
+  /** Whether the organiser has booking open on this night. */
+  is_booking_open?: boolean;
   is_bookable: boolean;
 }
 
@@ -75,10 +79,15 @@ export function toEventNight(row: AvailabilityRow): EventNight {
     endTime: row.end_time,
     status,
     capacity: row.capacity,
+    // Both default to the pre-20260922091200 reading when the columns are absent,
+    // so a night that predates them is treated as "nothing held back, open".
+    capacityHeld: row.capacity_held ?? 0,
     bookedPeople: row.booked_people,
     remaining: row.remaining,
     isFullyBooked: row.is_fully_booked,
-    // Trust the database's verdict over a client-side re-derivation.
+    isBookingOpen: row.is_booking_open !== false,
+    // Trust the database's verdict over a client-side re-derivation: it is the one
+    // the booking path will apply.
     isBookable: row.is_bookable && status === "scheduled",
   };
 }
@@ -98,6 +107,7 @@ export function toPassOption(row: PassCategoryRow): PassOption {
     priceInr: row.price_inr,
     numberOfPeople: row.number_of_people,
     maxPerBooking: row.max_per_booking,
+    minAge: row.min_age ?? 0,
     isActive: row.is_active,
     availability: row.is_active
       ? { enabled: true }
