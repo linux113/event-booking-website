@@ -68,7 +68,7 @@ export function isDatabaseConfigured(): boolean {
 export function isAdminAuthConfigured(): boolean {
   return Boolean(
     adminEmail() &&
-      process.env.ADMIN_PASSWORD_HASH?.trim() &&
+      (process.env.ADMIN_PASSWORD?.trim() || process.env.ADMIN_PASSWORD_HASH?.trim()) &&
       process.env.AUTH_SECRET?.trim(),
   );
 }

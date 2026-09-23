@@ -47,14 +47,6 @@ function expectedEmail(): string {
   return value;
 }
 
-function expectedPasswordHash(): string {
-  const value = process.env.ADMIN_PASSWORD_HASH?.trim();
-  if (!value) {
-    throw new Error("ADMIN_PASSWORD_HASH is not set. See .env.example.");
-  }
-  return value;
-}
-
 function emailsMatch(entered: string, expected: string): boolean {
   return entered.trim().toLowerCase() === expected.trim().toLowerCase();
 }
@@ -84,12 +76,12 @@ export function verifyPassword(password: string, stored: string): boolean {
 /** Timing-safe credential check for the sign-in form. */
 export function authenticate(email: string, password: string): AdminIdentity | null {
   if (!isAdminAuthConfigured()) {
-    console.error("[auth] admin auth is not configured (ADMIN_EMAIL / ADMIN_PASSWORD_HASH / AUTH_SECRET missing)");
+    console.error("[auth] admin auth is not configured (ADMIN_EMAIL / ADMIN_PASSWORD or ADMIN_PASSWORD_HASH / AUTH_SECRET missing)");
     return null;
   }
 
   const emailOk = emailsMatch(email, expectedEmail());
-  const passOk = verifyPassword(password, expectedPasswordHash());
+  const passOk = passwordMatches(password);
 
   // Evaluate both even when the email is wrong so failures take similar time.
   if (!emailOk || !passOk) {
@@ -103,6 +95,35 @@ export function authenticate(email: string, password: string): AdminIdentity | n
     displayName: adminEmailValue,
     role: "super_admin",
   };
+}
+
+/**
+ * Password check for the sign-in form.
+ *
+ * Simple mode: when `ADMIN_PASSWORD` is set it is the password, compared in
+ * constant time — no hash anywhere, exactly what a single-organiser site wants.
+ * Hash mode: otherwise `ADMIN_PASSWORD_HASH` (`scrypt$<salt-hex>$<hash-hex>`)
+ * is verified, for deployments that prefer never storing the plain password.
+ */
+function passwordMatches(password: string): boolean {
+  const plain = process.env.ADMIN_PASSWORD?.trim();
+  if (plain) return safeEqual(password, plain);
+
+  const stored = process.env.ADMIN_PASSWORD_HASH?.trim();
+  if (stored) return verifyPassword(password, stored);
+
+  return false;
+}
+
+/** Constant-time string comparison (length mismatches still cost a compare). */
+function safeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a, "utf8");
+  const right = Buffer.from(b, "utf8");
+  if (left.length !== right.length) {
+    timingSafeEqual(left, left);
+    return false;
+  }
+  return timingSafeEqual(left, right);
 }
 
 function sign(payload: string): string {
