@@ -111,6 +111,28 @@ the environment, never written to disk, and its password is masked in every mess
 > Use the **direct** (non-pooler) string to migrate. The pooler is for the app's runtime
 > queries; migrations are happier without it.
 
+### Option A2 — from GitHub, with no local tooling at all
+
+[`docs/setup-database.workflow.yml`](./setup-database.workflow.yml) does the same thing on a
+GitHub runner — the path to use when the machine you are on cannot reach the database (a
+locked-down network, a phone, someone else's laptop):
+
+1. **Install the workflow.** GitHub → repository → **Actions → New workflow → set up a
+   workflow yourself**, delete the sample, paste `docs/setup-database.workflow.yml`, commit.
+   (Or locally: `mkdir -p .github/workflows && cp docs/setup-database.workflow.yml
+   .github/workflows/setup-database.yml` and push. It is not in place already because GitHub
+   refuses to let an app push `.github/workflows/**` without a `workflows` permission this
+   project does not otherwise need.)
+2. **Add the secret.** Repository → **Settings → Secrets and variables → Actions → New
+   repository secret** → name `NEON_DATABASE_URL`, value = the **direct** connection string.
+3. **Run it.** **Actions → Set up database → Run workflow** (tick *seed* for the demo rows,
+   or *verify_only* to check without applying).
+4. The run's log is the verification — the same output `npm run db:setup` prints.
+
+It is manual-only (`workflow_dispatch`), so it can never fire on a push, and it holds
+`contents: read`. GitHub masks the secret in logs, and the script masks the password too.
+To check a database without touching it, run it with **verify_only** ticked.
+
 ### Option B — `psql`, by hand
 
 ```bash
@@ -199,6 +221,26 @@ to sign anyone in, because sign-in is Supabase Auth's job today (next section).
 | **Gallery** (`/admin/gallery`, `/gallery`) | uploads go to Supabase Storage's API; the migration could not create buckets | Neon **Object Storage** (available in Singapore) or **Vercel Blob**; the gallery service + upload route change, the `gallery` table does not |
 | **Every read/write in the app** | `@supabase/supabase-js` speaks PostgREST at `NEXT_PUBLIC_SUPABASE_URL` | Neon **Data API** (enable it on the branch) *may* satisfy this with a URL + token swap, because it is PostgREST — **or** the services swap to a SQL driver (`postgres.js`/`pg`), which is ~80 call sites across `src/lib/services/*` |
 | **The verification harness** (`npm run verify:web`) | it stubs Supabase Auth + PostgREST + Storage so the whole flow runs with no credentials | would be re-pointed at the new stack — this is the part that makes a port a multi-step job rather than an afternoon |
+
+### What a Neon project actually offers (probed, not assumed)
+
+Against a live Neon project with both features enabled:
+
+- **Neon Auth** — `https://<project>.neonauth.<region>.aws.neon.tech/<db>/auth` serves a
+  JWKS (`…/.well-known/jwks.json`) carrying an **Ed25519** key. That is what the Data API
+  trusts: it mints and validates its own JWTs, and the `sub` claim is what RLS reads.
+- **Neon Data API** — `https://<project>.apirest.<region>.aws.neon.tech/<db>/rest/v1/…`
+  answers, and it is genuinely PostgREST: an unauthenticated request returns
+  `{"message":"missing authentication credentials: required authorization bearer token in
+  JWT format"}`.
+
+That last sentence is the important one: **there is no "anon key" to paste in**, unlike
+Supabase. Every request must carry a provider-issued JWT, so `@supabase/supabase-js` cannot
+simply be pointed at the URL with the key swapped — the client would have to fetch its token
+from Neon Auth first. And the server-side privileged path (this app's service-role client,
+which is how every booking, payment, pass and gate call reaches the database) has no
+equivalent through the Data API: privileged access belongs on a **direct Postgres
+connection**, which is exactly what `scripts/setup-database.mjs` already demonstrates.
 
 ### The one unknown that decides how big the port is
 
