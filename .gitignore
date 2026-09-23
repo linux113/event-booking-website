@@ -52,3 +52,9 @@ secrets.json
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# prisma
+# The generated client is build output: `npm run db:generate` (part of build and
+# typecheck) writes it from prisma/schema.prisma. It is ~1 MB of TypeScript that
+# nobody edits by hand.
+/src/generated/
