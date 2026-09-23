@@ -169,10 +169,33 @@ To check a database without touching it, run it with **verify_only** ticked.
 [`docs/one-shot-schema.sql`](./one-shot-schema.sql) is the entire schema — prelude, all 16
 migrations and the seed — as a **single 309 KB statement batch wrapped in one transaction**.
 
+First, check what your login role may do: the batch creates `anon`, `authenticated` and
+`service_role` (`service_role` with `BYPASSRLS`), and Postgres refuses to create a role with an
+attribute the creator does not hold.
+
+```sql
+select rolcreaterole, rolbypassrls from pg_roles where rolname = current_user;
+```
+
+Both must be true. Neon's `neondb_owner` — a member of `neon_superuser` — has both. If either is
+false the paste stops on its first section with *permission denied to create role: Only roles
+with the BYPASSRLS attribute may create roles with the BYPASSRLS attribute*, and because the
+batch is one transaction it changes nothing; connect as the project's owner role and retry.
+
 1. Open your provider's SQL editor (Neon: **SQL Editor**).
 2. Paste the whole file.
 3. Run it. Expect "Success"; the notices about storage buckets are the gallery section
    correctly skipping what a plain Postgres does not have.
+4. Give your own login role membership in the three roles the batch just created:
+
+   ```sql
+   grant anon, authenticated, service_role to current_user;
+   ```
+
+   Until that runs, `set role anon` in Step 4 fails with `permission denied to set role "anon"`:
+   since PostgreSQL 16 a `CREATEROLE` user gets only `ADMIN OPTION` on the roles it creates —
+   enough to manage them, not to become them. Supabase needs none of this: `postgres`,
+   `authenticator` and PostgREST already hold the membership the platform expects.
 
 It is the same thing `db:setup` does, for when you are on a phone, a locked-down laptop, or a
 network that cannot reach the database. Two properties matter:
@@ -244,9 +267,15 @@ select
 
 -- and the boundary itself: a stranger must see nothing
 set role anon;
-select count(*) from public.bookings;   -- ERROR: permission denied  ← that is the correct answer
+select count(*) from public.bookings;   -- ERROR: permission denied for table bookings  ← the correct answer
 reset role;
 ```
+
+Two different errors can come back here, and they mean opposite things.
+`permission denied for table bookings` is the boundary working: the policy hid the rows and the
+grant refused the read. `permission denied to set role "anon"` means the check never ran at all
+— your login role is not a member of `anon` with the `SET` option. Run the one-line grant in
+Option A3 step 4 and repeat.
 
 Tables expected: `admin_users, bookings, check_ins, digital_passes, event_dates,
 event_features, event_highlights, events, gallery, pass_categories, payment_events` — and
