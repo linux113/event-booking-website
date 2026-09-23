@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Container, Section } from "@/components/ui/container";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
+import { whatsappChatUrl, whatsappMessage } from "@/lib/contact";
+import { getSiteContact } from "@/lib/services/contact";
 import { getBookingPasses } from "@/lib/services/passes";
 import { getBookingStatusByToken } from "@/lib/services/payments";
 
@@ -57,7 +59,13 @@ export default async function BookingStatusPage({ searchParams }: BookingStatusP
     );
   }
 
-  const [result, passesResult] = await Promise.all([getBookingStatusByToken(token), getBookingPasses(token)]);
+  // The booking's state, its passes, and the event's contact details — the last so the
+  // WhatsApp button in the panel opens the organiser's number with this reference.
+  const [result, passesResult, contact] = await Promise.all([
+    getBookingStatusByToken(token),
+    getBookingPasses(token),
+    getSiteContact(),
+  ]);
 
   if (!result.ok) {
     if (result.error.kind === "server-error" || result.error.kind === "not-configured") {
@@ -108,7 +116,11 @@ export default async function BookingStatusPage({ searchParams }: BookingStatusP
 
       <Section className="pt-0">
         <Container className="max-w-3xl">
-          <BookingConfirmation booking={booking} passes={passes} />
+          <BookingConfirmation
+            booking={booking}
+            passes={passes}
+            whatsappHref={whatsappChatUrl(contact.whatsappNumber, whatsappMessage(booking.reference))}
+          />
         </Container>
       </Section>
     </>

@@ -68,6 +68,19 @@ export default async function SettingsPage() {
             <Field label="City" value={[event.city, event.state].filter(Boolean).join(", ")} />
             <Field label="Contact phone" value={event.contactPhone ?? "—"} />
             <Field label="Contact email" value={event.contactEmail ?? "—"} />
+            <Field
+              label="WhatsApp number"
+              value={event.whatsappNumber ?? "—"}
+              hint="Digits only, no plus — the site's click-to-chat links. Falls back to the phone number."
+            />
+            <Field label="Instagram" value={event.instagramUrl ?? "—"} />
+            <Field label="Facebook" value={event.facebookUrl ?? "—"} />
+            <Field label="YouTube" value={event.youtubeUrl ?? "—"} />
+            <Field
+              label="Support hours"
+              value={event.supportHours.length > 0 ? event.supportHours.join(" · ") : "—"}
+              hint="Shown on /contact and in the footer"
+            />
             <Field label="Currency" value={event.currency} />
           </dl>
         ) : (

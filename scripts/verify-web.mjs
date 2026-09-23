@@ -6598,6 +6598,264 @@ async function main() {
   );
 
   // ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  section("Contact and WhatsApp: one source, every link, on every screen");
+  // ---------------------------------------------------------------------------
+
+  const cts = await import("../src/lib/contact.ts");
+
+  // The sentence every enquiry starts with, and the URL shape it lives in. The page
+  // asserts against the module's own output below, so a template change cannot pass
+  // unnoticed here while quietly breaking the links.
+  check(
+    "the enquiry message is the one the product asks for, word for word",
+    cts.WHATSAPP_MESSAGE === "Hello, I need help with Navratri Dandiya booking.",
+    cts.WHATSAPP_MESSAGE,
+  );
+
+  check(
+    "and the click-to-chat link is wa.me with it prefilled and encoded",
+    cts.whatsappChatUrl("919000000000") ===
+      `https://wa.me/919000000000?text=${encodeURIComponent("Hello, I need help with Navratri Dandiya booking.")}`,
+    cts.whatsappChatUrl("919000000000") ?? "",
+  );
+
+  check(
+    "with no number there is no link at all — never a guessed one",
+    cts.whatsappChatUrl(null) === null &&
+      cts.whatsappChatUrl("") === null &&
+      cts.whatsappChatUrl("12345") === null,
+  );
+
+  check(
+    "a booking reference is appended to the same sentence, not to a different one",
+    cts.whatsappMessage("DND202600001") ===
+      "Hello, I need help with Navratri Dandiya booking. My booking reference is DND202600001.",
+    cts.whatsappMessage("DND202600001"),
+  );
+
+  const ctsEvent = {
+    id: EVENT_ID,
+    slug: "navratri-2026-jaipur",
+    name: "Garba Nights Navratri Utsav",
+    tagline: null,
+    description: null,
+    venueName: "My Village Garden",
+    venueAddress: "Ajmer Road",
+    city: "Jaipur",
+    state: "Rajasthan",
+    mapsUrl: null,
+    heroImageUrl: null,
+    contactPhone: null,
+    contactEmail: null,
+    whatsappNumber: null,
+    instagramUrl: null,
+    facebookUrl: null,
+    youtubeUrl: null,
+    supportHours: [],
+    currency: "INR",
+  };
+
+  // The event's own columns win; the deployment's settings are the fallback.
+  check(
+    "an event's own WhatsApp number is the one the links open",
+    cts.whatsappNumberFor({ ...ctsEvent, whatsappNumber: "919111122233", contactPhone: "+91 90000 00000" }) ===
+      "919111122233",
+  );
+  check(
+    "without one, the digits of its contact phone are used",
+    cts.whatsappNumberFor({ ...ctsEvent, contactPhone: "+91 98765 43210" }) === "919876543210",
+  );
+  check(
+    "and with neither, the deployment's fallback number answers",
+    cts.whatsappNumberFor(ctsEvent) === cts.whatsappNumberFor(null),
+    `${cts.whatsappNumberFor(ctsEvent)} vs ${cts.whatsappNumberFor(null)}`,
+  );
+  check(
+    "the phone link is dialable — international, digits only",
+    cts.telHref("+91 90000 00000") === "tel:919000000000" && cts.telHref(null) === null,
+  );
+  check(
+    "the email link is only built from something that is an address",
+    cts.mailHref("hello@example.com") === "mailto:hello@example.com" &&
+      cts.mailHref("not an address") === null &&
+      cts.mailHref(null) === null,
+  );
+  check(
+    "a stored maps link wins over the address search",
+    cts.mapsHrefFor({ ...ctsEvent, mapsUrl: "https://maps.google.com/?q=pin" }, ["X"]) ===
+      "https://maps.google.com/?q=pin",
+  );
+  check(
+    "and without one the address is searched instead of showing a blank map",
+    cts.mapsHrefFor(ctsEvent, ["My Village Garden", "Ajmer Road", "Jaipur, Rajasthan"]) ===
+      `https://maps.google.com/?q=${encodeURIComponent("My Village Garden, Ajmer Road, Jaipur, Rajasthan")}`,
+    cts.mapsHrefFor(ctsEvent, ["My Village Garden", "Ajmer Road", "Jaipur, Rajasthan"]) ?? "",
+  );
+  check(
+    "the address prints as venue, street, then city and state — with repeats dropped",
+    JSON.stringify(cts.addressLinesFor({ ...ctsEvent, venueAddress: "My Village Garden" })) ===
+      JSON.stringify(["My Village Garden", "Jaipur, Rajasthan"]),
+    JSON.stringify(cts.addressLinesFor({ ...ctsEvent, venueAddress: "My Village Garden" })),
+  );
+  check(
+    "an event's own profiles are used, and the site's are the fallback",
+    cts.socialLinksFor({ ...ctsEvent, instagramUrl: "https://instagram.com/ours" }).map((social) => social.id).join(",") ===
+      "instagram" &&
+      cts.socialLinksFor(ctsEvent).map((social) => social.id).join(",") === "instagram,facebook,youtube",
+  );
+  check(
+    "the channels omit what the organiser has not published, and keep the order WhatsApp → phone → email → venue",
+    cts.buildContactChannels({ ...ctsEvent, contactEmail: "hello@example.com" }).map((channel) => channel.id).join(",") ===
+      "whatsapp,phone,email,venue",
+    cts.buildContactChannels({ ...ctsEvent, contactEmail: "hello@example.com" })
+      .map((channel) => channel.id)
+      .join(","),
+  );
+  check(
+    "the contact block is assembled once: hours, address and links agree with the row",
+    (() => {
+      const built = cts.buildSiteContact({
+        ...ctsEvent,
+        whatsappNumber: "919111122233",
+        supportHours: ["Festival days · 10:00 AM – 11:00 PM"],
+        instagramUrl: "https://instagram.com/ours",
+      });
+
+      return (
+        built.whatsappNumber === "919111122233" &&
+        built.whatsappHref?.startsWith("https://wa.me/919111122233?text=") === true &&
+        built.supportHours.length === 1 &&
+        built.addressLines.length === 3 &&
+        built.socials.length === 1
+      );
+    })(),
+  );
+
+  // Nothing in the UI carries a number or builds a link: both live in one module and
+  // one settings file, which is what "not hardcoded in multiple components" means.
+  const ctsSurfaces = [
+    "src/components/layout/site-header.tsx",
+    "src/components/layout/mobile-nav.tsx",
+    "src/components/layout/site-footer.tsx",
+    "src/components/layout/whatsapp-button.tsx",
+    "src/components/sections/cta-band.tsx",
+    "src/components/sections/contact-section.tsx",
+    "src/components/booking/booking-confirmation.tsx",
+    "src/app/layout.tsx",
+    "src/app/contact/page.tsx",
+    "src/app/book/page.tsx",
+    "src/app/book/status/page.tsx",
+    "src/app/booking/success/page.tsx",
+  ];
+
+  // Comments are allowed to mention wa.me — a built URL is not. The link builders are
+  // matched on the template, so prose about the link does not count as one.
+  const ctsLinkPattern = /wa\.me\/\$\{/;
+  const ctsHardcoded = ctsSurfaces.filter((file) =>
+    readFileSync(join(REPO_ROOT, file), "utf8").includes("919000000000"),
+  );
+  const ctsLinkSpellers = ctsSurfaces.filter((file) =>
+    ctsLinkPattern.test(readFileSync(join(REPO_ROOT, file), "utf8")),
+  );
+
+  check(
+    "no component or page carries the WhatsApp number as a literal",
+    ctsHardcoded.length === 0,
+    ctsHardcoded.join(", "),
+  );
+  check(
+    "and none of them builds a wa.me URL — the link is built in one module",
+    ctsLinkSpellers.length === 0,
+    ctsLinkSpellers.join(", "),
+  );
+  check(
+    "which is the module the page-level checks above exercise",
+    ctsLinkPattern.test(readFileSync(join(REPO_ROOT, "src/lib/contact.ts"), "utf8")),
+  );
+  check(
+    "the number's other home is the deployment fallback in site settings",
+    readFileSync(join(REPO_ROOT, "src/config/site.ts"), "utf8").includes("919000000000"),
+  );
+
+  // What the visitor actually gets. /contact is statically rendered from the seeded
+  // row, so it shows the seeded number and the seeded profiles.
+  const ctsContactRaw = await fetchPage("/contact");
+  const ctsContactHtml = stripScripts(ctsContactRaw);
+  const ctsContactText = visibleText(ctsContactRaw);
+  const ctsSeededLink = cts.whatsappChatUrl("919000000000");
+
+  check(
+    "the contact page's WhatsApp button opens the event's number with the message prefilled",
+    ctsContactHtml.includes(ctsSeededLink),
+    contextAround(ctsContactHtml, "wa.me"),
+  );
+  check(
+    "the same page offers a dialable phone link and a mailto link",
+    ctsContactHtml.includes("tel:919000000000") && ctsContactHtml.includes("mailto:hello@example.com"),
+  );
+  check(
+    "the venue, the address and a Google Maps link are on it",
+    ctsContactText.includes("My Village Garden") &&
+      ctsContactText.includes("Ajmer Road") &&
+      ctsContactText.includes("Jaipur") &&
+      ctsContactHtml.includes("https://maps.google.com/?q=My+Village+Garden+Jaipur"),
+  );
+  check(
+    "all three social profiles are linked",
+    ctsContactHtml.includes("https://www.instagram.com/") &&
+      ctsContactHtml.includes("https://www.facebook.com/") &&
+      ctsContactHtml.includes("https://www.youtube.com/"),
+  );
+  check(
+    "the support hours from the event row are shown",
+    ctsContactText.includes("Monday – Saturday") && ctsContactText.includes("10:00 AM – 8:00 PM"),
+    contextAround(ctsContactText, "Monday"),
+  );
+  check(
+    "and the page says what the button will send, so nobody taps it blind",
+    ctsContactText.includes("Hello, I need help with Navratri Dandiya booking."),
+    contextAround(ctsContactText, "WhatsApp"),
+  );
+  check(
+    "the button works on a phone and on a desktop: a labelled one at ≥sm and an icon-only one below it",
+    ctsContactHtml.includes("hidden sm:inline-flex") && ctsContactHtml.includes("sm:hidden"),
+  );
+
+  // The chrome is rendered per request, so a change in the database must show up in it.
+  const ctsPassesBefore = stripScripts(await fetchPage("/passes"));
+
+  check(
+    "the header and footer of every page carry the same database link",
+    ctsPassesBefore.includes(ctsSeededLink),
+    contextAround(ctsPassesBefore, "wa.me"),
+  );
+
+  await dbRun(`update public.events set whatsapp_number = '919888877766' where id = '${EVENT_ID}';`);
+
+  const ctsPassesChanged = stripScripts(await fetchPage("/passes"));
+
+  check(
+    "changing the number in the database changes every link, without a deploy",
+    ctsPassesChanged.includes("wa.me/919888877766") && !ctsPassesChanged.includes("wa.me/919000000000"),
+    contextAround(ctsPassesChanged, "wa.me"),
+  );
+
+  await dbRun(`update public.events set whatsapp_number = '919000000000' where id = '${EVENT_ID}';`);
+
+  const ctsPassesRestored = stripScripts(await fetchPage("/passes"));
+
+  check(
+    "and putting it back puts the site back",
+    ctsPassesRestored.includes(ctsSeededLink),
+    contextAround(ctsPassesRestored, "wa.me"),
+  );
+  check(
+    "nothing was left behind in the events row",
+    (await dbQuery(`select whatsapp_number from public.events where id = $1`, [EVENT_ID]))[0].whatsapp_number ===
+      "919000000000",
+  );
+
   section("Result");
   // ---------------------------------------------------------------------------
   console.log(`\n  ${passed} passed, ${failures.length} failed\n`);

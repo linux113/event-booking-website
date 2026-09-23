@@ -11,6 +11,11 @@ import type { DigitalPassSummary } from "@/types/pass";
 type BookingConfirmationProps = {
   booking: BookingStatusView;
   /**
+   * The event's WhatsApp link, already carrying this booking's reference. Built by the
+   * page from the event row, so the panel needs to know nothing about phone numbers.
+   */
+  whatsappHref?: string | null;
+  /**
    * The passes issued for this booking, when the caller has them. Each row links to
    * its own pass page (and to its download), so the confirmation is also the way
    * back to the QR codes; the panel itself never creates one.
@@ -31,7 +36,7 @@ type BookingConfirmationProps = {
  * It never claims a payment that is not recorded: "payment successful" only
  * appears for a booking the server has marked paid.
  */
-export function BookingConfirmation({ booking, passes = [], className }: BookingConfirmationProps) {
+export function BookingConfirmation({ booking, passes = [], whatsappHref = null, className }: BookingConfirmationProps) {
   const timeRange = formatTimeRange(booking.startTime, booking.endTime);
   const isPaid = booking.status === "confirmed" && booking.paymentStatus === "paid";
   const isRefunded = booking.status === "refunded" || booking.paymentStatus === "refunded";
@@ -180,11 +185,7 @@ export function BookingConfirmation({ booking, passes = [], className }: Booking
             </Button>
           )}
 
-          <WhatsAppButton
-            variant="full"
-            size="sm"
-            message={`Hi! My booking reference is ${booking.reference} for ${booking.eventName}.`}
-          />
+          <WhatsAppButton href={whatsappHref} variant="full" size="sm" />
         </div>
       </div>
 

@@ -5766,6 +5766,169 @@ async function main() {
   );
 
   // ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  section("Contact details: event columns, the format rules, and who can read them");
+  // ---------------------------------------------------------------------------
+
+  const ctsColumns = await q(`
+    select column_name, data_type, is_nullable, column_default
+      from information_schema.columns
+     where table_schema = 'public' and table_name = 'events'
+       and column_name in ('whatsapp_number', 'instagram_url', 'facebook_url', 'youtube_url', 'support_hours')
+     order by column_name;
+  `);
+
+  check(
+    "the event carries the five contact columns the site's links are built from",
+    ctsColumns.length === 5,
+    JSON.stringify(ctsColumns.map((row) => row.column_name)),
+  );
+  check(
+    "support hours are a text array that defaults to empty and can never be null",
+    ctsColumns.find((row) => row.column_name === "support_hours")?.data_type === "ARRAY" &&
+      ctsColumns.find((row) => row.column_name === "support_hours")?.is_nullable === "NO" &&
+      String(ctsColumns.find((row) => row.column_name === "support_hours")?.column_default ?? "").includes("{}"),
+    JSON.stringify(ctsColumns.find((row) => row.column_name === "support_hours") ?? {}),
+  );
+
+  // The site reads these as the public reader: a published event, anon role.
+  const ctsPublicRow = await asRole(
+    "anon",
+    `select whatsapp_number, instagram_url, facebook_url, youtube_url, support_hours, contact_phone, contact_email
+       from public.events where id = '${EVENT}';`,
+  );
+
+  check(
+    "a visitor can read the contact block of the published event",
+    ctsPublicRow.length === 1 && ctsPublicRow[0].whatsapp_number === "919000000000",
+    JSON.stringify(ctsPublicRow[0] ?? {}),
+  );
+  check(
+    "the seeded event publishes all three social profiles and two lines of support hours",
+    ctsPublicRow[0]?.instagram_url === "https://www.instagram.com/" &&
+      ctsPublicRow[0]?.facebook_url === "https://www.facebook.com/" &&
+      ctsPublicRow[0]?.youtube_url === "https://www.youtube.com/" &&
+      Array.isArray(ctsPublicRow[0]?.support_hours) &&
+      ctsPublicRow[0].support_hours.length === 2,
+    JSON.stringify(ctsPublicRow[0] ?? {}),
+  );
+
+  // The click-to-chat link is built by concatenation, so the column may only hold
+  // digits in international format — no plus, no spaces, no leading zero.
+  const ctsBadNumbers = [
+    ["090000000012", "leading zero"],
+    ["91900 0000 00", "spaces"],
+    ["+919000000000", "a plus sign"],
+    ["91123456789012345", "too many digits"],
+    ["919000000", "too few digits"],
+    ["", "an empty string instead of null"],
+  ];
+
+  for (const [value, why] of ctsBadNumbers) {
+    const ctsError = await expectError(`update public.events set whatsapp_number = '${value}' where id = '${EVENT}';`);
+
+    check(`a WhatsApp number with ${why} is refused`, ctsError !== null, ctsError ?? "accepted");
+  }
+
+  await run(`update public.events set whatsapp_number = '919111122233' where id = '${EVENT}';`);
+  check(
+    "a plain international number in digits passes the format rule",
+    (await q(`select whatsapp_number from public.events where id = '${EVENT}';`))[0].whatsapp_number === "919111122233",
+  );
+  await run(`update public.events set whatsapp_number = '919000000000' where id = '${EVENT}';`);
+
+  // A social link in the wrong column sends guests to somewhere the organiser did not
+  // intend, so each column only accepts its own platform, over https.
+  const ctsBadSocials = [
+    ["instagram_url", "https://facebook.com/garbanights"],
+    ["instagram_url", "http://instagram.com/garbanights"],
+    ["instagram_url", "instagram.com/garbanights"],
+    ["facebook_url", "https://instagram.com/garbanights"],
+    ["facebook_url", "https://facebook.com.evil.example/garbanights"],
+    ["youtube_url", "https://facebook.com/garbanights"],
+    ["youtube_url", "https://youtube.com"],
+  ];
+
+  for (const [column, value] of ctsBadSocials) {
+    const ctsError = await expectError(
+      `update public.events set ${column} = '${value}' where id = '${EVENT}';`,
+    );
+
+    check(`${column.replace("_url", "")} refuses "${value}"`, ctsError !== null, ctsError ?? "accepted");
+  }
+
+  const ctsGoodSocials = [
+    ["instagram_url", "https://instagram.com/garbanights"],
+    ["facebook_url", "https://fb.com/garbanights"],
+    ["youtube_url", "https://youtu.be/dQw4w9WgXcQ"],
+  ];
+
+  for (const [column, value] of ctsGoodSocials) {
+    const ctsError = await expectError(
+      `update public.events set ${column} = '${value}' where id = '${EVENT}';`,
+    );
+
+    check(`${column.replace("_url", "")} accepts its own platform over https`, ctsError === null, ctsError ?? "");
+  }
+
+  await run(`
+    update public.events
+       set instagram_url = 'https://www.instagram.com/',
+           facebook_url  = 'https://www.facebook.com/',
+           youtube_url   = 'https://www.youtube.com/'
+     where id = '${EVENT}';
+  `);
+  check(
+    "and the seeded profiles are restored afterwards",
+    (await q(`select instagram_url from public.events where id = '${EVENT}';`))[0].instagram_url ===
+      "https://www.instagram.com/",
+  );
+
+  // Support hours are a short list, not a document.
+  const ctsTooManyHours = await expectError(`
+    update public.events
+       set support_hours = array['1','2','3','4','5','6','7']
+     where id = '${EVENT}';
+  `);
+  check("seven lines of support hours are refused", ctsTooManyHours !== null, ctsTooManyHours ?? "accepted");
+
+  await run(`
+    update public.events set support_hours = array['One','Two','Three','Four','Five','Six'] where id = '${EVENT}';
+  `);
+  check(
+    "six lines are the most an event may publish",
+    (await q(`select array_length(support_hours, 1) as n from public.events where id = '${EVENT}';`))[0].n === 6,
+  );
+
+  await run(`update public.events set support_hours = '{}' where id = '${EVENT}';`);
+  check(
+    "and an event may publish none at all",
+    (await q(`select support_hours from public.events where id = '${EVENT}';`))[0].support_hours.length === 0,
+  );
+
+  await run(`
+    update public.events
+       set support_hours = array['Monday – Saturday · 10:00 AM – 8:00 PM', 'Festival days · 10:00 AM – 11:00 PM']
+     where id = '${EVENT}';
+  `);
+  check(
+    "the seeded support hours are restored",
+    (await q(`select support_hours from public.events where id = '${EVENT}';`))[0].support_hours.length === 2,
+  );
+
+  // The contact block is public read-only: a visitor may read it, never write it.
+  const ctsAnonWrite = await expectError(
+    `set role anon; update public.events set whatsapp_number = '919999999999' where id = '${EVENT}';`,
+  );
+  await run("reset role;");
+
+  check("a visitor cannot change the contact block", ctsAnonWrite !== null, ctsAnonWrite ?? "accepted");
+  check(
+    "and the number in the row is untouched",
+    (await q(`select whatsapp_number from public.events where id = '${EVENT}';`))[0].whatsapp_number ===
+      "919000000000",
+  );
+
   section("Result");
   // ---------------------------------------------------------------------------
   console.log(`\n  ${passed} passed, ${failures.length} failed\n`);

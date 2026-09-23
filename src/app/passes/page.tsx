@@ -5,6 +5,7 @@ import { NightList } from "@/components/events/night-list";
 import { CheckIcon } from "@/components/icons";
 import { PageHero } from "@/components/layout/page-hero";
 import { CtaBand } from "@/components/sections/cta-band";
+import { buildSiteContact } from "@/lib/contact";
 import { Button } from "@/components/ui/button";
 import { Container, Section } from "@/components/ui/container";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -178,6 +179,7 @@ export default async function PassesPage() {
       <CtaBand
         title="Which pass should you pick?"
         description="Not sure whether your group fits a couple pass or a squad pass? Message the organiser on WhatsApp before you pay."
+        contact={buildSiteContact(event)}
       />
     </>
   );

@@ -10,6 +10,8 @@ import type { NavItem } from "@/types";
 
 type MobileNavProps = {
   items: readonly NavItem[];
+  /** The event's WhatsApp link, or null when no number is published. */
+  whatsappHref: string | null;
 };
 
 /**
@@ -20,7 +22,7 @@ type MobileNavProps = {
  * a cascading render. The panel is also scroll-bounded so long menus stay usable
  * on small screens.
  */
-export function MobileNav({ items }: MobileNavProps) {
+export function MobileNav({ items, whatsappHref }: MobileNavProps) {
   const [isOpen, setIsOpen] = useState(false);
 
   useEffect(() => {
@@ -86,7 +88,7 @@ export function MobileNav({ items }: MobileNavProps) {
             <Button href="/passes" className="w-full" onClick={closeMenu}>
               View Passes
             </Button>
-            <WhatsAppButton variant="full" className="w-full" />
+            <WhatsAppButton href={whatsappHref} variant="full" className="w-full" onClick={closeMenu} />
           </div>
         </div>
       ) : null}

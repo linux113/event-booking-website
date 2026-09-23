@@ -6,6 +6,7 @@ import { SiteFooter } from "@/components/layout/site-footer";
 import { SiteHeader } from "@/components/layout/site-header";
 import { siteConfig } from "@/config/site";
 import { siteUrl } from "@/config/env";
+import { getSiteContact } from "@/lib/services/contact";
 
 import "./globals.css";
 
@@ -43,7 +44,18 @@ export const viewport: Viewport = {
   initialScale: 1,
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+/**
+ * The root layout reads the event's contact details once and hands them to the header
+ * and the footer.
+ *
+ * One read, one source: the WhatsApp link in the header, the one in the mobile menu,
+ * the phone number and the social profiles in the footer are all the same row. When
+ * the database is not configured `getSiteContact()` answers with an empty contact, so
+ * the chrome still renders — without the links, rather than without the page.
+ */
+export default async function RootLayout({ children }: LayoutProps<"/">) {
+  const contact = await getSiteContact();
+
   return (
     <html lang="en-IN" className={fontVariables}>
       <body className="flex min-h-dvh flex-col font-sans">
@@ -54,13 +66,13 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           Skip to content
         </a>
 
-        <SiteHeader />
+        <SiteHeader whatsappHref={contact.whatsappHref} />
 
         <main id="main" className="flex-1">
           {children}
         </main>
 
-        <SiteFooter />
+        <SiteFooter contact={contact} />
       </body>
     </html>
   );

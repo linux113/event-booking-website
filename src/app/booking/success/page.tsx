@@ -10,7 +10,9 @@ import { Container, Section } from "@/components/ui/container";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { formatEventDate, formatInr, formatTimeRange } from "@/lib/format";
+import { whatsappChatUrl, whatsappMessage } from "@/lib/contact";
 import { getBookingPasses } from "@/lib/services/passes";
+import { getSiteContact } from "@/lib/services/contact";
 import { getBookingStatusByToken } from "@/lib/services/payments";
 
 export const metadata: Metadata = {
@@ -67,10 +69,12 @@ export default async function BookingSuccessPage({ searchParams }: BookingSucces
     );
   }
 
-  // One round trip each, in parallel: the booking's state and its passes.
-  const [bookingResult, passesResult] = await Promise.all([
+  // One round trip each, in parallel: the booking's state, its passes, and the event's
+  // contact details (which every WhatsApp link on the site is built from).
+  const [bookingResult, passesResult, contact] = await Promise.all([
     getBookingStatusByToken(token),
     getBookingPasses(token),
+    getSiteContact(),
   ]);
 
   if (!bookingResult.ok) {
@@ -253,9 +257,9 @@ export default async function BookingSuccessPage({ searchParams }: BookingSucces
 
             <div className="flex flex-wrap gap-3 pt-1">
               <WhatsAppButton
+                href={whatsappChatUrl(contact.whatsappNumber, whatsappMessage(booking.reference))}
                 variant="full"
                 size="sm"
-                message={`Hi! My booking reference is ${booking.reference} for ${booking.eventName}.`}
               />
               <Button href="/contact" variant="secondary" size="sm">
                 Other ways to reach us

@@ -42,6 +42,13 @@ export function toEventSummary(row: EventRow): EventSummary {
     heroImageUrl: row.hero_image_url,
     contactPhone: row.contact_phone,
     contactEmail: row.contact_email,
+    whatsappNumber: row.whatsapp_number,
+    instagramUrl: row.instagram_url,
+    facebookUrl: row.facebook_url,
+    youtubeUrl: row.youtube_url,
+    // A null array from PostgREST and an empty one mean the same thing here: no hours
+    // published, so the contact page shows the row of channels it has and no hours.
+    supportHours: row.support_hours ?? [],
     currency: row.currency,
   };
 }

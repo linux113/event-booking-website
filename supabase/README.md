@@ -19,7 +19,8 @@ supabase/
 │   ├── 20260922091000_admin_booking_management.sql  # search, filters, detail, CSV, contact gating
 │   ├── 20260922091100_admin_payments_and_passes.sql # gateway delivery log, attention list, door list
 │   ├── 20260922091200_admin_pass_and_date_management.sql  # pass catalogue + night/capacity writers
-│   └── 20260922091300_gallery_management.sql     # the two storage buckets, gallery columns + writers
+│   ├── 20260922091300_gallery_management.sql     # the two storage buckets, gallery columns + writers
+│   └── 20260922091400_contact_and_social_links.sql  # the event's contact block, social links and support hours
 └── seed.sql                                      # event, 9 nights, 5 passes, features, highlights
 ```
 
@@ -27,7 +28,7 @@ supabase/
 
 | Table | Purpose | Public read? |
 | ----- | ------- | ------------ |
-| `events` | One festival (venue, city, status) | ✅ published only |
+| `events` | One festival (venue, city, status) **and its contact block**: phone, email, WhatsApp number, map, social profiles, support hours | ✅ published only |
 | `event_dates` | One night per row, with capacity, `capacity_held` (seats withheld from online sale) and `booking_open` | ✅ nights of a published event (status tells the UI it is cancelled or finished) |
 | `pass_categories` | Pass types + prices + `min_age` (per event) | ✅ every row of a published event — `is_active` decides whether it can be bought, not whether it is shown |
 | `event_highlights` | "What to expect" bullets per event | ✅ rows of a published event |
@@ -70,6 +71,24 @@ Because the bucket block is guarded (`storage` belongs to Supabase's own roles, 
 deployments run these migrations without rights on it), the migration prints a `notice`
 when it cannot create them instead of failing the chain. Create them by hand in that case
 — see *Creating the two storage buckets* below.
+
+### The event's contact block
+
+The contact details the site publishes are columns on `events`, not configuration:
+
+| Column | Holds | Rule |
+| ------ | ----- | ---- |
+| `contact_phone` | the number to ring, as printed (`+91 90000 00000`) | free text — it is a label as much as a number |
+| `contact_email` | the address enquiries go to | free text; the app only builds a `mailto:` for something that looks like an address |
+| `whatsapp_number` | the number the click-to-chat links open | international format, **digits only** — `^[1-9][0-9]{9,14}$`. Empty means the app falls back to `contact_phone`'s digits, then to the deployment's setting |
+| `venue_name`, `venue_address`, `city`, `state`, `maps_url` | the address block and the map link | `maps_url` is the organiser's own pin; without it the app searches the address |
+| `instagram_url`, `facebook_url`, `youtube_url` | the event's profiles | `https://` only, and each must be on the platform it names — a link in the wrong column sends guests somewhere the organiser did not intend |
+| `support_hours` | up to six lines of opening hours (`text[]`) | `array_length(…, 1)` is null or between 1 and 6; the column itself is `not null default '{}'` |
+
+`whatsapp_number` is separate from `contact_phone` on purpose: an organiser's WhatsApp
+Business number is often not the number they take calls on. Storing digits only is what
+makes `wa.me/<number>` safe to build by concatenation, and it is the reason the empty
+string is refused — clear the field to `null` instead of blanking it.
 
 ### What the public API exposes
 
@@ -379,6 +398,11 @@ event, and a scanned token at the gate.
 - **Webhook deliveries are exactly-once.** `payment_events.event_id` is unique, and the
   claim happens in the same transaction as the side effect, so a retried delivery is
   recorded and reported as `duplicate` without touching the booking again.
+- **A contact link cannot point somewhere unintended.** `events_whatsapp_number_format`
+  allows only digits in international format (no `+`, no spaces, no leading zero), so the
+  `wa.me` URL the app concatenates from it always resolves; `events_social_url_https`
+  requires each social column to be `https` **and** on its own platform; and
+  `events_support_hours_size` keeps the hours a short list rather than a document.
 - **A payment status cannot be typed in.** The `bookings_guard_payment_status` trigger
   (`PB007`) refuses any change to `bookings.payment_status` that is not made by one of the
   three payment functions inside a transaction they have marked as

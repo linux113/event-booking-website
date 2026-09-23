@@ -1,12 +1,19 @@
 import { WhatsAppButton } from "@/components/layout/whatsapp-button";
 import { Button } from "@/components/ui/button";
 import { Container, Section } from "@/components/ui/container";
+import { buildSiteContact, type SiteContact } from "@/lib/contact";
 
 type CtaBandProps = {
   title?: string;
   description?: string;
   /** Overrides the primary button label. */
   bookLabel?: string;
+  /**
+   * The event's contact details, when the page already has them, so the button opens the
+   * event's own WhatsApp number. Without one the deployment-level fallback is used, and
+   * if that is empty too there is no button rather than a guessed number.
+   */
+  contact?: SiteContact | null;
 };
 
 /** Closing call to action reused at the bottom of every public page. */
@@ -14,6 +21,7 @@ export function CtaBand({
   title = "Ready to dance all nine nights?",
   description = "Reserve your pass before a night sells out. Checkout will be handled by Razorpay once the booking step is live.",
   bookLabel = "Book Now",
+  contact = null,
 }: CtaBandProps) {
   return (
     <Section className="pt-4">
@@ -35,7 +43,12 @@ export function CtaBand({
               <Button href="/passes" variant="secondary" size="lg" className="w-full sm:w-auto">
                 View Passes
               </Button>
-              <WhatsAppButton variant="full" size="lg" className="w-full sm:w-auto" />
+              <WhatsAppButton
+                href={(contact ?? buildSiteContact(null)).whatsappHref}
+                variant="full"
+                size="lg"
+                className="w-full sm:w-auto"
+              />
             </div>
           </div>
         </div>

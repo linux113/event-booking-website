@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import { NightList } from "@/components/events/night-list";
 import { PageHero } from "@/components/layout/page-hero";
 import { CtaBand } from "@/components/sections/cta-band";
+import { buildSiteContact } from "@/lib/contact";
 import { Button } from "@/components/ui/button";
 import { Container, Section } from "@/components/ui/container";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -95,7 +96,7 @@ export default async function EventsPage() {
         </Container>
       </Section>
 
-      <CtaBand />
+      <CtaBand contact={buildSiteContact(featured?.event)} />
     </>
   );
 }

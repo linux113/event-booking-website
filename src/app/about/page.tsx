@@ -5,6 +5,7 @@ import heroImage from "@/assets/images/hero-festival.jpg";
 import { CheckIcon } from "@/components/icons";
 import { PageHero } from "@/components/layout/page-hero";
 import { CtaBand } from "@/components/sections/cta-band";
+import { buildSiteContact } from "@/lib/contact";
 import { FeatureStrip } from "@/components/sections/feature-strip";
 import { Card } from "@/components/ui/card";
 import { Container, Section } from "@/components/ui/container";
@@ -153,6 +154,7 @@ export default async function AboutPage() {
       <CtaBand
         title="Come for one night or all nine"
         description="Passes are per night. Compare the pass options and pick what suits your group."
+        contact={buildSiteContact(event)}
       />
     </>
   );

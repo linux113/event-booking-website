@@ -10,7 +10,14 @@ import { siteConfig } from "@/config/site";
 const navLinkStyles =
   "text-muted hover:text-foreground relative text-sm font-medium transition-colors after:absolute after:-bottom-1.5 after:left-0 after:h-0.5 after:w-0 after:rounded-full after:bg-gradient-to-r after:from-marigold after:to-rani after:transition-all after:duration-200 hover:after:w-full";
 
-export function SiteHeader() {
+/**
+ * The site header.
+ *
+ * It takes the WhatsApp link rather than building one: the number is a column on the
+ * event row, and the header should not be the place that knows how a `wa.me` URL is
+ * spelled. The root layout reads the contact once and hands it down.
+ */
+export function SiteHeader({ whatsappHref }: { whatsappHref: string | null }) {
   return (
     <header className="border-border/60 bg-background/85 sticky top-0 z-50 border-b backdrop-blur-xl">
       <Container className="flex h-16 items-center justify-between gap-3 lg:h-18">
@@ -34,9 +41,9 @@ export function SiteHeader() {
           <Button href="/book" size="sm" className="hidden md:inline-flex">
             Book Now
           </Button>
-          <WhatsAppButton variant="default" size="sm" className="hidden sm:inline-flex" />
-          <WhatsAppButton variant="icon" size="sm" className="sm:hidden" />
-          <MobileNav items={siteConfig.nav} />
+          <WhatsAppButton href={whatsappHref} variant="default" size="sm" className="hidden sm:inline-flex" />
+          <WhatsAppButton href={whatsappHref} variant="icon" size="sm" className="sm:hidden" />
+          <MobileNav items={siteConfig.nav} whatsappHref={whatsappHref} />
         </div>
       </Container>
     </header>

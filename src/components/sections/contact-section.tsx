@@ -3,7 +3,7 @@ import { MapPinIcon } from "@/components/icons";
 import { WhatsAppButton } from "@/components/layout/whatsapp-button";
 import { Container, Section } from "@/components/ui/container";
 import { SectionHeading } from "@/components/ui/section-heading";
-import { buildContactChannels } from "@/config/contact";
+import { buildContactChannels, buildSiteContact } from "@/lib/contact";
 import type { EventSummary } from "@/types";
 
 type ContactSectionProps = {
@@ -16,6 +16,7 @@ type ContactSectionProps = {
 export function ContactSection({ variant = "full", event }: ContactSectionProps) {
   const isPreview = variant === "preview";
   const channels = buildContactChannels(event);
+  const contact = buildSiteContact(event);
 
   return (
     <Section id="contact">
@@ -40,21 +41,26 @@ export function ContactSection({ variant = "full", event }: ContactSectionProps)
                 Venue &amp; directions
               </h3>
               <address className="text-muted text-sm/6 not-italic">
-                {[event?.venueName, event?.venueAddress, event?.city, event?.state]
-                  .filter(Boolean)
-                  .map((line) => (
-                    <span key={line} className="block">
-                      {line}
-                    </span>
-                  ))}
+                {contact.addressLines.map((line) => (
+                  <span key={line} className="block">
+                    {line}
+                  </span>
+                ))}
                 {event ? null : <span className="block">Venue to be confirmed</span>}
               </address>
-              <WhatsAppButton
-                variant="full"
-                size="sm"
-                className="mt-1 w-fit"
-                message="Hi! I need directions to the venue."
-              />
+              <div className="mt-1 flex flex-wrap items-center gap-3">
+                {contact.mapsHref ? (
+                  <a
+                    href={contact.mapsHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-marigold-soft hover:text-marigold text-sm font-semibold underline-offset-4 hover:underline"
+                  >
+                    Open in Google Maps
+                  </a>
+                ) : null}
+                <WhatsAppButton href={contact.whatsappHref} variant="full" size="sm" className="w-fit" />
+              </div>
             </div>
 
             <div
@@ -63,7 +69,7 @@ export function ContactSection({ variant = "full", event }: ContactSectionProps)
               aria-label="Map placeholder — the venue map will be embedded here"
             >
               <p className="text-muted max-w-xs text-sm/6">
-                {event?.mapsUrl
+                {contact.mapsHref
                   ? "Open the venue in Google Maps from the link above."
                   : "The venue map is published once the organiser confirms the location."}
               </p>

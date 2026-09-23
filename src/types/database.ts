@@ -127,6 +127,11 @@ export interface Database {
           hero_image_url: string | null;
           contact_phone: string | null;
           contact_email: string | null;
+          whatsapp_number: string | null;
+          instagram_url: string | null;
+          facebook_url: string | null;
+          youtube_url: string | null;
+          support_hours: string[];
           currency: string;
           status: EventStatus;
           created_at: string;
@@ -146,6 +151,11 @@ export interface Database {
           hero_image_url?: string | null;
           contact_phone?: string | null;
           contact_email?: string | null;
+          whatsapp_number?: string | null;
+          instagram_url?: string | null;
+          facebook_url?: string | null;
+          youtube_url?: string | null;
+          support_hours?: string[];
           currency?: string;
           status?: EventStatus;
           created_at?: string;
@@ -165,6 +175,11 @@ export interface Database {
           hero_image_url?: string | null;
           contact_phone?: string | null;
           contact_email?: string | null;
+          whatsapp_number?: string | null;
+          instagram_url?: string | null;
+          facebook_url?: string | null;
+          youtube_url?: string | null;
+          support_hours?: string[];
           currency?: string;
           status?: EventStatus;
           created_at?: string;

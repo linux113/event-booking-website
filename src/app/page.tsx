@@ -1,6 +1,7 @@
 import { AboutSection } from "@/components/sections/about-section";
 import { ContactSection } from "@/components/sections/contact-section";
 import { CtaBand } from "@/components/sections/cta-band";
+import { buildSiteContact } from "@/lib/contact";
 import { FeatureStrip } from "@/components/sections/feature-strip";
 import { GalleryPreview } from "@/components/sections/gallery-preview";
 import { Hero } from "@/components/sections/hero";
@@ -88,7 +89,7 @@ export default async function HomePage() {
       <PassesPreview passes={bundle.passes} />
       <GalleryPreview items={result.gallery} />
       <ContactSection variant="preview" event={bundle.event} />
-      <CtaBand />
+      <CtaBand contact={buildSiteContact(bundle.event)} />
     </>
   );
 }

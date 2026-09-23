@@ -23,8 +23,9 @@ fits within free tiers for development and small-scale launch.
 | 11 | Payments and passes — the gateway's own record, the rows that contradict themselves, and the door list with a CSV export | ✅ done |
 | 12 | Pass and date management — create and edit passes, prices, limits and age; add nights, set capacity, hold seats back, open and close booking | ✅ done |
 | 13 | Gallery management — upload to private storage, describe, order, publish into the public bucket, delete the files with the row | ✅ done |
-| 14 | Operations screens — publishing events, event settings | ⏳ next |
-| 15 | Hardening — rate limiting, analytics, perf budget | ⏳ |
+| 14 | Contact and WhatsApp — the event's contact details in the database, every link built in one module, a complete contact page and a footer that reads it | ✅ done |
+| 15 | Operations screens — publishing events, event settings | ⏳ next |
+| 16 | Hardening — rate limiting, analytics, perf budget | ⏳ |
 
 Step 3 is two halves of one job — the Supabase schema/RLS layer, then replacing every
 hard-coded value in the UI with database reads. Both are done and verified against real
@@ -65,7 +66,7 @@ signature — never by the browser saying so.
 | `/admin/staff` | Who may sign in and with which role, plus how to add somebody. Super admin only |
 | `/admin/gallery` | Gallery management: upload photographs (resized to WebP on the server), write the caption and the alternative text, reorder them, publish/unpublish/archive, and delete one along with its stored files. Guarded by `gallery:view`; only `gallery:edit` roles are offered the controls |
 | `/gallery` | Published photos and videos from the `gallery` table, in a responsive grid with a keyboard-driven lightbox. Thumbnails lazy-load, drafts are not reachable at all |
-| `/contact` | Contact channels derived from the event row (WhatsApp, phone, email, map), venue block, support hours, FAQ |
+| `/contact` | Everything needed to reach the organiser, read from the `events` row: WhatsApp with the enquiry message prefilled, phone, email, venue, address, a Google Maps link, the three social profiles and support hours, plus the FAQ and the closing band |
 | `/events` | Published events from the database, each with its nights and passes |
 
 ## Getting started
@@ -565,6 +566,26 @@ every tile is a button with an `aria-label`, off-screen images are `loading="laz
 gives focus back to the tile that opened it. `/gallery` revalidates every five minutes, so
 publishing the night's photographs does not need a deploy.
 
+## Contact and WhatsApp (`/contact`)
+
+The site's contact block is **data, not configuration**. The `events` row carries
+`contact_phone`, `contact_email`, `whatsapp_number`, the venue columns, `maps_url`,
+`instagram_url`, `facebook_url`, `youtube_url` and `support_hours`; `src/lib/contact.ts`
+turns that row into every link the site shows, and `src/lib/services/contact.ts` reads it
+for the chrome.
+
+| Question | Answer |
+| -------- | ------ |
+| Where does the number come from? | `events.whatsapp_number` (international format, digits only). Empty? The digits of `events.contact_phone` are used. Empty too? The deployment fallback in `src/config/site.ts`. |
+| What does the button open? | `https://wa.me/<number>?text=…`, with the message prefilled from one constant — `Hello, I need help with Navratri Dandiya booking.` (`WHATSAPP_MESSAGE`). On a phone WhatsApp takes the link over; on a desktop WhatsApp Web opens with the same text. |
+| Why `wa.me` and not an app scheme? | One href works on both platforms, needs no SDK, and still works when JavaScript does not. |
+| What does the header show on a phone? | An icon-only button below `sm` and a labelled one at `sm` and up; the mobile menu carries a full-width one that closes the menu when it is tapped. |
+| Where else is the number used? | The header, the mobile menu, the footer, the closing band on every public page, `/book`, `/booking/success` and the booking-status panel. None of them carries a number or builds a link — they render a `SiteContact` (or an href) made by the one module. A booking's own message appends its reference to the same sentence. |
+| How is a channel hidden? | `buildContactChannels()` omits a channel whose value the organiser has not published, so no page shows a link that goes nowhere. |
+| What does `/contact` show? | The channel cards (WhatsApp → phone → email → venue), the venue and address with an *Open in Google Maps* link (the stored `maps_url`, else a search built from the address), support hours, the three social profiles, the FAQ, and the exact sentence the WhatsApp button will send. |
+| Where does the organiser see it? | `/admin/settings` lists these columns and says that is what the public site reads. |
+| How is it verified? | `npm run verify:web` renders the page against the real database, asserts the link carries the exact prefilled message, changes the number in the database and re-renders to prove nothing is hard-coded, and asserts that no component builds a `wa.me` URL or holds the number as a literal. The format rules — digits only, one platform per URL, `https`, at most six lines of support hours — are checked by `npm run db:verify`. |
+
 ## Gate check-in (`/admin/scanner`)
 
 The scanner is the only part of the site that *changes* a pass, so it is built around one
@@ -624,7 +645,8 @@ Supabase directly.
 
 | Page element | Source |
 | ------------ | ------ |
-| Event name, tagline, venue, city, contact details | `events` (published row) |
+| Event name, tagline, venue, city | `events` (published row) |
+| Phone, email, WhatsApp number, map link, social profiles and support hours | `events` (published row) — the columns are the data, and every `wa.me` / `tel:` / `mailto:` / Maps link on the site is derived from them by `src/lib/contact.ts` |
 | Dates, times, capacity and per-night availability | `event_dates` + `get_event_night_availability()` |
 | Pass names, compositions, prices, `is_active` | `pass_categories` |
 | Production inclusions ("Girl Anchor", "Drone Camera"…) | `event_features` |
@@ -653,6 +675,11 @@ Supabase directly.
 Availability is never computed in the browser: `get_event_night_availability()` is a
 `SECURITY DEFINER` function returning counts per night, so a visitor can see that a
 night is full without ever being able to read a booking row.
+
+The contact block follows the same rule. The header, the mobile menu, the footer,
+`/contact`, `/book`, the confirmation pages and the closing band on every page all read
+one `SiteContact` built from the event row — no component holds a phone number, and none
+of them spells a `wa.me` URL, so they cannot disagree about either.
 
 Loading, empty and error states are part of the design: routes render skeletons while a
 read is in flight, a "not connected" state when credentials are missing, and an error
@@ -689,7 +716,7 @@ src/
 │   ├── layout/                 # header, footer, mobile nav, page hero, WhatsApp button
 │   ├── sections/               # hero, feature strip, about, passes/gallery preview, CTA
 │   └── ui/                     # Button, Card, Badge, Container, Section, EmptyState, Skeleton, ErrorState
-├── config/                     # env.ts (only reader of process.env), site.ts, contact.ts
+├── config/                     # env.ts (the only reader of process.env) and site.ts (branding, navigation, fallback contact settings)
 ├── lib/
 │   ├── admin/                  # verdict.ts, bookings.ts, operations.ts, catalogue.ts and gallery.ts (list filters, paging, CSV vocabulary, form rules, refusal wording)
 │   ├── auth/                   # permissions.ts (roles + capabilities), guard.ts, staff.ts
@@ -697,8 +724,9 @@ src/
 │   ├── gate/                   # night.ts: which night the gate is working, in the venue's timezone
 │   ├── pass/                   # links, status, QR rendering (server) and QR decoding (browser)
 │   ├── gallery/                # paths.ts (buckets, object keys, public URLs), images.ts (sharp: resize, re-encode, strip EXIF)
-│   ├── services/               # events.ts, gallery.ts, gallery-admin.ts, bookings.ts, payments.ts, passes.ts, check-in.ts, admin.ts, admin-operations.ts, admin-catalogue.ts, result.ts
+│   ├── services/               # events.ts, contact.ts, gallery.ts, gallery-admin.ts, bookings.ts, payments.ts, passes.ts, check-in.ts, admin.ts, admin-operations.ts, admin-catalogue.ts, result.ts
 │   ├── event-copy.ts           # what the site says about a night or a pass (seats on sale, booking closed, age)
+│   ├── contact.ts              # the one place a wa.me / tel: / mailto: / Maps link is built, from the event row
 │   ├── supabase/               # browser / server / admin clients + public.ts (memoised anon client)
 │   ├── payments/               # razorpay.ts (orders + signatures), mode.ts (test/live guard), checkout.ts (browser loader)
 │   ├── format.ts               # INR, dates, times — UTC-anchored, composed from Intl parts
@@ -844,8 +872,11 @@ production. `src/config/env.ts` is the only module that reads `process.env`.
 ## Before launch
 
 - Replace the placeholder brand name in `src/config/site.ts`.
-- Replace demo contact numbers, email, address and the WhatsApp number
-  (`siteConfig.contact.whatsappNumber`, international format, digits only).
+- Fill in the event's contact block in the database: `contact_phone`, `contact_email`,
+  `whatsapp_number` (international format, digits only — no `+`, no spaces), the venue
+  columns, `maps_url`, the three social URLs and `support_hours`. Every link on the site
+  is built from those columns; `src/config/site.ts` holds only the placeholder fallback
+  used where a column is empty.
 - Swap the placeholder artwork in `src/assets/images/` for real event photography
   (gallery media already comes from Supabase Storage, in the `gallery` and
   `gallery-inbox` buckets — see `supabase/README.md` if your deployment could not let

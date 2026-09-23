@@ -1,12 +1,17 @@
 import type { NavItem } from "@/types";
 
 /**
- * Static application configuration: branding, navigation, SEO copy and the
- * contact/social handles used by the header and footer.
+ * Static application configuration: branding, navigation and SEO copy.
  *
- * This is *not* event data. Anything an organiser edits — events, passes,
- * prices, venues, gallery photos — lives in `src/config/*` only as clearly
- * marked demo content today, and moves to Supabase next.
+ * This is *not* event data. Anything an organiser edits — the event's contact number,
+ * WhatsApp number, email, venue address, map link, social profiles and support hours —
+ * is a column on the `events` row, and is read through `src/lib/contact.ts`. The values
+ * below are the deployment-level **fallback** for a site whose event row does not carry
+ * them yet; the database always wins. Keep this file to branding and defaults, and put
+ * real contact details in the database.
+ *
+ * Link building lives in `src/lib/contact.ts` too — this file holds no URLs a visitor
+ * follows.
  */
 
 /**
@@ -58,8 +63,8 @@ export const siteConfig = {
   ] satisfies readonly NavItem[],
 
   /**
-   * Contact handles. Placeholders — replace with the real lines before launch
-   * and delete `isDemoContent` above for those values.
+   * Fallback contact handles, used only where the event row has no value of its own.
+   * Placeholders — fill in the event record (or replace these) before launch.
    */
   contact: {
     /** International format, digits only — used to build wa.me links. */
@@ -67,8 +72,11 @@ export const siteConfig = {
     phoneDisplay: "+91 90000 00000",
     email: "hello@example.com",
     addressLines: ["My Village Garden", "Ajmer Road, Jaipur, Rajasthan"],
+    /** Up to six lines, e.g. "Monday – Saturday · 10:00 AM – 8:00 PM". */
+    supportHours: ["Monday – Saturday · 10:00 AM – 8:00 PM", "Festival days · 10:00 AM – 11:00 PM"],
   },
 
+  /** Fallback social profiles, replaced by the event's own URLs when it has them. */
   socials: [
     { label: "Instagram", href: "https://instagram.com/", icon: "instagram" },
     { label: "Facebook", href: "https://facebook.com/", icon: "facebook" },
@@ -78,15 +86,3 @@ export const siteConfig = {
 
 export type SiteConfig = typeof siteConfig;
 
-/**
- * `wa.me` deep link with a prefilled enquiry message.
- *
- * `number` overrides the site-level fallback, so an event's own contact number
- * from the database is used when it exists.
- */
-export function whatsappLink(
-  message = "Hi! I'd like to know more about the Navratri event passes.",
-  number: string = siteConfig.contact.whatsappNumber,
-): string {
-  return `https://wa.me/${number}?text=${encodeURIComponent(message)}`;
-}

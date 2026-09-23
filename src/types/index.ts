@@ -37,6 +37,13 @@ export interface EventSummary {
   heroImageUrl: string | null;
   contactPhone: string | null;
   contactEmail: string | null;
+  /** International format, digits only — what the `wa.me` links are built from. */
+  whatsappNumber: string | null;
+  instagramUrl: string | null;
+  facebookUrl: string | null;
+  youtubeUrl: string | null;
+  /** Up to six lines of opening hours, in the order they should be shown. */
+  supportHours: string[];
   currency: string;
 }
 

@@ -11,6 +11,7 @@ import { ErrorState } from "@/components/ui/error-state";
 import { getPublicPaymentMode } from "@/config/env";
 import { isPaymentGatewayUsable } from "@/lib/payments/razorpay";
 import { formatDateRange, formatTimeRange } from "@/lib/format";
+import { buildSiteContact, WHATSAPP_MESSAGE } from "@/lib/contact";
 import { getFeaturedEventBundle } from "@/lib/services/events";
 
 export const metadata: Metadata = {
@@ -75,6 +76,8 @@ export default async function BookPage() {
   }
 
   const { event, nights, passes } = bundle;
+  // The event's own contact details; the buttons below never carry a number of their own.
+  const contact = buildSiteContact(event);
   // Online payment only becomes available once the server holds usable Razorpay
   // keys (a live key with live mode off does not count), and the key prefix decides
   // whether the site tells customers it is running in test mode.
@@ -94,13 +97,7 @@ export default async function BookPage() {
           <Button href="#checkout" size="lg" className="w-full sm:w-auto">
             Start booking
           </Button>
-          <WhatsAppButton
-            variant="full"
-            size="lg"
-            className="w-full sm:w-auto"
-            number={event.contactPhone?.replace(/[^0-9]/g, "")}
-            message="Hi! I'd like help booking passes for the Navratri event."
-          />
+          <WhatsAppButton href={contact.whatsappHref} variant="full" size="lg" className="w-full sm:w-auto" />
         </div>
       </PageHero>
 
@@ -137,13 +134,11 @@ export default async function BookPage() {
                 </>
               )}
             </p>
-            <div className="flex flex-wrap gap-3 pt-1">
-              <WhatsAppButton
-                variant="full"
-                size="sm"
-                number={event.contactPhone?.replace(/[^0-9]/g, "")}
-                message="Hi! I'd like to book a group pass for the Navratri event."
-              />
+            <div className="flex flex-wrap items-center gap-3 pt-1">
+              <WhatsAppButton href={contact.whatsappHref} variant="full" size="sm" />
+              <p className="text-muted/80 text-xs/5">
+                Opens WhatsApp with “{WHATSAPP_MESSAGE}” already typed.
+              </p>
               <Button href="/contact" variant="secondary" size="sm">
                 Other ways to reach us
               </Button>

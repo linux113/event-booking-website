@@ -536,6 +536,12 @@ export interface EventSettings {
   state: string | null;
   contactPhone: string | null;
   contactEmail: string | null;
+  /** International format, digits only — what the site's WhatsApp links open. */
+  whatsappNumber: string | null;
+  instagramUrl: string | null;
+  facebookUrl: string | null;
+  youtubeUrl: string | null;
+  supportHours: string[];
   currency: string;
 }
 
@@ -549,7 +555,9 @@ export async function getEventSettings(): Promise<Result<EventSettings | null>> 
 
   const { data, error } = await client.client
     .from("events")
-    .select("name, slug, status, tagline, venue_name, venue_address, city, state, contact_phone, contact_email, currency")
+    .select(
+      "name, slug, status, tagline, venue_name, venue_address, city, state, contact_phone, contact_email, whatsapp_number, instagram_url, facebook_url, youtube_url, support_hours, currency",
+    )
     .order("created_at", { ascending: true })
     .limit(1)
     .maybeSingle();
@@ -575,6 +583,11 @@ export async function getEventSettings(): Promise<Result<EventSettings | null>> 
     state: data.state,
     contactPhone: data.contact_phone,
     contactEmail: data.contact_email,
+    whatsappNumber: data.whatsapp_number,
+    instagramUrl: data.instagram_url,
+    facebookUrl: data.facebook_url,
+    youtubeUrl: data.youtube_url,
+    supportHours: data.support_hours ?? [],
     currency: data.currency,
   });
 }

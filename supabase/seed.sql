@@ -19,7 +19,8 @@
 insert into public.events (
   id, slug, name, tagline, description,
   venue_name, venue_address, city, state, maps_url,
-  contact_phone, contact_email,
+  contact_phone, contact_email, whatsapp_number,
+  instagram_url, facebook_url, youtube_url, support_hours,
   currency, status
 )
 values (
@@ -33,8 +34,15 @@ values (
   'Jaipur',
   'Rajasthan',
   'https://maps.google.com/?q=My+Village+Garden+Jaipur',
-  null,
-  null,
+  -- Placeholder contact lines: the same ones the site used to carry in
+  -- `src/config`, now rows an organiser can change without a deploy.
+  '+91 90000 00000',
+  'hello@example.com',
+  '919000000000',
+  'https://www.instagram.com/',
+  'https://www.facebook.com/',
+  'https://www.youtube.com/',
+  array['Monday – Saturday · 10:00 AM – 8:00 PM', 'Festival days · 10:00 AM – 11:00 PM'],
   'INR',
   'published'
 )
@@ -48,6 +56,13 @@ on conflict (id) do update set
   city          = excluded.city,
   state         = excluded.state,
   maps_url      = excluded.maps_url,
+  contact_phone = excluded.contact_phone,
+  contact_email = excluded.contact_email,
+  whatsapp_number = excluded.whatsapp_number,
+  instagram_url = excluded.instagram_url,
+  facebook_url  = excluded.facebook_url,
+  youtube_url   = excluded.youtube_url,
+  support_hours = excluded.support_hours,
   currency      = excluded.currency,
   status        = excluded.status;
 
