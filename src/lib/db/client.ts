@@ -2,6 +2,7 @@ import "server-only";
 
 import { PrismaNeon } from "@prisma/adapter-neon";
 import { PrismaClient } from "@/generated/prisma/client";
+import { normaliseRows } from "@/lib/db/normalise";
 
 /**
  * The one database client.
@@ -138,17 +139,26 @@ export function resetDb(): void {
  *
  * Also accepts a plain string + values (used by `rpc`): the text is still
  * parameterised via `$queryRawUnsafe`'s bind markers, never string-interpolated.
+ *
+ * Results pass through `normaliseRows`: Prisma hands `date` / `time` /
+ * `timestamptz` columns back as JS `Date` objects, while every row type in
+ * this app is written against the plain strings the previous data layer
+ * returned (`2026-10-11`, `19:00:00`, ISO timestamps). Restoring that contract
+ * here — the single exit point for every query — is what keeps `.slice()`,
+ * `.localeCompare()` and the formatters downstream honest.
  */
 export function sql<T = unknown>(
   strings: TemplateStringsArray | string,
   ...values: unknown[]
 ): Promise<T> {
   try {
-    if (typeof strings === "string") {
-      // Called with a plain query text (from rpc): bind via unsafe raw API.
-      return getDb().$queryRawUnsafe<T>(strings, ...(values as never[]));
-    }
-    return getDb().$queryRaw<T>(strings, ...values);
+    const result =
+      typeof strings === "string"
+        ? // Called with a plain query text (from rpc): bind via unsafe raw API.
+          getDb().$queryRawUnsafe<T>(strings, ...(values as never[]))
+        : getDb().$queryRaw<T>(strings, ...values);
+
+    return result.then((rows) => normaliseRows(rows));
   } catch (error) {
     return Promise.reject(toDatabaseError(error));
   }

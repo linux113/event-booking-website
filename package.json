@@ -14,6 +14,7 @@
     "db:setup": "node scripts/setup-database.mjs",
     "db:setup:test": "node scripts/test/db-setup.test.mjs",
     "test:prisma": "node scripts/test/prisma-client.test.mjs",
+    "test:normalise": "node scripts/test/db-normalise.test.mjs",
     "verify:web": "node scripts/verify-web.mjs"
   },
   "dependencies": {

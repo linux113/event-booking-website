@@ -46,9 +46,20 @@ const shortDateFormatter = new Intl.DateTimeFormat(siteConfig.locale, {
  * timestamp, but if a driver or a future column hands us one, the calendar day
  * is taken as written instead of the raw value leaking into the page.
  * Returns null for anything unparseable, so callers can fall back deliberately.
+ *
+ * A driver `Date` is accepted too (defence in depth: `sql()` normalises row
+ * values to strings, but a future caller could pass one straight through) —
+ * a Postgres `date` reaches JS as UTC midnight, which is exactly the anchor
+ * this module wants.
  */
 function parseDate(value: string): Date | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?$/.exec(value ?? "");
+  const raw: unknown = value;
+
+  if (raw instanceof Date) {
+    return Number.isNaN(raw.getTime()) ? null : raw;
+  }
+
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?$/.exec((raw as string | null | undefined) ?? "");
 
   if (!match) {
     return null;
@@ -75,7 +86,10 @@ function compareDates(left: { value: string; date: Date | null }, right: { value
     return left.date.getTime() - right.date.getTime();
   }
 
-  return left.value.localeCompare(right.value);
+  // Stringified so a non-string that slipped past `parseDate` (a driver `Date`,
+  // say) degrades to a stable textual order instead of throwing —
+  // `value.localeCompare` on a Date is what killed the /about prerender.
+  return String(left.value).localeCompare(String(right.value));
 }
 
 /** `2026-10-11` → `Sun, 11 Oct 2026`. Falls back to the raw value if unparseable. */
@@ -170,6 +184,23 @@ export function formatDateRange(isoDates: readonly string[]): string {
 
 /** `19:00:00` → `7:00 PM`. Returns null for empty input. */
 export function formatTimeOfDay(time: string | null): string | null {
+  if (time !== null && (time as unknown) instanceof Date) {
+    // A driver `Date` for a Postgres `time` is anchored at 1970-01-01 UTC
+    // (sql() normalises these to strings; this guard is defence in depth).
+    const epochDay = time as unknown as Date;
+
+    if (Number.isNaN(epochDay.getTime())) {
+      return null;
+    }
+
+    const hours = epochDay.getUTCHours();
+    const minutes = epochDay.getUTCMinutes();
+    const period = hours >= 12 ? "PM" : "AM";
+    const displayHours = hours % 12 === 0 ? 12 : hours % 12;
+
+    return `${displayHours}:${String(minutes).padStart(2, "0")} ${period}`;
+  }
+
   const match = /^(\d{2}):(\d{2})/.exec(time ?? "");
 
   if (!match) {
