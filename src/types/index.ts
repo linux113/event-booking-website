@@ -15,7 +15,7 @@ export interface NavItem {
   href: Route;
 }
 
-/** A bundled image (static import) or a remote URL (e.g. Supabase Storage). */
+/** A bundled image (static import) or a remote URL (e.g. Vercel Blob / CDN). */
 export type ImageSource = string;
 
 // -----------------------------------------------------------------------------

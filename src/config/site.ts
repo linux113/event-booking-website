@@ -25,8 +25,8 @@ export const contentStatus = {
 } as const;
 
 export const siteConfig = {
-  name: "Garba Nights",
-  shortName: "Garba Nights",
+  name: "Savriya Seth Events",
+  shortName: "Savriya Seth Events",
   tagline: "Navratri & Dandiya event booking",
   description:
     "Discover Navratri and Dandiya events, reserve your passes and pay securely online. Built for organisers and dancers across India.",

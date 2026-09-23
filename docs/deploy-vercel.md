@@ -1,170 +1,123 @@
-# Deploy this project on Vercel — do this now
+# Deploy this project on Vercel
 
-**The repo is ready: `4137ca7` is pushed and the branch is Vercel-ready.** What is left is
-the click inside your Vercel account, which needs your login — I have no Vercel credentials
-in this sandbox and I will not ask you to paste one into a chat. Everything below is the
-sequence to follow, in order, and each step says what you should see.
+**Stack:** Next.js on Vercel · Neon PostgreSQL · Razorpay (test mode) · Vercel Blob.
+There are **no Supabase environment variables**.
 
-**Time: about 10 minutes** for a live site with an empty database, plus ~5 minutes for the
-Supabase steps if you have not done those yet (see `docs/connect-free-supabase.md`).
+**Time:** about 10–15 minutes if Neon and Razorpay already exist.
 
 ---
 
-## Before you start: two decisions
+## Before you start
 
-**1. Which branch goes live?** The work — all 15 steps — is on
-`arena/01a0c957-event-booking-website` (PR #1, deliberately unmerged). Vercel's Production
-Branch defaults to **`main`**, which only has the initial scaffold. So either:
-
-- **Point Vercel at the branch** (recommended while the PR is open): after importing,
-  *Settings → Git → Production Branch* → `arena/01a0c957-event-booking-website`, or
-- merge PR #1 first and let `main` deploy.
-
-If you skip this, the deploy succeeds and shows the scaffold — that is the single most
-common way this looks broken when it isn't.
-
-**2. Have the Supabase values ready.** The site builds and goes live with **no**
-environment variables (verified: build exit 0), but it then serves its shell with a
-"database is not connected" panel. `NEXT_PUBLIC_*` values are **inlined at build time**, so
-add them *before* the first production build — or redeploy after adding them.
-
-| You need | Where it comes from |
-| -------- | ------------------- |
-| `NEXT_PUBLIC_SUPABASE_URL` | Supabase → Project Settings → API (or the Connect dialog) |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | the **publishable** key `sb_publishable_…` (legacy `anon` key also works) |
-| `SUPABASE_SERVICE_ROLE_KEY` | the **secret** key `sb_secret_…` (legacy `service_role` key also works) — server-only, never paste it anywhere public |
-
-If the database does not exist yet: `docs/connect-free-supabase.md` steps 1–2 (create the
-project, run the migrations in filename order, then `seed.sql`). Do that first, or the
-site will deploy and show nothing.
+1. **Which branch goes live?** Vercel’s Production Branch defaults to **`main`**.
+   Merge your migration branch first, or temporarily point *Settings → Git →
+   Production Branch* at the branch you want deployed. Deploying the wrong branch is
+   the most common “it shows the scaffold” failure.
+2. **Neon database** created and schema applied — see
+   [`docs/neon-setup.md`](./neon-setup.md). Use the **direct** URL for
+   `npm run db:setup -- --seed`, then keep the **pooled** URL for the app.
+3. **Razorpay test keys** and a webhook secret (step 4 below).
+4. **Vercel Blob store** if you will use gallery uploads.
 
 ---
 
-## Step 1 — Import the repository
+## Environment variables
 
-1. <https://vercel.com/new> → **Import Git Repository** → `linux113/event-booking-website`
-   (public repo, so no extra GitHub permissions are needed).
-2. Vercel detects **Next.js**. **Leave everything at the defaults** — root directory `.`,
-   install `npm install`/`npm ci`, build `npm run build`. Do not change the output
-   directory.
-3. Do **not** press Deploy yet if you want the env vars in the first build. Use
-   *Environment Variables → Add* on the same screen, or deploy now and redeploy in step 3.
+Vercel → **Settings → Environment Variables**. Set for **Production** and **Preview**.
+Exact names (also in [`.env.example`](../.env.example)):
 
-What the project already carries (committed, so nothing to configure by hand):
-
-| File | What it sets | Why |
-| ---- | ------------ | --- |
-| `vercel.json` | function region **`bom1`** (Mumbai) | server rendering and ISR run next to a Supabase project in `ap-south-1`. Hobby allows exactly one region — keep it at one |
-| `package.json` → `engines.node` | **22.x** | the Node major the verification scripts run against |
-| `next.config.ts` | security headers, image `remotePatterns` | `nosniff`, referrer policy, camera-only permissions policy; frame protection on `/admin` |
-| `.env.example` | the full variable list | copy those names exactly |
-
-## Step 2 — Add the environment variables
-
-*Settings → Environment Variables.* Add each one for **Production** *and* **Preview** (so
-branch previews work), then:
-
-| Variable | Value | Notes |
+| Variable | Scope | Value |
 | -------- | ----- | ----- |
-| `NEXT_PUBLIC_SITE_URL` | `https://your-domain.vercel.app` (or your domain) | **The base of every pass QR code.** Set it before printing passes |
-| `NEXT_PUBLIC_SUPABASE_URL` | `https://<ref>.supabase.co` | |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | `sb_publishable_…` | public by design |
-| `SUPABASE_SERVICE_ROLE_KEY` | `sb_secret_…` | server-only |
-| `NEXT_PUBLIC_RAZORPAY_KEY_ID` | `rzp_test_…` | optional until you take payments |
-| `RAZORPAY_KEY_SECRET` | test secret | optional until then |
-| `RAZORPAY_WEBHOOK_SECRET` | from step 4 | optional until then |
-| `RAZORPAY_ALLOW_LIVE` | *(leave unset)* | live keys are refused without it |
+| `NEXT_PUBLIC_SITE_URL` | public | `https://<your-domain>` — **base of every pass QR**; set before printing passes |
+| `DATABASE_URL` | server | Neon **pooled** string (`-pooler`, `sslmode=require`, no `channel_binding`) |
+| `NEXT_PUBLIC_RAZORPAY_KEY_ID` | public | `rzp_test_…` (inlined at build) |
+| `RAZORPAY_KEY_SECRET` | server | test key secret |
+| `RAZORPAY_WEBHOOK_SECRET` | server | from the webhook you create below |
+| `ADMIN_EMAIL` | server | admin sign-in email |
+| `ADMIN_PASSWORD_HASH` | server | `scrypt$<salt>$<hash>` — generate with the Node one-liner in neon-setup.md |
+| `AUTH_SECRET` | server | ≥32 random bytes |
+| `BLOB_READ_WRITE_TOKEN` | server | Vercel Blob read/write token (gallery) |
+| `RAZORPAY_ALLOW_LIVE` | server | leave **unset** until you deliberately go live |
 
-## Step 3 — Deploy (and set the production branch)
+**Never** prefix secrets with `NEXT_PUBLIC_`. **Never** commit them.
 
-1. **Deploy**. First build takes ~1–2 minutes.
-2. **Settings → Git → Production Branch** → `arena/01a0c957-event-booking-website`
-   (if you did not merge the PR). Then *Deployments → ⋯ → Redeploy* so the production
-   domain serves that branch rather than `main`.
-3. If you added the env vars *after* the first build: redeploy now. `NEXT_PUBLIC_*` values
-   are baked in at build time, so a redeploy is what makes them take effect.
+`NEXT_PUBLIC_*` values are inlined at **build** time — add them before the first
+production build, or redeploy after changing them.
 
-**What you should see:** the build log ends with the route list (about 40 routes, ending in
-`ƒ Proxy (Middleware)`), and the site loads `/` with your event from the database. If it
-shows the "database is not connected" panel, the three Supabase values are missing or were
-added after the build — fix, redeploy.
-
-## Step 4 — Razorpay webhook (only when you want payments)
-
-Razorpay dashboard → **Settings → Webhooks → Add** → `https://<your-domain>/api/payment/webhook`,
-subscribe to `payment.captured`, `payment.failed`, `refund.processed` (`order.paid`
-optional), copy the webhook secret into `RAZORPAY_WEBHOOK_SECRET`, redeploy.
-
-## Step 5 — Verify the deployment is real
-
-| Check | Expected |
-| ----- | -------- |
-| `/` | your event name, venue, city — from `events`, not the placeholder |
-| `/passes` | your pass types and prices from `pass_categories` |
-| `/book` | your nights and their remaining capacity |
-| `/contact` | your WhatsApp/phone/email/socials; the WhatsApp button opens with the message prefilled |
-| `/admin/login` | the sign-in form (create the account per `supabase/README.md` → *Creating the first admin*) |
-| After signing in | `/admin` dashboard with counts, `/admin/scanner` asking for the camera |
-| `curl -sI https://<domain>/admin/login \| grep -i x-frame` | `x-frame-options: DENY` |
-| One booking in Razorpay test mode | appears in `/admin/bookings`; `/booking/success` issues a pass |
-| Scan that pass at `/admin/scanner` on a phone | **✓ VALID PASS**, then **⚠ PASS ALREADY USED** |
-
-The camera needs **HTTPS** — a Vercel domain has it, a LAN IP does not.
+If `DATABASE_URL` is missing, the site still builds and serves its shell with a
+“database not connected” state (honest failure, not a broken deploy).
 
 ---
 
-## Things that will bite, in order of likelihood
+## Import & build
 
-1. **The site shows the scaffold** → the Production Branch is still `main`.
-2. **"Database is not connected"** → the Supabase three are missing, or were added after the
-   build without a redeploy.
-3. **Bookings fail with a 503** → `SUPABASE_SERVICE_ROLE_KEY` is missing. The public pages
-   only need the URL + publishable key, but creating a booking is a server write.
-4. **`/admin` asks you to log in to Vercel** → that is *Deployment Protection* on preview
-   URLs. Either use the production domain, or turn protection off for the project
-   (*Settings → Deployment Protection*).
-5. **A gallery photo 500s** → the two storage buckets are missing. The migration creates
-   them; if your SQL role could not, create them by hand — table in
-   `supabase/README.md` → *Creating the two storage buckets*.
-6. **Uploads time out** → check *Settings → Functions*: with Fluid Compute (the default for
-   new projects) you have 300 s; without it the legacy default was 10 s. Upload fewer at a time.
-7. **Everything is slow from India** → the function region and the Supabase region should
-   both be Mumbai (`bom1` / `ap-south-1`). `vercel.json` sets the first; the second is
-   chosen when the Supabase project is created.
-
-## Free-tier reality (Hobby)
-
-- **Hobby is for personal, non-commercial projects.** A site that sells passes is commercial
-  use; Vercel's terms expect **Pro** (~$20/month) for that. Budget one month of Pro for the
-  event itself, or self-host.
-- **Supabase free projects pause after 7 days without database activity** — that is the
-  limit that actually takes a quiet site down. A daily ping (a GitHub Actions cron hitting
-  `/passes`) prevents it; Supabase Pro removes it.
-- Free tier has **no automatic backups**: export the booking and pass CSVs from the admin
-  screens before the event.
+1. Vercel → **Add New → Project → Import** `linux113/event-booking-website`.
+2. Framework preset **Next.js**; defaults are fine (`npm run build` runs
+   `prisma generate && next build` — generate does not need a live DB).
+3. Region is already forced to **Mumbai (`bom1`)** in `vercel.json`. Keep Neon in a
+   nearby region (`ap-south-1`).
+4. Node **22** (`engines` in `package.json`).
 
 ---
 
-## If you would rather deploy from the CLI
+## Razorpay webhook
 
-On your own machine, with your own login (I cannot do this from here):
+1. Razorpay Dashboard → Settings → Webhooks → Add  
+   `https://<your-domain>/api/payment/webhook`
+2. Subscribe: `payment.captured`, `payment.failed`, `refund.processed`
+   (`order.paid` optional).
+3. Copy the **secret** into `RAZORPAY_WEBHOOK_SECRET` and redeploy.
 
-```bash
-npm i -g vercel        # or: npx vercel@latest
-vercel login           # opens a browser — the token stays on your machine
-vercel                 # first deploy: links the project, creates .vercel/
-vercel env add NEXT_PUBLIC_SUPABASE_URL production      # repeat for each variable
-vercel --prod          # production deployment
-```
-
-Vercel CLI never asks you to paste a token to anyone — `vercel login` authenticates in your
-browser. Do not send a token to me or to any chat window; nothing here needs one.
+Payment amounts are always recomputed on the server from the booking row; signatures
+are verified on `/api/payment/verify` and the webhook. That logic is intentional — do
+not “simplify” it.
 
 ---
 
-## Then tell me
+## Gallery storage (Vercel Blob)
 
-Paste the deployment URL back and I will verify it from here: the pages, the headers, the
-security hardening, and the two flows that matter (a booking reaching the database, and a
-pass being admitted exactly once). If the build log complains about anything, paste that
-too — a failed first build is usually one missing variable, not a broken project.
+1. Vercel → **Storage → Blob → Create store**.
+2. Copy the token to `BLOB_READ_WRITE_TOKEN`.
+3. Gallery rows store **keys** only (`storage_path`, `thumbnail_path`); binaries never
+   go into Neon.
+
+---
+
+## Admin sign-in
+
+1. Generate `ADMIN_PASSWORD_HASH` and `AUTH_SECRET` (commands in `docs/neon-setup.md`).
+2. Set `ADMIN_EMAIL` + both values in Vercel.
+3. Open `https://<your-domain>/admin/login` — HTTP-only `gn_admin` session, full
+   access to `/admin`. There is no staff directory and no role picker.
+
+---
+
+## Hobby plan notes
+
+- Non-commercial projects only on Hobby; a paid ticket-selling site may need **Pro**.
+- Preview deployments sit behind Deployment Protection by default.
+- Functions: 300s with Fluid Compute (enough for a gallery upload).
+
+---
+
+## Five checks that prove the deployment is real
+
+1. `/` shows **your** event data from Neon (not the empty shell).
+2. `/admin/login` accepts the env credentials and lands on `/admin`.
+3. A Razorpay **test** booking appears under `/admin/bookings` with an issued pass.
+4. `/admin/scanner` on a phone (HTTPS) validates that pass, then refuses a second
+   check-in.
+5. Gallery upload/publish works (Blob token set) and `/gallery` shows the image.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+| ------- | ------------ |
+| Scaffold / wrong app | Production Branch points at the wrong branch |
+| Database not connected | Pooled `DATABASE_URL` missing or still has `channel_binding` |
+| Build succeeds, images 404 | `NEXT_PUBLIC_*` added after build — redeploy |
+| Webhook 401 | Wrong `RAZORPAY_WEBHOOK_SECRET` or proxy modifying the body |
+| Login always fails | Hash not in `scrypt$salt$hash` form, or wrong `ADMIN_EMAIL` |
+| Camera scanner dead | Page not HTTPS, or browser permission denied |

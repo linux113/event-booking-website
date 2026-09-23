@@ -1,6 +1,5 @@
 import "server-only";
 
-import { isSupabaseConfigured } from "@/config/env";
 import { formatEventDate } from "@/lib/format";
 import {
   createRazorpayOrder,
@@ -11,9 +10,8 @@ import {
   verifyCheckoutSignature,
 } from "@/lib/payments/razorpay";
 import { createPendingBooking } from "@/lib/services/bookings";
-import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import type { Database } from "@/types/database";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { isDatabaseConfigured } from "@/config/env";
+import { DatabaseError, rpc } from "@/lib/db/client";
 import type {
   BookingApiError,
   BookingStatusView,
@@ -22,9 +20,8 @@ import type {
   PaymentOrderView,
 } from "@/types/booking";
 
-
 /**
- * Payment orchestration — server side only.
+ * Payment orchestration — server side only. **Razorpay logic unchanged.**
  *
  * The flow is: create (or reuse) the pending booking, ask Razorpay for an order
  * for exactly the amount the database fixed, store the order id on the booking,
@@ -32,9 +29,9 @@ import type {
  * mirror image: verify the signature, re-read the payment from Razorpay, and only
  * then let the database mark the booking paid and issue its passes.
  *
- * Nothing here trusts a client: the amount comes from `bookings.total_amount`, the
- * payment id is only ever used after a signature check, and `payment_status` can
- * only change inside `confirm_booking_payment()`.
+ * Nothing here trusts a client: the amount comes from `bookings.total_amount`,
+ * the payment id is only ever used after a signature check, and `payment_status`
+ * can only change inside `confirm_booking_payment()`.
  */
 
 export type CreateOrderResult =
@@ -50,25 +47,8 @@ const DATABASE_NOT_CONFIGURED: BookingApiError = {
   message: "Payments are temporarily unavailable: the server is not connected to the database.",
 };
 
-/**
- * The service-role client, or a `not-configured` error in the same shape the API
- * uses. Never throws — a deployment without the service-role key answers 503 with
- * a clear message instead of a stack trace.
- */
-function getAdminClient():
-  | { ok: true; client: SupabaseClient<Database> }
-  | { ok: false; error: BookingApiError } {
-  if (!isSupabaseConfigured()) {
-    return { ok: false, error: DATABASE_NOT_CONFIGURED };
-  }
-
-  try {
-    return { ok: true, client: createSupabaseAdminClient() };
-  } catch (error) {
-    console.error("[payments] admin client unavailable:", error);
-
-    return { ok: false, error: DATABASE_NOT_CONFIGURED };
-  }
+function databaseReady(): boolean {
+  return isDatabaseConfigured();
 }
 
 const GATEWAY_NOT_CONFIGURED: BookingApiError = {
@@ -118,7 +98,17 @@ export async function createPaymentOrder(payload: unknown): Promise<CreateOrderR
 
   // An order already attached to this booking is reused: retrying a payment must
   // not create a second order for the same booking.
-  const orderId = booking.razorpayOrderId ?? (await attachNewOrder(booking.id, booking.reference, booking.currency, booking.totalAmount, booking.eventDateId, booking.passCategoryId, booking.quantity));
+  const orderId =
+    booking.razorpayOrderId ??
+    (await attachNewOrder(
+      booking.id,
+      booking.reference,
+      booking.currency,
+      booking.totalAmount,
+      booking.eventDateId,
+      booking.passCategoryId,
+      booking.quantity,
+    ));
 
   if (typeof orderId !== "string") {
     return { ok: false, error: orderId };
@@ -135,7 +125,6 @@ export async function createPaymentOrder(payload: unknown): Promise<CreateOrderR
       booking: { ...booking, razorpayOrderId: orderId },
       prefill: {
         name: input.customerName,
-        email: input.customerEmail,
         contact: input.customerMobile,
       },
       description: `${booking.passName} · ${formatEventDate(booking.eventDate)}`,
@@ -173,36 +162,39 @@ async function attachNewOrder(
     return { kind: "gateway-unavailable", message: order.message };
   }
 
-  const admin = getAdminClient();
-
-  if (!admin.ok) {
-    return admin.error;
+  if (!databaseReady()) {
+    return DATABASE_NOT_CONFIGURED;
   }
 
-  const { data, error } = await admin.client.rpc("attach_razorpay_order", {
-    p_booking_id: bookingId,
-    p_razorpay_order_id: order.data.id,
-  });
+  try {
+    const rows = await rpc<{ razorpay_order_id: string | null; attached: boolean }>(
+      "attach_razorpay_order",
+      {
+        p_booking_id: bookingId,
+        p_razorpay_order_id: order.data.id,
+      },
+    );
 
-  if (error) {
-    console.error("[payments] could not attach the order to the booking:", error.message, error.code);
+    const attached = rows[0];
 
+    if (!attached?.razorpay_order_id) {
+      return { kind: "server-error", message: "We could not start the payment. Please try again." };
+    }
+
+    if (!attached.attached) {
+      // Another request attached an order first — use that one and leave the extra
+      // order unused rather than pointing the booking at an order nobody will pay.
+      console.warn(
+        `[payments] booking ${reference} already had an order; reusing ${attached.razorpay_order_id}`,
+      );
+    }
+
+    return attached.razorpay_order_id;
+  } catch (error) {
+    const dbError = error instanceof DatabaseError ? error : new DatabaseError(String(error));
+    console.error("[payments] could not attach the order to the booking:", dbError.message, dbError.code);
     return { kind: "server-error", message: "We could not start the payment. Please try again." };
   }
-
-  const attached = Array.isArray(data) ? data[0] : data;
-
-  if (!attached?.razorpay_order_id) {
-    return { kind: "server-error", message: "We could not start the payment. Please try again." };
-  }
-
-  if (!attached.attached) {
-    // Another request attached an order first — use that one and leave the extra
-    // order unused rather than pointing the booking at an order nobody will pay.
-    console.warn(`[payments] booking ${reference} already had an order; reusing ${attached.razorpay_order_id}`);
-  }
-
-  return attached.razorpay_order_id;
 }
 
 /**
@@ -258,28 +250,52 @@ export async function verifyAndConfirmPayment(payload: unknown): Promise<VerifyP
     console.warn(`[payments] could not read the payment back from Razorpay: ${payment.message}`);
   }
 
-  const admin = getAdminClient();
-
-  if (!admin.ok) {
-    return { ok: false, error: admin.error };
+  if (!databaseReady()) {
+    return { ok: false, error: DATABASE_NOT_CONFIGURED };
   }
 
-  const { data, error } = await admin.client.rpc("confirm_booking_payment", {
-    p_razorpay_order_id: parsed.value.orderId,
-    p_razorpay_payment_id: parsed.value.paymentId,
-    p_amount_paise: amountPaise,
-  });
+  type ConfirmRow = {
+    booking_uuid: string;
+    booking_reference: string;
+    public_token: string;
+    booking_status: string;
+    payment_status: string;
+    quantity: number;
+    number_of_people: number;
+    subtotal: number;
+    total_amount: number;
+    event_id: string;
+    event_date: string;
+    start_time: string | null;
+    end_time: string | null;
+    pass_name: string;
+    pass_composition: string | null;
+    currency: string;
+    passes_issued: number;
+    already_confirmed: boolean;
+    capacity_note: string | null;
+  };
 
-  if (error) {
+  let row: ConfirmRow | undefined;
+
+  try {
+    const rows = await rpc<ConfirmRow>("confirm_booking_payment", {
+      p_razorpay_order_id: parsed.value.orderId,
+      p_razorpay_payment_id: parsed.value.paymentId,
+      p_amount_paise: amountPaise,
+    });
+    row = rows[0];
+  } catch (error) {
     return { ok: false, error: mapConfirmationError(error) };
   }
-
-  const row = Array.isArray(data) ? data[0] : data;
 
   if (!row) {
     return {
       ok: false,
-      error: { kind: "server-error", message: "The payment was verified but the booking could not be updated." },
+      error: {
+        kind: "server-error",
+        message: "The payment was verified but the booking could not be updated.",
+      },
     };
   }
 
@@ -293,10 +309,12 @@ export async function verifyAndConfirmPayment(payload: unknown): Promise<VerifyP
   };
 }
 
-function mapConfirmationError(error: { code?: string | null; message: string }): BookingApiError {
-  console.error(`[payments] confirm_booking_payment failed: ${error.code ?? "unknown"} ${error.message}`);
+function mapConfirmationError(error: unknown): BookingApiError {
+  const code = error instanceof DatabaseError ? error.code : undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`[payments] confirm_booking_payment failed: ${code ?? "unknown"} ${message}`);
 
-  switch (error.code) {
+  switch (code) {
     case "PC001":
       return { kind: "not-found", message: "We could not find a booking for this payment." };
     case "PC002":
@@ -324,48 +342,51 @@ export async function getBookingStatusByToken(
     return { ok: false, error: { kind: "invalid-input", message: "That booking link is not valid." } };
   }
 
-  const admin = getAdminClient();
-
-  if (!admin.ok) {
-    return { ok: false, error: admin.error };
+  if (!databaseReady()) {
+    return { ok: false, error: DATABASE_NOT_CONFIGURED };
   }
 
-  const { data, error } = await admin.client.rpc("get_booking_status", { p_public_token: token.trim() });
+  try {
+    const rows = await rpc<Record<string, unknown>>("get_booking_status", {
+      p_public_token: token.trim(),
+    });
 
-  if (error) {
-    console.error("[payments] booking status lookup failed:", error.message, error.code);
+    const row = rows[0];
 
-    return { ok: false, error: { kind: "server-error", message: "We could not look up that booking right now." } };
+    if (!row) {
+      return { ok: false, error: { kind: "not-found", message: "We could not find that booking." } };
+    }
+
+    return {
+      ok: true,
+      booking: {
+        reference: row.booking_reference as string,
+        status: row.booking_status as BookingStatusView["status"],
+        paymentStatus: row.payment_status as BookingStatusView["paymentStatus"],
+        quantity: row.quantity as number,
+        numberOfPeople: row.number_of_people as number,
+        totalAmount: row.total_amount as number,
+        currency: row.currency as string,
+        eventName: row.event_name as string,
+        eventDate: row.event_date as string,
+        startTime: (row.start_time as string | null) ?? null,
+        endTime: (row.end_time as string | null) ?? null,
+        venueName: row.venue_name as string,
+        city: row.city as string,
+        passName: row.pass_name as string,
+        passComposition: (row.pass_composition as string | null) ?? null,
+        passesIssued: row.passes_issued as number,
+        createdAt: row.created_at as string,
+      },
+    };
+  } catch (error) {
+    const dbError = error instanceof DatabaseError ? error : new DatabaseError(String(error));
+    console.error("[payments] booking status lookup failed:", dbError.message, dbError.code);
+    return {
+      ok: false,
+      error: { kind: "server-error", message: "We could not look up that booking right now." },
+    };
   }
-
-  const row = Array.isArray(data) ? data[0] : data;
-
-  if (!row) {
-    return { ok: false, error: { kind: "not-found", message: "We could not find that booking." } };
-  }
-
-  return {
-    ok: true,
-    booking: {
-      reference: row.booking_reference,
-      status: row.booking_status as BookingStatusView["status"],
-      paymentStatus: row.payment_status as BookingStatusView["paymentStatus"],
-      quantity: row.quantity,
-      numberOfPeople: row.number_of_people,
-      totalAmount: row.total_amount,
-      currency: row.currency,
-      eventName: row.event_name,
-      eventDate: row.event_date,
-      startTime: row.start_time,
-      endTime: row.end_time,
-      venueName: row.venue_name,
-      city: row.city,
-      passName: row.pass_name,
-      passComposition: row.pass_composition,
-      passesIssued: row.passes_issued,
-      createdAt: row.created_at,
-    },
-  };
 }
 
 type RazorpayEventInput = {
@@ -382,35 +403,38 @@ type RazorpayEventInput = {
  */
 export async function applyWebhookEvent(
   input: RazorpayEventInput,
-): Promise<{ ok: true; duplicate: boolean; outcome: string; reference: string | null } | { ok: false; error: BookingApiError }> {
-  const admin = getAdminClient();
-
-  if (!admin.ok) {
-    return { ok: false, error: admin.error };
+): Promise<
+  { ok: true; duplicate: boolean; outcome: string; reference: string | null } | { ok: false; error: BookingApiError }
+> {
+  if (!databaseReady()) {
+    return { ok: false, error: DATABASE_NOT_CONFIGURED };
   }
 
-  const { data, error } = await admin.client.rpc("apply_razorpay_event", {
-    p_event_id: input.eventId,
-    p_event_type: input.eventType,
-    p_razorpay_order_id: input.orderId,
-    p_razorpay_payment_id: input.paymentId,
-    p_amount_paise: input.amountPaise,
-  });
+  try {
+    const rows = await rpc<{ duplicate?: boolean; outcome?: string; booking_reference?: string | null }>(
+      "apply_razorpay_event",
+      {
+        p_event_id: input.eventId,
+        p_event_type: input.eventType,
+        p_razorpay_order_id: input.orderId,
+        p_razorpay_payment_id: input.paymentId,
+        p_amount_paise: input.amountPaise,
+      },
+    );
 
-  if (error) {
-    console.error("[payments] webhook handling failed:", error.message, error.code);
+    const row = rows[0];
 
+    return {
+      ok: true,
+      duplicate: Boolean(row?.duplicate),
+      outcome: row?.outcome ?? "ignored",
+      reference: row?.booking_reference ?? null,
+    };
+  } catch (error) {
+    const dbError = error instanceof DatabaseError ? error : new DatabaseError(String(error));
+    console.error("[payments] webhook handling failed:", dbError.message, dbError.code);
     return { ok: false, error: { kind: "server-error", message: "The webhook could not be processed." } };
   }
-
-  const row = Array.isArray(data) ? data[0] : data;
-
-  return {
-    ok: true,
-    duplicate: Boolean(row?.duplicate),
-    outcome: row?.outcome ?? "ignored",
-    reference: row?.booking_reference ?? null,
-  };
 }
 
 export function isRazorpayReady(): boolean {

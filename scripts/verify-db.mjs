@@ -1,4 +1,8 @@
 /**
+ * HISTORICAL harness from the Supabase era (customer email, roles, storage doubles).
+ * Not part of the post-migration acceptance path; use test:prisma, db:setup:test,
+ * typecheck, lint and build instead.
+ *
  * Schema verification — runs the real migrations and seed against PostgreSQL.
  *
  * PGlite is PostgreSQL compiled to WebAssembly, so this exercises genuine

@@ -13,12 +13,12 @@ import { defineConfig } from "prisma/config";
  *    PrismaClient (src/lib/db/client.ts), which is what makes the pooled
  *    connection string work from Vercel's serverless functions.
  *
- * 2. There are no `prisma migrate` scripts in this project. The schema is the SQL
- *    in `supabase/migrations/`, applied by `npm run db:setup` — it carries 51
- *    functions, triggers, RLS policies and generated columns that Prisma Migrate
- *    cannot express. If you do run a CLI command that connects (introspection,
- *    `db pull`, `migrate diff`), use the **direct** connection string: schema work
- *    should not travel through a connection pooler.
+ * 2. Schema DDL for a fresh Neon database is in `prisma/schema.prisma` plus the
+ *    standard-PostgreSQL function/trigger SQL under `docs/` and applied with
+ *    `npm run db:setup`. There are no `prisma migrate` scripts: the SQL carries
+ *    functions and triggers Prisma Migrate does not manage. If you run a CLI
+ *    command that connects (introspection, `db pull`, `migrate diff`), use the
+ *    **direct** connection string — schema work should not travel through a pooler.
  */
 /**
  * The URL the CLI would connect to. `prisma generate` never opens a connection —

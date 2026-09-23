@@ -5,15 +5,13 @@
 -- (Neon, or any bare PostgreSQL). It creates only the two things the schema
 -- actually assumes from the Supabase platform:
 --
---   1. an `auth` schema holding `auth.users` — `public.admin_users.user_id` is a
---      foreign key to it, because on Supabase staff accounts live in Supabase Auth;
---   2. `auth.uid()` — the function every Row Level Security policy is written
---      against (`is_staff(p_user_id uuid default auth.uid())`).
+--   1. an `auth` schema holding a minimal `auth.users` (kept so historical FKs in
+--      early migrations can apply cleanly before later migrations drop them);
+--   2. `auth.uid()` — still referenced by the six residual public read policies.
 --
--- Nothing else in the 16 migrations is Supabase-specific. The gallery migration
--- notices that there is no `storage` schema and skips its bucket setup; every
--- table, constraint, trigger, function, policy and grant in the schema is plain
--- PostgreSQL and behaves identically here.
+-- Nothing else in the migration chain is Supabase-specific. Gallery files live in
+-- Vercel Blob (keys on the row), not in a `storage` schema; every table, constraint,
+-- trigger, function and policy is plain PostgreSQL and behaves identically on Neon.
 --
 -- `auth.uid()` reads the same PostgREST-compatible claims Supabase reads, so it
 -- works under PostgREST (including Neon's Data API, which is PostgREST), under a

@@ -57,7 +57,7 @@ type PaymentsPageProps = {
 export default async function PaymentsPage({ searchParams }: PaymentsPageProps) {
   const staff = await requirePermission("payments:view");
   const query = parsePaymentQuery(await searchParams);
-  const result = await getPaymentsSnapshot(query, staff.role);
+  const result = await getPaymentsSnapshot(query);
 
   if (!result.ok) {
     return (
@@ -84,7 +84,7 @@ export default async function PaymentsPage({ searchParams }: PaymentsPageProps) 
           What the gateway sent us, delivery by delivery, and what the site did about it. A payment status moves only
           when a verified Razorpay event says so — there is no control here that could change one by hand, in the UI or
           in the database.
-          {includeContact ? "" : " Amounts and gateway ids are hidden for your role."}
+          {includeContact ? "" : ""}
         </p>
       </div>
 
@@ -134,7 +134,7 @@ export default async function PaymentsPage({ searchParams }: PaymentsPageProps) 
                 />
               </>
             ) : (
-              <Fact label="Captured and refunded" value="Amounts are hidden for your role" />
+              <Fact label="Captured and refunded" value="Amounts are not included" />
             )}
             <Fact label="Failed deliveries" value={String(summary.events_failed)} />
             <Fact label="Refund deliveries" value={String(summary.events_refunded)} />

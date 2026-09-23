@@ -1,5 +1,12 @@
 # How it works, and which URLs go where
 
+> **Update after the Neon/Prisma migration:** database access is Prisma over the Neon
+> pooler (not Supabase REST), admin sign-in is `ADMIN_EMAIL`/`ADMIN_PASSWORD_HASH`
+> with an HTTP-only session cookie (not Supabase Auth / roles), and gallery files live
+> in Vercel Blob (not Supabase Storage). The flow narrative below is still useful for
+> URLs and product behaviour; treat Supabase-specific configuration steps as historical.
+
+
 Two halves: **how the thing actually flows** (customer → payment → pass → gate), and then
 **every URL that has to be set**, because that is the part that silently breaks a
 deployment.

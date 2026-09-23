@@ -12,7 +12,7 @@ export type BreakdownItem = {
   paidBookings: number;
   passesIssued: number;
   people: number;
-  /** null when the role may not see money. */
+  /** null when money is withheld from this payload. */
   revenue: number | null;
   currency: string;
 };
@@ -28,7 +28,7 @@ export type BreakdownItem = {
  * would make the chart easier to read and less true — and the organiser's question is
  * usually "why did nobody buy that one?".
  *
- * Money is withheld rather than zeroed when the role may not see it: the bar, the
+ * Money is withheld rather than zeroed when it is absent from the payload: the bar, the
  * counts and the shares still describe the shape of demand, which is exactly the part
  * that is not sensitive.
  */
@@ -105,7 +105,7 @@ export function PassBreakdownChart({
                       {item.revenue === null ? "—" : `${formatInr(item.revenue, item.currency)} taken`}
                     </span>
                   ) : (
-                    <span>{withheldNote ?? "Revenue hidden for your role"}</span>
+                    <span>{withheldNote ?? "Revenue not included"}</span>
                   )}
                 </p>
               </li>

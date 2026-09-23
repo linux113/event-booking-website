@@ -38,7 +38,6 @@ const AFTER_CONFIRMING_WITHOUT_PAYMENTS = [
 const WHAT_YOU_NEED = [
   "A mobile number that can receive the booking confirmation",
   "The lead guest's full name for the entry register",
-  "One email address for the confirmation",
   "Photo ID for the lead guest, checked at the gate",
 ] as const;
 

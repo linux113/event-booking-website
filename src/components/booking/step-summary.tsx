@@ -123,7 +123,7 @@ export function StepSummary({
             {details.customerName || "—"}
             <span className="text-muted">
               {" "}
-              · {details.customerMobile || "—"} · {details.customerEmail || "—"}
+              · {details.customerMobile || "—"}
             </span>
           </dd>
           <button

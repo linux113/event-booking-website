@@ -5,7 +5,7 @@ import { requireStaff } from "@/lib/auth/guard";
 /**
  * The shell around every signed-in admin page.
  *
- * It calls `requireStaff()` once, so a visitor with no staff session never sees any
+ * It calls `requireStaff()` once, so a visitor with no admin session never sees any
  * admin chrome — they are redirected before a single admin route renders.
  *
  * It is *not* the access control for the pages inside it, and it is important not to

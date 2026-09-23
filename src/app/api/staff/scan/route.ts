@@ -1,8 +1,7 @@
 import type { NextResponse } from "next/server";
 
-import { readScanBody, scanError, scanJson, scanServiceFailure, scanUnauthorized } from "@/lib/admin/http";
+import { readScanBody, scanJson, scanServiceFailure, scanUnauthorized } from "@/lib/admin/http";
 import { getStaffMember } from "@/lib/auth/staff";
-import { can } from "@/lib/auth/permissions";
 import { gateNight } from "@/lib/gate/night";
 import { scanPass } from "@/lib/services/check-in";
 import type { ScanApiResponse } from "@/types/admin";
@@ -13,7 +12,7 @@ import type { ScanApiResponse } from "@/types/admin";
  * The body carries one thing the browser actually knows: the token it read from a
  * QR code. Everything else is decided here and in the database:
  *
- *   * **who** is asking — the Supabase session cookie, resolved against
+ *   * **who** is asking — the HTTP-only `gn_admin` session cookie, verified with
  *     `admin_users`. No session, no staff row: 401, and no database call at all.
  *   * **which night** the gate is on — computed from the venue's timezone on the
  *     server (`gateNight()`), never sent by the phone.
@@ -35,11 +34,6 @@ export async function POST(request: Request): Promise<NextResponse<ScanApiRespon
     return scanUnauthorized();
   }
 
-  if (!can(staff.role, "scanner:use")) {
-    // 403, not 401: the session is perfectly good, this role simply cannot work the
-    // gate. The request hook refuses this too — this is the second lock.
-    return scanError("forbidden", "Your role cannot check passes in.");
-  }
 
   const body = readScanBody(await request.text());
 
@@ -50,7 +44,7 @@ export async function POST(request: Request): Promise<NextResponse<ScanApiRespon
   const result = await scanPass({
     token: body.token,
     gateDate: gateNight(),
-    staffUserId: staff.userId,
+    staffUserId: null,
   });
 
   if (!result.ok) {
