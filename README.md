@@ -915,11 +915,79 @@ production. `src/config/env.ts` is the only module that reads `process.env`.
 
 ## Deploying (Vercel)
 
-1. Push the branch to GitHub.
-2. In Vercel, **New Project → Import** this repository (framework auto-detected).
-3. Add the environment variables from the table above (Production + Preview).
-4. Deploy. `NEXT_PUBLIC_SITE_URL` should be the production domain; `VERCEL_URL` is used
-   automatically for preview deployments.
+`vercel.json` sets one thing: the function region is **Mumbai (`bom1`)**, so the
+server-rendered pages and the ISR revalidation run next to a Supabase project created in
+`ap-south-1`. Hobby allows a single region, so keep that list to one entry — and keep the
+Supabase project in the same region, or every render pays a round trip to another
+continent. The build runs on **Node 22** (`engines` in `package.json`), the major version
+the checks in `scripts/` are run against.
+
+### 1. Import
+
+1. Vercel → **Add New → Project → Import Git Repository** → `linux113/event-booking-website`.
+2. The framework preset is detected as **Next.js**; leave the root directory, build command
+   (`npm run build`) and install command at their defaults.
+3. **Production Branch** defaults to `main`. The work lives on the branch and PR #1 is
+   deliberately unmerged, so pick one:
+   - *point Vercel at the branch* — Settings → Git → Production Branch → the branch you want
+     live (what the open PR needs), or
+   - merge the PR first and let `main` deploy.
+
+   Left as-is, the deployment serves the initial scaffold rather than the site.
+4. Add the environment variables **before the first production build**: `NEXT_PUBLIC_*`
+   values are inlined at build time, so adding them afterwards changes nothing until the
+   project is redeployed (Deployments → ⋯ → Redeploy).
+
+### 2. Environment variables
+
+Vercel → Settings → Environment Variables. The same names as `.env.example`, set for
+Production **and** Preview so branch previews work too:
+
+| Variable | Value | Notes |
+| -------- | ----- | ----- |
+| `NEXT_PUBLIC_SITE_URL` | `https://your-domain.com` | **The base of every pass QR code.** Set it before printing passes — changing it later invalidates passes already in guests' hands. Unset, it falls back to `VERCEL_URL` |
+| `NEXT_PUBLIC_SUPABASE_URL` | `https://<project-ref>.supabase.co` | |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | `sb_publishable_…` (or a legacy anon key) | public by design; RLS decides what it can read |
+| `SUPABASE_SERVICE_ROLE_KEY` | `sb_secret_…` (or a legacy service_role key) | **server-only**; bypasses RLS |
+| `NEXT_PUBLIC_RAZORPAY_KEY_ID` | `rzp_test_…` | inlined at build |
+| `RAZORPAY_KEY_SECRET` | test key secret | server-only |
+| `RAZORPAY_WEBHOOK_SECRET` | from the Razorpay webhook you create below | server-only |
+| `RAZORPAY_ALLOW_LIVE` | *(leave unset)* | only with live keys and completed KYC |
+
+Until the three Supabase values are present the site serves its shell with a
+"database is not connected" panel and a setup checklist — that is the app reporting the
+truth, not a failed build.
+
+### 3. Razorpay webhook
+
+Razorpay dashboard → Settings → Webhooks → add
+`https://your-domain.com/api/payment/webhook`, subscribed to `payment.captured`,
+`payment.failed` and `refund.processed` (`order.paid` optional), then put its secret in
+`RAZORPAY_WEBHOOK_SECRET` and redeploy. A booking is only ever marked paid by a signature
+verified against that secret, or against the Checkout signature on `/api/payment/verify`.
+
+### 4. On the free (Hobby) plan
+
+- **Non-commercial projects only.** Selling passes is commercial use, and Vercel's terms
+  expect **Pro** (~$20/month) for that; Hobby is the right place for the demo and for a
+  free event.
+- Preview deployments sit behind **Deployment Protection** (Vercel Authentication) by
+  default — a shared branch preview asks the viewer to sign in to Vercel. Settings →
+  Deployment Protection if you want a link you can hand out.
+- Functions get **300 s** with Fluid Compute (the default for new projects), which covers a
+  40-photo gallery upload. If an upload times out, check Settings → Functions.
+- The Supabase project is the part that sleeps: free projects pause after **7 days without
+  database activity**. A daily ping (a GitHub Actions cron hitting `/passes`) keeps it awake.
+
+### 5. After the first deploy
+
+- `/` shows your event, `/passes` your prices, `/book` your nights, `/contact` your numbers.
+- Sign in at `/admin/login` with an account created per
+  [supabase/README.md](./supabase/README.md#creating-the-first-admin).
+- Take one booking through Razorpay **test** mode: it appears in `/admin/bookings`, and
+  `/booking/success` issues a pass whose QR encodes `NEXT_PUBLIC_SITE_URL`.
+- Scan that pass at `/admin/scanner` on a phone (the camera needs HTTPS, so `localhost` or a
+  real domain — not a LAN IP): **✓ VALID PASS**, then **⚠ PASS ALREADY USED**.
 
 ## Before launch
 
