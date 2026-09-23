@@ -1,106 +1,23 @@
 /**
- * Who may do what.
+ * Admin navigation sections.
  *
- * One table, read by the server on every admin request, and nothing else decides
- * access. It is deliberately a plain module with no imports: the guard on the server
- * and the navigation on the dashboard must agree about permissions exactly, and the
- * cheapest way to guarantee that is for both to ask the same function.
+ * Roles and permission matrices are gone: one authenticated admin has full
+ * access to every section. This table remains only as the dashboard/header's
+ * navigation source of truth (label, href, description).
  *
- * The roles:
- *
- *   super_admin  Full access, including managing staff accounts and roles.
- *   admin        Bookings, payments, passes, dates, gallery, scanner, settings —
- *                everything operational. Cannot manage staff.
- *   staff        The scanner, check-ins, and a limited booking lookup: enough to
- *                find and admit a guest, with no contact details, amounts or
- *                gateway ids.
- *
- * A permission is a *capability*, not a page. `bookings:view` opens the lookup;
- * `bookings:view_contact` is what decides whether a customer's mobile number,
- * email address and amount may be rendered in it. Keeping those apart is what lets
- * one page serve both roles without the staff view ever being assembled from data
- * it should not have.
+ * `permission` is kept as an opaque string for historical call sites; it is not
+ * consulted for access control anywhere.
  */
 
-export type StaffRole = "super_admin" | "admin" | "staff";
+export type Permission = string;
+export type StaffRole = "super_admin";
 
-export const STAFF_ROLES: readonly StaffRole[] = ["super_admin", "admin", "staff"];
-
-export type Permission =
-  /** Open the booking lookup (staff get the limited columns). */
-  | "bookings:view"
-  /** See customer contact details, amounts and gateway ids. */
-  | "bookings:view_contact"
-  | "payments:view"
-  /** Open the pass list. */
-  | "passes:view"
-  /** Create and edit pass types, prices, limits and availability. */
-  | "passes:edit"
-  | "dates:view"
-  /** Add and edit nights, set capacity, open and close booking. */
-  | "dates:edit"
-  /** Open the gallery screen. */
-  | "gallery:view"
-  /** Upload, publish, order and delete gallery items. */
-  | "gallery:edit"
-  | "scanner:use"
-  | "settings:view"
-  | "staff:manage";
-
-const PERMISSIONS_BY_ROLE: Record<StaffRole, readonly Permission[]> = {
-  super_admin: [
-    "bookings:view",
-    "bookings:view_contact",
-    "payments:view",
-    "passes:view",
-    "passes:edit",
-    "dates:view",
-    "dates:edit",
-    "gallery:view",
-    "gallery:edit",
-    "scanner:use",
-    "settings:view",
-    "staff:manage",
-  ],
-  admin: [
-    "bookings:view",
-    "bookings:view_contact",
-    "payments:view",
-    "passes:view",
-    "passes:edit",
-    "dates:view",
-    "dates:edit",
-    "gallery:view",
-    "gallery:edit",
-    "scanner:use",
-    "settings:view",
-  ],
-  staff: ["bookings:view", "scanner:use"],
-};
-
-/** Human labels, used in the admin UI and in the "no access" message. */
-export const ROLE_LABELS: Record<StaffRole, string> = {
-  super_admin: "Super admin",
-  admin: "Admin",
-  staff: "Staff",
-};
-
-/**
- * A section of the admin area: what it is called, where it lives, what it needs,
- * and whether it exists yet.
- *
- * `built: false` sections are shown on the dashboard as work still to come rather
- * than as links, so a staff member never clicks into an empty shell. Their
- * permission keys are already defined and enforced by the same guard the built
- * pages use, so the pages cannot arrive later with a wider door than intended.
- */
 export interface AdminSection {
   key: string;
   label: string;
   description: string;
-  /** `null` for a section that is not routable yet. */
   href: string | null;
-  permission: Permission;
+  permission: string;
   built: boolean;
 }
 
@@ -161,37 +78,34 @@ export const ADMIN_SECTIONS: readonly AdminSection[] = [
     permission: "settings:view",
     built: true,
   },
-  {
-    key: "staff",
-    label: "Staff accounts",
-    description: "Who can sign in, with which role, and whether they are active.",
-    href: "/admin/staff",
-    permission: "staff:manage",
-    built: true,
-  },
 ];
 
-/** True when this role holds this capability. */
-export function can(role: StaffRole, permission: Permission): boolean {
-  return PERMISSIONS_BY_ROLE[role]?.includes(permission) ?? false;
+/** Human labels. One admin role only. */
+export const ROLE_LABELS: Record<StaffRole, string> = {
+  super_admin: "Admin",
+};
+
+/** True when the (single) admin holds this capability — always. */
+export function can(_role: StaffRole | string | null | undefined, _permission: Permission): boolean {
+  return true;
 }
 
-/** Every capability of a role, in declaration order. */
-export function permissionsFor(role: StaffRole): readonly Permission[] {
-  return PERMISSIONS_BY_ROLE[role] ?? [];
+/** Every capability of a role — full access. */
+export function permissionsFor(_role: StaffRole | string): readonly Permission[] {
+  return ADMIN_SECTIONS.map((section) => section.permission);
 }
 
-/** The sections this role may open, in dashboard order. */
-export function sectionsFor(role: StaffRole): AdminSection[] {
-  return ADMIN_SECTIONS.filter((section) => can(role, section.permission));
+/** Every section, in dashboard order. */
+export function sectionsFor(_role?: StaffRole | string | null): AdminSection[] {
+  return [...ADMIN_SECTIONS];
 }
 
-/** The label of the section a permission belongs to (for "no access" messages). */
+/** The label of the section a permission belongs to (for messages). */
 export function sectionLabelForPermission(permission: Permission): string {
   return ADMIN_SECTIONS.find((section) => section.permission === permission)?.label ?? "That section";
 }
 
-/** True for any of the three known roles — used when reading untrusted rows. */
+/** Accepts any known role string; there is only one in practice. */
 export function isStaffRole(value: unknown): value is StaffRole {
-  return typeof value === "string" && (STAFF_ROLES as readonly string[]).includes(value);
+  return value === "super_admin" || value === "admin" || value === "staff";
 }

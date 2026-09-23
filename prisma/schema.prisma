@@ -1,12 +1,10 @@
 // ---------------------------------------------------------------------------
 // Prisma schema — the client's view of the database.
 //
-// The schema itself is NOT managed here. It lives in `supabase/migrations/*.sql`
-// and is applied by `npm run db:setup` (or the one-shot paste). Prisma is the
-// typed client the app queries through, and the CLI is used for `generate` only:
-// there are no `prisma migrate` commands in this project, deliberately, because
-// the SQL carries things Prisma Migrate cannot express — 51 functions, triggers,
-// RLS policies and generated columns.
+// Prisma is the single typed client the app queries through; the CLI is used
+// for `generate` only. There are no `prisma migrate` commands in this project:
+// application SQL (functions, triggers, constraints) is applied with
+// `npm run db:setup` as standard PostgreSQL against Neon.
 //
 // Field names follow the brief; `@map`/`@@map` hold the real column names where
 // the database already had its own. So `Event.bannerUrl` reads the existing
@@ -174,7 +172,7 @@ model GalleryItem {
   title         String?
   description   String?
   mediaType     String    @default("image") @map("media_type")
-  /// Vercel Blob pathname. Supabase Storage is gone; this holds the Blob key.
+  /// Vercel Blob pathname (object key). Binaries are never stored in Postgres.
   storagePath   String?   @map("storage_path")
   url           String?
   thumbnailUrl  String?   @map("thumbnail_url")

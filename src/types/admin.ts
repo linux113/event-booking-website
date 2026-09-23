@@ -6,25 +6,23 @@
  * including the "no" answers, which are the ones that matter at a door.
  */
 
-import type { StaffRole } from "@/lib/auth/permissions";
+/**
+ * The only role. There is one authenticated admin; no role matrix remains.
+ * Kept as a named type so historical imports still compile.
+ */
+export type StaffRole = "super_admin";
 
 /**
- * The staff roles, re-exported from the permission model so a component never has to
- * know about two definitions: `src/lib/auth/permissions.ts` owns them.
+ * The signed-in administrator as admin pages see it.
+ * One account, configured in the environment — no `admin_users` table.
  */
-export type { StaffRole } from "@/lib/auth/permissions";
-
 export interface StaffMember {
-  /** `admin_users.id` — recorded on every check-in this person makes. */
   id: string;
-  /** `auth.users.id` — the Supabase Auth identity behind the row. */
-  userId: string;
+  /** Sign-in email from ADMIN_EMAIL. */
   email: string;
   fullName: string | null;
-  /** What to call them in the UI: their name, or their email if it is not set. */
   displayName: string;
   role: StaffRole;
-  /** Last time this account completed a sign-in, as reported by the database. */
   lastLoginAt: string | null;
 }
 
@@ -48,8 +46,8 @@ export type PassEntryOutcome =
   | "not_authorised";
 
 /**
- * One pass, as the gate sees it. Never includes a mobile number or an email
- * address: the door needs a name and a pass, not a customer's contact details.
+ * One pass, as the gate sees it. Never includes a mobile number: the door needs
+ * a name and a pass, not a customer's contact details.
  */
 export interface PassScanResult {
   outcome: PassEntryOutcome;
@@ -76,7 +74,7 @@ export interface PassScanResult {
   city: string | null;
   /** The night the gate is working, as the server computed it. */
   gateDate: string | null;
-  /** The staff member the database recognised (proof the check was enforced there). */
+  /** Recorded by the database on check-in (single-admin: usually null now). */
   staffName: string | null;
   /** The `check_ins` row written by a successful check-in. */
   checkInId: string | null;

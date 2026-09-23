@@ -22,7 +22,7 @@ type DailyBarChartProps = {
   secondaryLabel?: string;
   /** Tone of the bars: money is gold, volume is pink. */
   tone?: "marigold" | "rani";
-  /** Replaces the chart when the role may not see the figures behind it. */
+  /** Replaces the chart when the figures behind it were withheld. */
   withheldNote?: string;
   /** Caption under the chart, e.g. what the window covers. */
   footer?: string;

@@ -22,7 +22,7 @@ import { collectBookingsForExport } from "@/lib/services/admin";
  *      those before this handler runs; this is the second lock, and the one that would
  *      still hold if a future route were added without the hook.
  *   2. **The role decides the *shape* of the file**, not just whether there is one. A
- *      caller without `bookings:view_contact` gets an export whose header row has no
+ *      a caller with `includeContact=false` gets an export whose header row has no
  *      Mobile, Email, Amount or Razorpay columns at all — the rows never carry them,
  *      because the query was made with `p_include_contact = false`.
  *   3. **Never cached, never inline.** The response is `no-store` and served as an
@@ -48,7 +48,7 @@ export async function GET(request: Request): Promise<Response> {
 
   if (!can(staff.role, "bookings:view")) {
     // 403, not 401: the session is fine, this role simply cannot read the list.
-    return jsonError(403, "forbidden", "Your role cannot export bookings.");
+    return jsonError(403, "forbidden", "You cannot export bookings.");
   }
 
   // The URL's own filters, parsed by the same function the screen uses: unknown values
@@ -62,7 +62,7 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   const query = parseBookingQuery(params);
-  const result = await collectBookingsForExport(query, staff.role);
+  const result = await collectBookingsForExport(query);
 
   if (!result.ok) {
     return jsonError(

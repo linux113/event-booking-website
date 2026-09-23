@@ -13,7 +13,7 @@ import type { RecentBooking } from "@/lib/services/admin";
  *   * on a tablet the night and the pass come back;
  *   * on a desktop everything is visible at once.
  *
- * A role without `bookings:view_contact` receives rows whose mobile, email and amount
+ * When the caller omits contact columns (legacy `includeContact=false` path), mobile and amount
  * are already null — the columns are not rendered at all for that role rather than
  * rendered as empty, and the note under the table says so in words. Nothing here
  * decides what may be shown; it only draws what it was given.
@@ -86,9 +86,9 @@ export function RecentBookingsTable({
                   </th>
                   <td className="py-3 pr-3 align-top">
                     <span className="font-semibold tracking-tight">{row.customer_name}</span>
-                    {includeContact && (row.customer_mobile || row.customer_email) ? (
+                    {includeContact && row.customer_mobile ? (
                       <span className="text-muted mt-0.5 block text-xs">
-                        {[row.customer_mobile, row.customer_email].filter(Boolean).join(" · ")}
+                        {row.customer_mobile}
                       </span>
                     ) : null}
                     {/* On a phone the night lives here, where there is room for it. */}
@@ -132,7 +132,7 @@ export function RecentBookingsTable({
 
       {!includeContact ? (
         <p className="text-muted/80 text-xs/5">
-          Contact details and amounts are hidden for your role — the table asks the database for bookings without
+          Contact details and amounts are not included — the table asks the database for bookings without
           them, so they are not on this page at all, not merely out of view.
         </p>
       ) : null}

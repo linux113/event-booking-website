@@ -11,8 +11,8 @@
  *     take a night off sale (`create_pending_booking`);
  *   * the same booking submitted twice collapses onto one row (`idempotency_key`);
  *   * a payment is only confirmed by a signature verified against the secret;
- *   * Supabase Auth rate-limits sign-in attempts, and the sign-in action already
- *     hands a 429 to the person typing.
+ *   * the admin sign-in action returns 429 after repeated failures from this limiter;
+ *     there is no external auth provider rate limit.
  *
  * The client key is the caller's address, read from the forwarding headers the host
  * sets (Vercel, a load balancer). A deployment that terminates connections itself

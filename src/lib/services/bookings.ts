@@ -1,29 +1,20 @@
 import "server-only";
 
+import { isDatabaseConfigured } from "@/config/env";
+import { DatabaseError, rpc } from "@/lib/db/client";
 import { validateBookingRequest } from "@/lib/booking/validation";
-import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import { isSupabaseConfigured } from "@/config/env";
-import type {
-  BookingApiError,
-  BookingFieldErrors,
-  BookingRequestInput,
-  CreatedBooking,
-} from "@/types/booking";
+import type { BookingApiError, BookingFieldErrors, BookingRequestInput, CreatedBooking } from "@/types/booking";
 
 /**
  * Booking creation — server side only.
  *
  * The browser posts identifiers and contact details; **no price is accepted from
  * anyone**. This module validates the payload, then calls
- * `public.create_pending_booking()` with the service role. That function locks the
- * night, re-reads capacity, reads the price from `pass_categories` and writes the
- * booking, so the amounts returned here are the database's, not the client's.
+ * `public.create_pending_booking()`. That function locks the night, re-reads
+ * capacity, reads the price from `pass_categories` and writes the booking, so
+ * the amounts returned here are the database's, not the client's.
  *
- * The booking is created `pending` / `unpaid`. Payment is a later step: nothing in
- * this module can mark a booking as paid.
- *
- * Unlike the read services, this returns the API error shape (`BookingApiError`)
- * because the checkout form needs per-field messages; it still never throws.
+ * The booking is created `pending` / `unpaid`. Nothing here can mark it paid.
  */
 
 export type CreateBookingResult =
@@ -40,10 +31,7 @@ const SERVER_ERROR: BookingApiError = {
   message: "We could not create the booking just now. Please try again in a moment.",
 };
 
-/**
- * SQLSTATE -> what the customer should read. The codes are raised by
- * `create_pending_booking()` and documented in the migration.
- */
+/** SQLSTATE → what the customer should read (codes raised by create_pending_booking). */
 const FIELD_BY_CODE: Record<string, keyof BookingFieldErrors> = {
   PB001: "quantity",
   PB002: "eventDateId",
@@ -69,20 +57,11 @@ export async function createPendingBooking(payload: unknown): Promise<CreateBook
     };
   }
 
-  if (!isSupabaseConfigured()) {
+  if (!isDatabaseConfigured()) {
     return { ok: false, error: NOT_CONFIGURED };
   }
 
   const input = validated.value;
-
-  let client;
-
-  try {
-    client = createSupabaseAdminClient();
-  } catch (error) {
-    console.error("[bookings] admin client unavailable:", error);
-    return { ok: false, error: NOT_CONFIGURED };
-  }
 
   const args = {
     p_event_id: input.eventId,
@@ -90,17 +69,15 @@ export async function createPendingBooking(payload: unknown): Promise<CreateBook
     p_pass_category_id: input.passCategoryId,
     p_customer_name: input.customerName,
     p_customer_mobile: input.customerMobile,
-    p_customer_email: input.customerEmail,
     p_quantity: input.quantity,
     p_number_of_people: input.numberOfPeople,
     p_idempotency_key: input.idempotencyKey,
   };
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const { data, error } = await client.rpc("create_pending_booking", args);
-
-    if (!error) {
-      const row = Array.isArray(data) ? data[0] : data;
+    try {
+      const rows = await rpc<BookingRow>("create_pending_booking", args);
+      const row = rows[0];
 
       if (!row) {
         console.error("[bookings] create_pending_booking returned no row");
@@ -108,22 +85,26 @@ export async function createPendingBooking(payload: unknown): Promise<CreateBook
       }
 
       return { ok: true, booking: mapBooking(row), input };
-    }
+    } catch (error) {
+      const dbError =
+        error instanceof DatabaseError
+          ? error
+          : new DatabaseError(String(error));
 
-    // Two requests raced with the same idempotency key: the second one hits the
-    // unique index. Re-running the function returns the booking the first one
-    // created, which is exactly what a retry should get.
-    if (error.code === "23505" && attempt === 0) {
-      continue;
-    }
+      // Two requests raced with the same idempotency key: the second hits the
+      // unique index. Re-running returns the booking the first one created.
+      if ((dbError.code === "23505" || dbError.code === "P0001") && attempt === 0) {
+        continue;
+      }
 
-    return { ok: false, error: mapDatabaseError(error) };
+      return { ok: false, error: mapDatabaseError(dbError) };
+    }
   }
 
   return { ok: false, error: SERVER_ERROR };
 }
 
-function mapDatabaseError(error: { code?: string | null; message: string; details?: string | null }): BookingApiError {
+function mapDatabaseError(error: DatabaseError): BookingApiError {
   const code = error.code ?? "";
   const field = FIELD_BY_CODE[code];
   const detail = parseDetail(error.details);

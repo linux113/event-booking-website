@@ -15,7 +15,7 @@ type StatCardProps = {
   value: string | null;
   hint?: string;
   tone?: StatTone;
-  /** Shown in place of the value when the figure exists but this role may not see it. */
+  /** Shown in place of the value when the figure exists but was withheld from the payload. */
   withheldNote?: string;
   className?: string;
 };
@@ -25,9 +25,9 @@ type StatCardProps = {
  *
  * Three states, and they are deliberately different from one another:
  *
- *   * a **value**, for a figure this role may see;
+ *   * a **value**, for a figure that was loaded;
  *   * **withheld** (`value === null` with a note) — the database returned no figure
- *     because the role may not have it. It is never rendered as `0`, because "no
+ *     because it was withheld. It is never rendered as `0`, because "no
  *     revenue" and "not your business" are different sentences;
  *   * an em dash for a figure nobody has yet, such as tonight's door count on a
  *     night with no bookings.

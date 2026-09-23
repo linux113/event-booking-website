@@ -1,1390 +1,206 @@
 /**
- * Database types for the Supabase schema in `supabase/migrations/`.
+ * Raw Postgres row shapes returned by `select *` (and the gate RPCs) when
+ * reading through `@/lib/db/client`.
  *
- * Hand-written to mirror the output of
- * `supabase gen types typescript --schema public` — the shape matches exactly, so
- * once the project is linked you can regenerate this file and it is a drop-in
- * replacement. Every column, nullability and default mirrors the SQL.
+ * Column names match `prisma/schema.prisma` (`@map` values) so SQL and TypeScript
+ * stay aligned. Presentational types live in `src/types/index.ts` and friends;
+ * mappers in `src/lib/services/mappers.ts` convert rows into those.
  *
- * Only `supabase-js` consumes this type; UI components should use the
- * presentational types in `src/types/index.ts` instead.
+ * There is no customer email column anywhere — bookings only carry
+ * `customer_name` and `customer_mobile`. There are no role or permission types:
+ * one administrator has full access.
  */
 
-export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];
+export type EventStatus = "draft" | "published" | "archived";
+export type EventDateStatus = "scheduled" | "sold_out" | "cancelled" | "completed";
+export type BookingStatus = "pending" | "confirmed" | "cancelled" | "expired" | "refunded";
+export type PaymentStatus = "unpaid" | "created" | "paid" | "failed" | "refunded";
+export type DigitalPassStatus = "active" | "used" | "cancelled" | "expired";
+export type GalleryStatus = "draft" | "published" | "archived";
+export type MediaType = "image" | "video";
 
-/**
- * The three jsonb arrays `admin_booking_detail` returns. They are assembled inside
- * the database (one booking, one pass list, one gate list, one payment history), so
- * the row shapes are declared here rather than inferred from a join the app would
- * have to fan out itself. `qr_token` appears in none of them.
- */
-export interface AdminBookingPass {
-  pass_id: string;
-  pass_number: number;
+// -----------------------------------------------------------------------------
+// Table rows (snake_case = database columns)
+// -----------------------------------------------------------------------------
+
+export interface EventRow {
+  id: string;
+  slug: string;
+  name: string;
+  name_hindi: string | null;
+  tagline: string | null;
+  description: string | null;
+  description_hindi: string | null;
+  venue_name: string;
+  venue_hindi: string | null;
+  venue_address: string | null;
+  city: string;
+  state: string | null;
+  maps_url: string | null;
+  hero_image_url: string | null;
+  logo_url: string | null;
+  contact_phone: string | null;
+  contact_email: string | null;
+  whatsapp_number: string | null;
+  instagram_url: string | null;
+  facebook_url: string | null;
+  youtube_url: string | null;
+  support_hours: string[];
+  currency: string;
+  status: EventStatus;
+  start_date: string | null;
+  end_date: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EventDateRow {
+  id: string;
+  event_id: string;
+  event_date: string;
+  start_time: string | null;
+  end_time: string | null;
+  capacity: number;
+  capacity_held: number;
+  available_capacity: number;
+  booking_open: boolean;
+  status: EventDateStatus;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PassCategoryRow {
+  id: string;
+  event_id: string;
+  code: string;
+  name: string;
+  name_hindi: string | null;
+  composition: string;
+  description: string | null;
+  image_url: string | null;
+  price_inr: number;
+  number_of_people: number;
+  max_per_booking: number;
+  min_age: number;
+  is_active: boolean;
   status: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EventHighlightRow {
+  id: string;
+  event_id: string;
+  title: string;
+  description: string | null;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EventFeatureRow {
+  id: string;
+  event_id: string;
+  code: string;
+  label: string;
+  description: string | null;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GalleryRow {
+  id: string;
+  event_id: string | null;
+  album: string | null;
+  title: string | null;
+  description: string | null;
+  media_type: MediaType;
+  /** Vercel Blob key (not a public URL). */
+  storage_path: string | null;
+  thumbnail_path: string | null;
+  url: string | null;
+  thumbnail_url: string | null;
+  width: number | null;
+  height: number | null;
+  byte_size: number | null;
+  alt_text: string;
+  captured_on: string | null;
+  status: GalleryStatus;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BookingRow {
+  id: string;
+  booking_id: string;
+  customer_name: string;
+  customer_mobile: string;
+  event_date_id: string;
+  pass_category_id: string;
+  quantity: number;
+  number_of_people: number;
+  subtotal: number;
+  total_amount: number;
+  booking_status: BookingStatus;
+  payment_status: PaymentStatus;
+  razorpay_order_id: string | null;
+  razorpay_payment_id: string | null;
+  idempotency_key: string | null;
+  public_token: string;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DigitalPassRow {
+  id: string;
+  booking_id: string;
+  pass_id: string;
+  qr_token: string;
+  qr_code_url: string | null;
+  valid_date: string;
+  pass_number: number;
+  status: DigitalPassStatus;
   checked_in: boolean;
   checked_in_at: string | null;
-  valid_date: string;
+  created_at: string;
 }
 
-export interface AdminBookingCheckIn {
-  pass_id: string;
-  gate: string | null;
-  notes: string | null;
+export interface CheckInRow {
+  id: string;
+  digital_pass_id: string;
+  event_date_id: string;
   checked_in_at: string;
-  staff: string | null;
+  gate: string | null;
+  checked_in_by: string | null;
+  notes: string | null;
 }
 
-export interface AdminBookingPaymentEvent {
+export interface PaymentEventRow {
+  id: string;
   event_id: string;
   event_type: string;
-  outcome: string;
+  razorpay_order_id: string | null;
+  razorpay_payment_id: string | null;
   amount_paise: number | null;
+  outcome: string;
   received_at: string;
   processed_at: string | null;
 }
 
-export interface Database {
-  public: {
-    Tables: {
-      event_highlights: {
-        Row: {
-          id: string;
-          event_id: string;
-          title: string;
-          description: string | null;
-          sort_order: number;
-          created_at: string;
-          updated_at: string;
-        };
-        Insert: {
-          id?: string;
-          event_id: string;
-          title: string;
-          description?: string | null;
-          sort_order?: number;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Update: {
-          id?: string;
-          event_id?: string;
-          title?: string;
-          description?: string | null;
-          sort_order?: number;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Relationships: [];
-      };
-
-      event_features: {
-        Row: {
-          id: string;
-          event_id: string;
-          code: string;
-          label: string;
-          description: string | null;
-          sort_order: number;
-          created_at: string;
-          updated_at: string;
-        };
-        Insert: {
-          id?: string;
-          event_id: string;
-          code: string;
-          label: string;
-          description?: string | null;
-          sort_order?: number;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Update: {
-          id?: string;
-          event_id?: string;
-          code?: string;
-          label?: string;
-          description?: string | null;
-          sort_order?: number;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Relationships: [];
-      };
-
-      events: {
-        Row: {
-          id: string;
-          slug: string;
-          name: string;
-          tagline: string | null;
-          description: string | null;
-          venue_name: string;
-          venue_address: string | null;
-          city: string;
-          state: string | null;
-          maps_url: string | null;
-          hero_image_url: string | null;
-          contact_phone: string | null;
-          contact_email: string | null;
-          whatsapp_number: string | null;
-          instagram_url: string | null;
-          facebook_url: string | null;
-          youtube_url: string | null;
-          support_hours: string[];
-          currency: string;
-          status: EventStatus;
-          created_at: string;
-          updated_at: string;
-        };
-        Insert: {
-          id?: string;
-          slug: string;
-          name: string;
-          tagline?: string | null;
-          description?: string | null;
-          venue_name: string;
-          venue_address?: string | null;
-          city: string;
-          state?: string | null;
-          maps_url?: string | null;
-          hero_image_url?: string | null;
-          contact_phone?: string | null;
-          contact_email?: string | null;
-          whatsapp_number?: string | null;
-          instagram_url?: string | null;
-          facebook_url?: string | null;
-          youtube_url?: string | null;
-          support_hours?: string[];
-          currency?: string;
-          status?: EventStatus;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Update: {
-          id?: string;
-          slug?: string;
-          name?: string;
-          tagline?: string | null;
-          description?: string | null;
-          venue_name?: string;
-          venue_address?: string | null;
-          city?: string;
-          state?: string | null;
-          maps_url?: string | null;
-          hero_image_url?: string | null;
-          contact_phone?: string | null;
-          contact_email?: string | null;
-          whatsapp_number?: string | null;
-          instagram_url?: string | null;
-          facebook_url?: string | null;
-          youtube_url?: string | null;
-          support_hours?: string[];
-          currency?: string;
-          status?: EventStatus;
-          created_at?: string;
-          updated_at?: string;
-        };
-        // Regenerate with the Supabase CLI to populate join metadata.
-        Relationships: [];
-      };
-
-      event_dates: {
-        Row: {
-          id: string;
-          event_id: string;
-          event_date: string;
-          start_time: string | null;
-          end_time: string | null;
-          capacity: number;
-          capacity_held: number;
-          booking_open: boolean;
-          status: EventDateStatus;
-          notes: string | null;
-          created_at: string;
-          updated_at: string;
-        };
-        Insert: {
-          id?: string;
-          event_id: string;
-          event_date: string;
-          start_time?: string | null;
-          end_time?: string | null;
-          capacity?: number;
-          capacity_held?: number;
-          booking_open?: boolean;
-          status?: EventDateStatus;
-          notes?: string | null;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Update: {
-          id?: string;
-          event_id?: string;
-          event_date?: string;
-          start_time?: string | null;
-          end_time?: string | null;
-          capacity?: number;
-          capacity_held?: number;
-          booking_open?: boolean;
-          status?: EventDateStatus;
-          notes?: string | null;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Relationships: [];
-      };
-
-      payment_events: {
-        Row: {
-          id: string;
-          event_id: string;
-          event_type: string;
-          razorpay_order_id: string | null;
-          razorpay_payment_id: string | null;
-          amount_paise: number | null;
-          outcome: string;
-          received_at: string;
-          processed_at: string | null;
-        };
-        Insert: {
-          id?: string;
-          event_id: string;
-          event_type: string;
-          razorpay_order_id?: string | null;
-          razorpay_payment_id?: string | null;
-          amount_paise?: number | null;
-          outcome?: string;
-          received_at?: string;
-          processed_at?: string | null;
-        };
-        Update: {
-          outcome?: string;
-          processed_at?: string | null;
-        };
-        Relationships: [];
-      };
-      pass_categories: {
-        Row: {
-          id: string;
-          event_id: string;
-          code: string;
-          name: string;
-          composition: string;
-          description: string | null;
-          price_inr: number;
-          number_of_people: number;
-          max_per_booking: number;
-          min_age: number;
-          is_active: boolean;
-          sort_order: number;
-          created_at: string;
-          updated_at: string;
-        };
-        Insert: {
-          id?: string;
-          event_id: string;
-          code: string;
-          name: string;
-          composition: string;
-          description?: string | null;
-          price_inr: number;
-          number_of_people: number;
-          max_per_booking?: number;
-          min_age?: number;
-          is_active?: boolean;
-          sort_order?: number;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Update: {
-          id?: string;
-          event_id?: string;
-          code?: string;
-          name?: string;
-          composition?: string;
-          description?: string | null;
-          price_inr?: number;
-          number_of_people?: number;
-          max_per_booking?: number;
-          min_age?: number;
-          is_active?: boolean;
-          sort_order?: number;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Relationships: [];
-      };
-
-      bookings: {
-        Row: {
-          id: string;
-          booking_id: string;
-          customer_name: string;
-          customer_mobile: string;
-          customer_email: string;
-          event_date_id: string;
-          pass_category_id: string;
-          quantity: number;
-          number_of_people: number;
-          subtotal: number;
-          total_amount: number;
-          booking_status: BookingStatus;
-          payment_status: PaymentStatus;
-          razorpay_order_id: string | null;
-          razorpay_payment_id: string | null;
-          idempotency_key: string | null;
-          public_token: string;
-          notes: string | null;
-          created_at: string;
-          updated_at: string;
-        };
-        /**
-         * `subtotal`, `number_of_people` and a defaulted `total_amount` are
-         * overwritten by the `set_booking_amounts()` trigger, so they are
-         * optional here — the database always calculates them from the pass
-         * category's price.
-         */
-        Insert: {
-          id?: string;
-          booking_id?: string;
-          customer_name: string;
-          customer_mobile: string;
-          customer_email: string;
-          event_date_id: string;
-          pass_category_id: string;
-          quantity: number;
-          number_of_people?: number;
-          subtotal?: number;
-          total_amount?: number;
-          booking_status?: BookingStatus;
-          payment_status?: PaymentStatus;
-          razorpay_order_id?: string | null;
-          razorpay_payment_id?: string | null;
-          idempotency_key?: string | null;
-          notes?: string | null;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Update: {
-          id?: string;
-          booking_id?: string;
-          customer_name?: string;
-          customer_mobile?: string;
-          customer_email?: string;
-          event_date_id?: string;
-          pass_category_id?: string;
-          quantity?: number;
-          number_of_people?: number;
-          subtotal?: number;
-          total_amount?: number;
-          booking_status?: BookingStatus;
-          payment_status?: PaymentStatus;
-          razorpay_order_id?: string | null;
-          razorpay_payment_id?: string | null;
-          idempotency_key?: string | null;
-          notes?: string | null;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Relationships: [];
-      };
-
-      digital_passes: {
-        Row: {
-          id: string;
-          booking_id: string;
-          pass_id: string;
-          qr_token: string;
-          qr_code_url: string | null;
-          valid_date: string;
-          pass_number: number;
-          status: DigitalPassStatus;
-          checked_in: boolean;
-          checked_in_at: string | null;
-          created_at: string;
-        };
-        Insert: {
-          id?: string;
-          booking_id: string;
-          pass_id?: string;
-          qr_token?: string;
-          qr_code_url?: string | null;
-          valid_date: string;
-          pass_number: number;
-          status?: DigitalPassStatus;
-          checked_in?: boolean;
-          checked_in_at?: string | null;
-          created_at?: string;
-        };
-        Update: {
-          id?: string;
-          booking_id?: string;
-          pass_id?: string;
-          qr_token?: string;
-          qr_code_url?: string | null;
-          valid_date?: string;
-          pass_number?: number;
-          status?: DigitalPassStatus;
-          checked_in?: boolean;
-          checked_in_at?: string | null;
-          created_at?: string;
-        };
-        Relationships: [];
-      };
-
-      check_ins: {
-        Row: {
-          id: string;
-          digital_pass_id: string;
-          event_date_id: string;
-          checked_in_at: string;
-          gate: string | null;
-          checked_in_by: string | null;
-          notes: string | null;
-        };
-        Insert: {
-          id?: string;
-          digital_pass_id: string;
-          event_date_id: string;
-          checked_in_at?: string;
-          gate?: string | null;
-          checked_in_by?: string | null;
-          notes?: string | null;
-        };
-        Update: {
-          id?: string;
-          digital_pass_id?: string;
-          event_date_id?: string;
-          checked_in_at?: string;
-          gate?: string | null;
-          checked_in_by?: string | null;
-          notes?: string | null;
-        };
-        Relationships: [];
-      };
-
-      gallery: {
-        Row: {
-          id: string;
-          event_id: string | null;
-          album: string | null;
-          title: string | null;
-          description: string | null;
-          media_type: MediaType;
-          storage_path: string | null;
-          thumbnail_path: string | null;
-          url: string | null;
-          thumbnail_url: string | null;
-          width: number | null;
-          height: number | null;
-          byte_size: number | null;
-          alt_text: string;
-          captured_on: string | null;
-          status: GalleryStatus;
-          sort_order: number;
-          created_at: string;
-          updated_at: string;
-        };
-        Insert: {
-          id?: string;
-          event_id?: string | null;
-          album?: string | null;
-          title?: string | null;
-          description?: string | null;
-          media_type?: MediaType;
-          storage_path?: string | null;
-          thumbnail_path?: string | null;
-          width?: number | null;
-          height?: number | null;
-          byte_size?: number | null;
-          url?: string | null;
-          thumbnail_url?: string | null;
-          alt_text: string;
-          captured_on?: string | null;
-          status?: GalleryStatus;
-          sort_order?: number;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Update: {
-          id?: string;
-          event_id?: string | null;
-          album?: string | null;
-          title?: string | null;
-          description?: string | null;
-          media_type?: MediaType;
-          storage_path?: string | null;
-          thumbnail_path?: string | null;
-          width?: number | null;
-          height?: number | null;
-          byte_size?: number | null;
-          url?: string | null;
-          thumbnail_url?: string | null;
-          alt_text?: string;
-          captured_on?: string | null;
-          status?: GalleryStatus;
-          sort_order?: number;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Relationships: [];
-      };
-
-      admin_users: {
-        Row: {
-          id: string;
-          user_id: string;
-          email: string;
-          full_name: string | null;
-          role: AdminRole;
-          is_active: boolean;
-          last_login_at: string | null;
-          created_at: string;
-          updated_at: string;
-        };
-        Insert: {
-          id?: string;
-          user_id: string;
-          email: string;
-          full_name?: string | null;
-          role?: AdminRole;
-          is_active?: boolean;
-          last_login_at?: string | null;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Update: {
-          id?: string;
-          user_id?: string;
-          email?: string;
-          full_name?: string | null;
-          role?: AdminRole;
-          is_active?: boolean;
-          last_login_at?: string | null;
-          created_at?: string;
-          updated_at?: string;
-        };
-        Relationships: [];
-      };
-    };
-    Views: Record<string, never>;
-    Functions: {
-      /** Any active role: super_admin, admin or staff. */
-      is_staff: {
-        Args: { p_user_id?: string };
-        Returns: boolean;
-      };
-      /** super_admin or admin — the management roles. */
-      is_admin: {
-        Args: { p_user_id?: string };
-        Returns: boolean;
-      };
-      /** Full access, including staff and role management. */
-      is_super_admin: {
-        Args: { p_user_id?: string };
-        Returns: boolean;
-      };
-      /** The caller's own role, for the request hook (see `src/proxy.ts`). */
-      current_staff_role: {
-        Args: Record<string, never>;
-        Returns: string | null;
-      };
-      generate_booking_id: {
-        Args: Record<string, never>;
-        Returns: string;
-      };
-      generate_pass_id: {
-        Args: Record<string, never>;
-        Returns: string;
-      };
-      attach_razorpay_order: {
-        Args: { p_booking_id: string; p_razorpay_order_id: string };
-        Returns: { booking_uuid: string; razorpay_order_id: string; attached: boolean }[];
-      };
-      confirm_booking_payment: {
-        Args: { p_razorpay_order_id: string; p_razorpay_payment_id: string; p_amount_paise?: number | null };
-        Returns: {
-          booking_uuid: string;
-          booking_reference: string;
-          public_token: string;
-          booking_status: string;
-          payment_status: string;
-          quantity: number;
-          number_of_people: number;
-          subtotal: number;
-          total_amount: number;
-          event_id: string;
-          event_date: string;
-          start_time: string | null;
-          end_time: string | null;
-          pass_name: string;
-          pass_composition: string | null;
-          currency: string;
-          passes_issued: number;
-          already_confirmed: boolean;
-          capacity_note: string | null;
-        }[];
-      };
-      fail_booking_payment: {
-        Args: { p_razorpay_order_id: string; p_razorpay_payment_id?: string | null };
-        Returns: string;
-      };
-      refund_booking_payment: {
-        Args: { p_razorpay_payment_id: string };
-        Returns: string;
-      };
-      apply_razorpay_event: {
-        Args: {
-          p_event_id: string;
-          p_event_type: string;
-          p_razorpay_order_id?: string | null;
-          p_razorpay_payment_id?: string | null;
-          p_amount_paise?: number | null;
-        };
-        Returns: { duplicate: boolean; outcome: string; booking_reference: string | null; passes_issued: number | null }[];
-      };
-      get_booking_status: {
-        Args: { p_public_token: string };
-        Returns: {
-          booking_reference: string;
-          booking_status: string;
-          payment_status: string;
-          quantity: number;
-          number_of_people: number;
-          total_amount: number;
-          currency: string;
-          event_name: string;
-          event_date: string;
-          start_time: string | null;
-          end_time: string | null;
-          venue_name: string;
-          city: string;
-          pass_name: string;
-          pass_composition: string | null;
-          passes_issued: number;
-          created_at: string;
-        }[];
-      };
-      get_booking_passes: {
-        Args: { p_public_token: string };
-        Returns: {
-          pass_id: string;
-          qr_token: string;
-          pass_status: string;
-          checked_in: boolean;
-          checked_in_at: string | null;
-          valid_date: string;
-          issued_at: string;
-          pass_number: number;
-          pass_total: number;
-        }[];
-      };
-      get_pass_by_token: {
-        Args: { p_qr_token: string };
-        Returns: {
-          pass_id: string;
-          qr_token: string;
-          pass_status: string;
-          checked_in: boolean;
-          checked_in_at: string | null;
-          valid_date: string;
-          issued_at: string;
-          pass_number: number;
-          pass_total: number;
-          booking_reference: string;
-          booking_status: string;
-          payment_status: string;
-          customer_name: string;
-          quantity: number;
-          total_amount: number;
-          currency: string;
-          event_name: string;
-          event_date: string;
-          start_time: string | null;
-          end_time: string | null;
-          venue_name: string;
-          venue_address: string | null;
-          city: string;
-          pass_name: string;
-          pass_composition: string | null;
-        }[];
-      };
-      create_pending_booking: {
-        Args: {
-          p_event_id: string;
-          p_event_date_id: string;
-          p_pass_category_id: string;
-          p_customer_name: string;
-          p_customer_mobile: string;
-          p_customer_email: string;
-          p_quantity: number;
-          p_number_of_people: number;
-          p_idempotency_key?: string | null;
-        };
-        Returns: {
-          booking_uuid: string;
-          booking_reference: string;
-          public_token: string;
-          booking_status: string;
-          payment_status: string;
-          quantity: number;
-          number_of_people: number;
-          subtotal: number;
-          total_amount: number;
-          event_id: string;
-          event_date_id: string;
-          event_date: string;
-          start_time: string | null;
-          end_time: string | null;
-          pass_category_id: string;
-          pass_name: string;
-          pass_composition: string | null;
-          currency: string;
-          razorpay_order_id: string | null;
-          created_at: string;
-          was_existing: boolean;
-        }[];
-      };
-      get_event_night_availability: {
-        Args: { p_event_id: string };
-        Returns: {
-          event_date_id: string;
-          event_date: string;
-          start_time: string | null;
-          end_time: string | null;
-          night_status: string;
-          capacity: number;
-          booked_people: number;
-          remaining: number;
-          is_fully_booked: boolean;
-          is_bookable: boolean;
-        }[];
-      };
-      /**
-       * Admin booking management (step 10). `admin_search_bookings` is the whole
-       * /admin/bookings list: the search box, the five filters, the paging and the
-       * count of the full result set (`total_count` is the size of the result before
-       * paging, so the screen can say "3 of 128"). Column order here must match the
-       * function's `returns table` order exactly — PostgREST binds by position.
-       *
-       * Two things are deliberate and worth knowing before reading the types:
-       *
-       *   * every contact, money and gateway column is nullable, because the function
-       *     returns null for them when `p_include_contact` is false — a caller without
-       *     `bookings:view_contact` is handed nothing it must remember not to show;
-       *   * a filter value the schema does not recognise narrows nothing (it does not
-       *     silently return an empty list that reads as "no such booking"), so the
-       *     args are plain strings and the database does the validating.
-       *
-       * `admin_booking_detail` answers the same lookup for one booking and adds the
-       * pass list, the gate entries and the Razorpay events as jsonb. It never returns
-       * `qr_token`: the credential that admits a guest is not a screen's business.
-       * Both functions are `service_role` only.
-       */
-      admin_search_bookings: {
-        Args: {
-          p_query?: string | null;
-          p_event_date_from?: string | null;
-          p_event_date_to?: string | null;
-          p_pass_category_id?: string | null;
-          p_payment_status?: string | null;
-          p_booking_status?: string | null;
-          p_check_in_status?: string | null;
-          p_include_contact?: boolean;
-          p_limit?: number;
-          p_offset?: number;
-        };
-        Returns: {
-          booking_uuid: string;
-          booking_id: string;
-          customer_name: string;
-          customer_mobile: string | null;
-          customer_email: string | null;
-          event_name: string;
-          event_slug: string;
-          event_date: string;
-          start_time: string | null;
-          end_time: string | null;
-          pass_name: string;
-          pass_composition: string | null;
-          quantity: number;
-          number_of_people: number;
-          total_amount: number | null;
-          currency: string;
-          booking_status: string;
-          payment_status: string;
-          razorpay_order_id: string | null;
-          razorpay_payment_id: string | null;
-          created_at: string;
-          passes_issued: number;
-          passes_checked_in: number;
-          check_in_times: string[] | null;
-          pass_ids: string[];
-          total_count: number;
-        }[];
-      };
-      admin_booking_detail: {
-        Args: { p_lookup: string; p_include_contact?: boolean };
-        Returns: {
-          booking_uuid: string;
-          booking_id: string;
-          customer_name: string;
-          customer_mobile: string | null;
-          customer_email: string | null;
-          event_name: string;
-          event_slug: string;
-          venue_name: string | null;
-          venue_address: string | null;
-          city: string | null;
-          event_date: string;
-          start_time: string | null;
-          end_time: string | null;
-          pass_name: string;
-          pass_composition: string | null;
-          quantity: number;
-          number_of_people: number;
-          subtotal: number | null;
-          total_amount: number | null;
-          currency: string;
-          booking_status: string;
-          payment_status: string;
-          razorpay_order_id: string | null;
-          razorpay_payment_id: string | null;
-          notes: string | null;
-          created_at: string;
-          updated_at: string;
-          passes: AdminBookingPass[] | null;
-          check_ins: AdminBookingCheckIn[] | null;
-          payment_events: AdminBookingPaymentEvent[] | null;
-        }[];
-      };
-      /**
-       * The operations screens (step 11): /admin/payments and /admin/passes.
-       *
-       * Same two conventions as the booking list, because an operator moving between
-       * these three screens should not have to learn a second set of rules: money,
-       * contact details and gateway ids are `null` for a caller without
-       * `bookings:view_contact`, and a filter value the schema does not recognise
-       * narrows nothing. All four are `service_role` only.
-       */
-      admin_payment_events: {
-        Args: {
-          p_query?: string | null;
-          p_outcome?: string | null;
-          p_event_type?: string | null;
-          p_from?: string | null;
-          p_to?: string | null;
-          p_include_contact?: boolean;
-          p_limit?: number;
-          p_offset?: number;
-        };
-        Returns: {
-          event_uuid: string;
-          event_id: string;
-          event_type: string;
-          outcome: string;
-          razorpay_order_id: string | null;
-          razorpay_payment_id: string | null;
-          amount_paise: number | null;
-          received_at: string;
-          processed_at: string | null;
-          booking_uuid: string | null;
-          booking_id: string | null;
-          customer_name: string | null;
-          customer_mobile: string | null;
-          booking_status: string | null;
-          payment_status: string | null;
-          total_amount: number | null;
-          currency: string | null;
-          total_count: number;
-        }[];
-      };
-      admin_payment_attention: {
-        Args: { p_include_contact?: boolean; p_limit?: number };
-        Returns: {
-          reason_code: string;
-          reason: string;
-          action: string;
-          booking_uuid: string;
-          booking_id: string;
-          customer_name: string;
-          customer_mobile: string | null;
-          booking_status: string;
-          payment_status: string;
-          total_amount: number | null;
-          currency: string;
-          razorpay_order_id: string | null;
-          razorpay_payment_id: string | null;
-          event_date: string;
-          passes_issued: number;
-          passes_active: number;
-          event_count: number;
-          created_at: string;
-          total_count: number;
-        }[];
-      };
-      /**
-       * The two management screens' reads and writes. Every write takes the values
-       * the form sent and re-validates them in SQL; the app never writes a table
-       * directly, so there is one place where "a legal pass" and "a legal night"
-       * are defined — and it is the database.
-       */
-      admin_default_event_id: {
-        Args: Record<PropertyKey, never>;
-        Returns: string | null;
-      };
-      admin_pass_catalogue: {
-        Args: { p_event_id?: string | null };
-        Returns: {
-          pass_uuid: string;
-          code: string;
-          name: string;
-          composition: string;
-          description: string | null;
-          price_inr: number;
-          number_of_people: number;
-          max_per_booking: number;
-          min_age: number;
-          is_active: boolean;
-          sort_order: number;
-          bookings_count: number;
-          paid_bookings: number;
-          passes_issued: number;
-          people_sold: number;
-          revenue_inr: number;
-          created_at: string;
-          updated_at: string;
-        }[];
-      };
-      admin_save_pass_category: {
-        Args: {
-          p_id?: string | null;
-          p_event_id?: string | null;
-          p_code: string;
-          p_name: string;
-          p_composition: string;
-          p_description?: string | null;
-          p_price_inr: number;
-          p_number_of_people: number;
-          p_max_per_booking: number;
-          p_min_age: number;
-          p_sort_order: number;
-          p_is_active: boolean;
-        };
-        Returns: {
-          pass_uuid: string;
-          code: string;
-          name: string;
-          composition: string;
-          description: string | null;
-          price_inr: number;
-          number_of_people: number;
-          max_per_booking: number;
-          min_age: number;
-          is_active: boolean;
-          sort_order: number;
-          created_at: string;
-          updated_at: string;
-        }[];
-      };
-      admin_set_pass_category_active: {
-        Args: { p_id: string; p_is_active: boolean };
-        Returns: {
-          pass_uuid: string;
-          code: string;
-          name: string;
-          is_active: boolean;
-          updated_at: string;
-        }[];
-      };
-      admin_event_dates: {
-        Args: { p_event_id?: string | null };
-        Returns: {
-          date_uuid: string;
-          event_date: string;
-          start_time: string | null;
-          end_time: string | null;
-          night_status: string;
-          capacity: number;
-          capacity_held: number;
-          booking_open: boolean;
-          notes: string | null;
-          booked_people: number;
-          booked_bookings: number;
-          passes_issued: number;
-          seats_on_sale: number;
-          seats_available: number;
-          over_committed: boolean;
-          is_full: boolean;
-          created_at: string;
-          updated_at: string;
-        }[];
-      };
-      admin_save_event_date: {
-        Args: {
-          p_id?: string | null;
-          p_event_id?: string | null;
-          p_event_date: string;
-          p_start_time?: string | null;
-          p_end_time?: string | null;
-          p_capacity: number;
-          p_capacity_held?: number;
-          p_status: string;
-          p_booking_open?: boolean;
-          p_notes?: string | null;
-        };
-        Returns: {
-          date_uuid: string;
-          event_date: string;
-          start_time: string | null;
-          end_time: string | null;
-          night_status: string;
-          capacity: number;
-          capacity_held: number;
-          booking_open: boolean;
-          notes: string | null;
-          booked_people: number;
-          seats_available: number;
-          updated_at: string;
-        }[];
-      };
-      admin_set_event_date_capacity: {
-        Args: { p_id: string; p_capacity: number; p_capacity_held?: number | null };
-        Returns: {
-          date_uuid: string;
-          capacity: number;
-          capacity_held: number;
-          booked_people: number;
-          seats_available: number;
-          updated_at: string;
-        }[];
-      };
-      admin_set_event_date_booking: {
-        Args: { p_id: string; p_booking_open: boolean };
-        Returns: {
-          date_uuid: string;
-          booking_open: boolean;
-          night_status: string;
-          capacity: number;
-          capacity_held: number;
-          booked_people: number;
-          seats_available: number;
-          updated_at: string;
-        }[];
-      };
-      admin_gallery_items: {
-        Args: { p_event_id?: string | null };
-        Returns: {
-          item_id: string;
-          event_id: string | null;
-          album: string | null;
-          title: string | null;
-          description: string | null;
-          alt_text: string;
-          media_type: string;
-          storage_path: string | null;
-          thumbnail_path: string | null;
-          url: string | null;
-          thumbnail_url: string | null;
-          width: number | null;
-          height: number | null;
-          byte_size: number | null;
-          captured_on: string | null;
-          item_status: string;
-          sort_order: number;
-          created_at: string;
-          updated_at: string;
-          total_count: number;
-        }[];
-      };
-      admin_add_gallery_item: {
-        Args: {
-          p_id: string;
-          p_event_id?: string | null;
-          p_storage_path: string;
-          p_thumbnail_path?: string | null;
-          p_media_type?: string | null;
-          p_width?: number | null;
-          p_height?: number | null;
-          p_byte_size?: number | null;
-          p_title?: string | null;
-          p_description?: string | null;
-          p_alt_text: string;
-          p_album?: string | null;
-          p_captured_on?: string | null;
-          p_sort_order?: number;
-          p_status?: string | null;
-        };
-        Returns: {
-          item_id: string;
-          storage_path: string;
-          item_status: string;
-          sort_order: number;
-          updated_at: string;
-        }[];
-      };
-      admin_update_gallery_item: {
-        Args: {
-          p_id: string;
-          p_title?: string | null;
-          p_description?: string | null;
-          p_alt_text: string;
-          p_album?: string | null;
-          p_captured_on?: string | null;
-          p_sort_order?: number;
-        };
-        Returns: {
-          item_id: string;
-          title: string | null;
-          description: string | null;
-          alt_text: string;
-          album: string | null;
-          captured_on: string | null;
-          sort_order: number;
-          updated_at: string;
-        }[];
-      };
-      admin_move_gallery_item: {
-        Args: { p_id: string; p_direction: string };
-        Returns: { item_id: string; sort_order: number; moved: boolean }[];
-      };
-      admin_set_gallery_status: {
-        Args: { p_id: string; p_status: string };
-        Returns: {
-          item_id: string;
-          item_status: string;
-          storage_path: string | null;
-          thumbnail_path: string | null;
-          was_public: boolean;
-          is_public: boolean;
-        }[];
-      };
-      admin_delete_gallery_item: {
-        Args: { p_id: string };
-        Returns: {
-          item_id: string;
-          storage_path: string | null;
-          thumbnail_path: string | null;
-          is_public: boolean;
-          removed_paths: string[];
-        }[];
-      };
-      admin_payment_summary: {
-        Args: { p_include_contact?: boolean };
-        Returns: {
-          events_total: number;
-          events_confirmed: number;
-          events_failed: number;
-          events_refunded: number;
-          events_ignored: number;
-          events_duplicate: number;
-          orders_awaiting: number;
-          last_received_at: string | null;
-          last_processed_at: string | null;
-          captured_paise: number | null;
-          refunded_paise: number | null;
-        }[];
-      };
-      admin_pass_list: {
-        Args: {
-          p_query?: string | null;
-          p_status?: string | null;
-          p_check_in?: string | null;
-          p_event_date_id?: string | null;
-          p_from?: string | null;
-          p_to?: string | null;
-          p_include_contact?: boolean;
-          p_limit?: number;
-          p_offset?: number;
-        };
-        Returns: {
-          pass_uuid: string;
-          pass_id: string;
-          pass_number: number;
-          pass_status: string;
-          checked_in: boolean;
-          checked_in_at: string | null;
-          valid_date: string;
-          gate: string | null;
-          admitted_by: string | null;
-          issued_at: string;
-          booking_uuid: string;
-          booking_id: string;
-          booking_status: string;
-          payment_status: string;
-          customer_name: string;
-          customer_mobile: string | null;
-          pass_name: string;
-          quantity: number;
-          number_of_people: number;
-          total_amount: number | null;
-          currency: string;
-          event_name: string;
-          start_time: string | null;
-          end_time: string | null;
-          passes_on_booking: number;
-          total_count: number;
-        }[];
-      };
-      admin_pass_summary: {
-        Args: { p_tz?: string; p_include_contact?: boolean };
-        Returns: {
-          passes_issued: number;
-          passes_active: number;
-          passes_used: number;
-          passes_cancelled: number;
-          passes_expired: number;
-          bookings_with_passes: number;
-          checked_in_total: number;
-          checked_in_today: number;
-          last_check_in_at: string | null;
-          gates_used: number;
-          passes_revenue: number | null;
-        }[];
-      };
-      /**
-       * The dashboard's statistics (step 9). Every figure on /admin comes from one of
-       * these four functions, so no statistic is ever summed in the browser or in
-       * Node. Two conventions are visible in the types on purpose:
-       *
-       *   * money columns are `number | null` — the database returns null rather than
-       *     a figure when `p_include_revenue` is false, and a component cannot render
-       *     what it was never given;
-       *   * contact columns on the recent list are `string | null` for the same reason,
-       *     keyed off `p_include_contact`.
-       *
-       * All four are `service_role` only. Days are counted in `p_tz` (the venue's
-       * timezone) so "today" means the venue's today.
-       */
-      admin_dashboard_stats: {
-        Args: { p_today: string; p_tz?: string; p_include_revenue?: boolean };
-        Returns: {
-          bookings_total: number;
-          bookings_confirmed: number;
-          bookings_paid: number;
-          bookings_pending: number;
-          bookings_refunded: number;
-          bookings_today: number;
-          revenue_total: number | null;
-          revenue_today: number | null;
-          revenue_refunded: number | null;
-          check_ins_total: number;
-          check_ins_today: number;
-          passes_issued: number;
-          passes_active: number;
-          passes_used: number;
-          people_paid: number;
-          capacity_total: number;
-          capacity_taken: number;
-          capacity_available: number;
-          tonight_date: string | null;
-          tonight_capacity: number;
-          tonight_taken: number;
-          tonight_available: number;
-          nights_total: number;
-          nights_upcoming: number;
-          gallery_published: number;
-          gallery_draft: number;
-          staff_active: number;
-          staff_total: number;
-        }[];
-      };
-      /** Day-by-day bookings (and revenue) for the dashboard chart. */
-      admin_booking_series: {
-        Args: { p_today: string; p_days?: number; p_tz?: string; p_include_revenue?: boolean };
-        Returns: {
-          day: string;
-          bookings: number;
-          confirmed: number;
-          revenue: number | null;
-        }[];
-      };
-      /** Bookings, passes, people and revenue per pass category. */
-      admin_pass_breakdown: {
-        Args: { p_include_revenue?: boolean };
-        Returns: {
-          pass_category_id: string;
-          pass_name: string;
-          pass_composition: string | null;
-          price_inr: number;
-          is_active: boolean;
-          bookings: number;
-          paid_bookings: number;
-          passes_issued: number;
-          people: number;
-          revenue: number | null;
-        }[];
-      };
-      /** The newest bookings, for the dashboard table. */
-      admin_recent_bookings: {
-        Args: { p_limit?: number; p_include_contact?: boolean };
-        Returns: {
-          booking_uuid: string;
-          booking_id: string;
-          customer_name: string;
-          customer_mobile: string | null;
-          customer_email: string | null;
-          event_date: string;
-          start_time: string | null;
-          pass_name: string;
-          quantity: number;
-          number_of_people: number;
-          total_amount: number | null;
-          currency: string;
-          booking_status: string;
-          payment_status: string;
-          created_at: string;
-        }[];
-      };
-      /**
-       * Gate entry (step 7). `scan_pass` is the read-only verdict; `check_in_pass`
-       * is the same verdict with the compare-and-swap and the `check_ins` row
-       * behind it. Both are executable by `service_role` only, and both demand a
-       * staff user id — the return shape is identical, so the scanner can show the
-       * result of either without a second model.
-       */
-      scan_pass: {
-        Args: { p_qr_token: string; p_gate_date: string; p_staff_user_id: string };
-        Returns: PassEntryRow[];
-      };
-      check_in_pass: {
-        Args: {
-          p_qr_token: string;
-          p_gate_date: string;
-          p_staff_user_id: string;
-          p_gate?: string | null;
-        };
-        Returns: PassEntryRow[];
-      };
-      /** Internal: the shared body of the two above. Revoked from every role. */
-      pass_entry: {
-        Args: {
-          p_qr_token: string;
-          p_gate_date: string;
-          p_staff_user_id: string | null;
-          p_commit: boolean;
-          p_gate?: string | null;
-        };
-        Returns: PassEntryRow[];
-      };
-    };
-    Enums: Record<string, never>;
-    CompositeTypes: Record<string, never>;
-  };
-}
-
 // -----------------------------------------------------------------------------
-// Status unions — kept in sync with the CHECK constraints in the migrations.
-// Changing a value here is not enough: the SQL constraint must change too.
+// Gate RPC (`scan_pass` / `check_in_pass` / `pass_entry`)
 // -----------------------------------------------------------------------------
 
 /**
- * One row of the gate verdict (`scan_pass` / `check_in_pass` / `pass_entry`).
- *
- * Every field except `outcome` and `reason` is null when the pass was refused
- * before it could be read, which is why the presentation type in
- * `src/types/admin.ts` marks them nullable too.
+ * One row of the gate verdict. Every field except `outcome` and `reason` is
+ * null when the pass was refused before it could be read, which is why the
+ * presentation type in `src/types/admin.ts` marks them nullable too.
+ * `qr_token` is never returned.
  */
 export interface PassEntryRow {
   outcome: string;
@@ -1413,36 +229,33 @@ export interface PassEntryRow {
   check_in_id: string | null;
 }
 
-export type EventStatus = "draft" | "published" | "archived";
-export type EventDateStatus = "scheduled" | "sold_out" | "cancelled" | "completed";
-export type BookingStatus = "pending" | "confirmed" | "cancelled" | "expired" | "refunded";
-export type PaymentStatus = "unpaid" | "created" | "paid" | "failed" | "refunded";
-export type DigitalPassStatus = "active" | "used" | "cancelled" | "expired";
-export type GalleryStatus = "draft" | "published" | "archived";
-export type MediaType = "image" | "video";
-export type AdminRole = "owner" | "admin" | "manager" | "scanner";
+/**
+ * The three jsonb arrays `admin_booking_detail` returns. Assembled inside the
+ * database (one booking, one pass list, one gate list, one payment history).
+ * `qr_token` appears in none of them.
+ */
+export interface AdminBookingPass {
+  pass_id: string;
+  pass_number: number;
+  status: string;
+  checked_in: boolean;
+  checked_in_at: string | null;
+  valid_date: string;
+}
 
-// -----------------------------------------------------------------------------
-// Convenience aliases
-// -----------------------------------------------------------------------------
+export interface AdminBookingCheckIn {
+  pass_id: string;
+  gate: string | null;
+  notes: string | null;
+  checked_in_at: string;
+  staff: string | null;
+}
 
-export type PublicSchema = Database["public"];
-export type PublicTable = keyof PublicSchema["Tables"];
-
-/** Row shape of a table: `Row<"bookings">`. */
-export type Row<T extends PublicTable> = PublicSchema["Tables"][T]["Row"];
-/** Insert payload of a table: `Insert<"bookings">`. */
-export type Insert<T extends PublicTable> = PublicSchema["Tables"][T]["Insert"];
-/** Update payload of a table: `Update<"events">`. */
-export type Update<T extends PublicTable> = PublicSchema["Tables"][T]["Update"];
-
-export type EventRow = Row<"events">;
-export type EventDateRow = Row<"event_dates">;
-export type PassCategoryRow = Row<"pass_categories">;
-export type BookingRow = Row<"bookings">;
-export type DigitalPassRow = Row<"digital_passes">;
-export type CheckInRow = Row<"check_ins">;
-export type GalleryRow = Row<"gallery">;
-export type EventHighlightRow = Row<"event_highlights">;
-export type EventFeatureRow = Row<"event_features">;
-export type AdminUserRow = Row<"admin_users">;
+export interface AdminBookingPaymentEvent {
+  event_id: string;
+  event_type: string;
+  outcome: string;
+  amount_paise: number | null;
+  received_at: string;
+  processed_at: string | null;
+}

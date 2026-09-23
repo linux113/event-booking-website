@@ -7,8 +7,8 @@
  *     this file only decides how to *draw* it — how tall a bar is, how far apart the
  *     gridlines are, what share of the total a category holds;
  *   * none of it is sensitive. A bar height is a ratio of two numbers that were
- *     already counted on the server and already allowed through the role check, so
- *     there is nothing here that could reveal a figure a role may not see.
+ *     already counted on the server and already checked for the caller, so
+ *     there is nothing here that could reveal a figure withheld from the payload.
  *
  * Everything is pure: numbers in, numbers out, no dates read from the clock and no
  * formatting decisions that differ between the server and the browser.

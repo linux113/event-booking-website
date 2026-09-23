@@ -4,11 +4,11 @@
  * Services never throw: a page or component always receives either data or a
  * typed error it can render. That keeps a database outage (or a missing
  * configuration) from turning into a 500, and lets `next build` complete even
- * when Supabase is unreachable.
+ * when Neon is unreachable.
  */
 
 export type ServiceErrorKind =
-  /** NEXT_PUBLIC_SUPABASE_URL / _ANON_KEY are not set. */
+  /** DATABASE_URL is not set. */
   | "not-configured"
   /** The query ran but the row does not exist. */
   | "not-found"
@@ -33,10 +33,16 @@ export function fail<T>(kind: ServiceErrorKind, message: string): Result<T> {
 
 /**
  * Logs the real error server-side and returns a generic message for the UI.
- * Postgres/Supabase errors can include table names, so they are never rendered.
+ * Postgres errors can include table names, so they are never rendered.
  */
-export function failFromPostgrest<T>(error: { message: string; code?: string }, context: string): Result<T> {
+export function failFromPostgrest<T>(
+  error: { message: string; code?: string },
+  context: string,
+): Result<T> {
   console.error(`[services] ${context}:`, error.message, error.code ? `(${error.code})` : "");
 
   return fail<T>("query-failed", "We could not load this content right now.");
 }
+
+/** Alias kept for older call sites — same behaviour as `failFromPostgrest`. */
+export const failFromDb = failFromPostgrest;

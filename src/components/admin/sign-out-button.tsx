@@ -1,5 +1,5 @@
 /**
- * Ends the staff session.
+ * Ends the admin session.
  *
  * A plain HTML form POST to `/api/staff/logout` rather than a client-side handler,
  * for three reasons: it works with JavaScript disabled, there is no button that can
