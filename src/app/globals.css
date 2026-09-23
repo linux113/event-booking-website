@@ -1,0 +1,151 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens for the Navratri / Dandiya theme.
+ *
+ * Exposed as Tailwind v4 theme tokens, so utilities such as `bg-background`,
+ * `text-muted`, `border-border` and `bg-marigold` stay consistent app-wide.
+ * Swap the hex values here to re-skin the whole site.
+ *
+ * Palette brief: deep blue, purple, pink/magenta, yellow/gold, orange, white.
+ */
+@theme {
+  /* Surfaces */
+  --color-background: #0b0a24;
+  --color-foreground: #fbf9ff;
+  --color-surface: #16123a;
+  --color-surface-raised: #201a52;
+  --color-border: #352e6b;
+  --color-muted: #bcb6e0;
+
+  /* Deep blue + purple */
+  --color-navy: #16205c;
+  --color-navy-soft: #24358f;
+  --color-violet: #6b3fd4;
+  --color-violet-soft: #9b7bf0;
+  --color-night: #0d0922;
+
+  /* Pink / magenta */
+  --color-rani: #e5399b;
+  --color-rani-soft: #ff7cc3;
+
+  /* Yellow / gold */
+  --color-marigold: #f7b731;
+  --color-marigold-soft: #ffcd63;
+  --color-marigold-foreground: #1a1206;
+
+  /* Orange + accents */
+  --color-orange: #ff8a3d;
+  --color-orange-soft: #ffb070;
+  --color-peacock: #22c3a6;
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  /* One restrained ambient animation, used only on decorative elements and
+     always behind `motion-safe:` so it is skipped for reduced-motion users. */
+  --animate-float: float 7s ease-in-out infinite;
+  --animate-halo: halo 9s ease-in-out infinite;
+}
+
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes halo {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.85;
+    transform: scale(1.06);
+  }
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Visible, on-brand focus ring for keyboard users. */
+  :focus-visible {
+    outline: 2px solid var(--color-marigold);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background-color: var(--color-rani);
+    color: #fff;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/*
+ * Printing a pass.
+ *
+ * People print passes — for grandparents, for a group arriving in separate cars,
+ * for a phone that might die. A pass therefore has to survive being put on paper:
+ * in print the site chrome, the hero copy and the buttons step aside, the page
+ * turns white (printing the dark background would empty a cartridge and the ticket
+ * would land on the reverse sheet), and the ticket itself keeps its colours.
+ *
+ * Only `.pass-ticket` and whatever is inside it print; everything else is either
+ * matched here or marked `.no-print` by the page.
+ */
+@media print {
+  html {
+    color-scheme: light;
+  }
+
+  body {
+    background: #ffffff !important;
+    color: #191233 !important;
+  }
+
+  body > header,
+  body > footer,
+  a[href="#main"],
+  .no-print {
+    display: none !important;
+  }
+
+  main {
+    display: block !important;
+    padding: 0 !important;
+  }
+
+  .pass-ticket {
+    border: 1px solid #ded7f0 !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+  }
+
+  .pass-ticket * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  @page {
+    margin: 12mm;
+  }
+}
