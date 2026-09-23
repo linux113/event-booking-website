@@ -6,6 +6,15 @@ Tailwind CSS**, backed by **Supabase** (Postgres, Auth, Storage), **Razorpay** f
 payments, deployed on **Vercel**, versioned on **GitHub**. Chosen so the whole stack
 fits within free tiers for development and small-scale launch.
 
+## Documentation
+
+| Guide | What it covers |
+| ----- | -------------- |
+| [`docs/connect-free-supabase.md`](./docs/connect-free-supabase.md) | Creating the database on Supabase's free tier: the 16 migrations in order (SQL editor or CLI), which key goes in which variable after the 2026 rename, the first admin account, replacing the seed data with your real event, free-tier limits and the 7-day pause |
+| [`docs/deploy-vercel.md`](./docs/deploy-vercel.md) | Deploying: importing the repo, the Production Branch trap, the environment variables, the Razorpay webhook, Hobby-plan reality, and the five checks that prove the deployment is real |
+| [`docs/how-it-works.md`](./docs/how-it-works.md) | The whole flow — customer, organiser, gate — how the pieces fit, every URL that must be configured and what breaks if it is wrong, and the one URL needed to have a deployment verified |
+| [`supabase/README.md`](./supabase/README.md) | The database reference: tables, roles, RLS rules, storage buckets, every `SECURITY DEFINER` function |
+
 ## Status
 
 | Step | Scope | State |
