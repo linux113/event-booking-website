@@ -17,7 +17,7 @@
 # ---------------------------------------------------------------------------
 name: Set up database
 
-# Applies supabase/prelude.sql, the 16 migrations and (optionally) the seed to a
+# Applies supabase/prelude.sql, every migration and (optionally) the seed to a
 # hosted PostgreSQL — Neon, or any Postgres.
 #
 # Manual only, on purpose: it writes to a real database, so it must never run on a
@@ -97,7 +97,7 @@ jobs:
           {
             echo "### Database setup finished"
             echo ""
-            echo "The step above is the check: 11 public tables, 26 policies, RLS on all 11,"
+            echo "The step above is the check: 10 public tables, 6 policies, RLS on all 10,"
             echo "44 SECURITY DEFINER functions, the identity shim answering, a stranger able to"
             echo "read the published event and refused on \`bookings\`."
             echo ""

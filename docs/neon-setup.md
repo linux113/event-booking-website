@@ -29,7 +29,7 @@ then exercised the security model through it. **15 checks, 0 failures:**
 ✓ prelude applies to a bare PostgreSQL
 ✓ auth.uid() exists and is null without claims
 ✓ every migration applied without error        (all 16, in filename order)
-✓ 11 tables, 26 policies, RLS on all 11
+✓ 10 tables, 6 policies, RLS on all 10
 ✓ the SECURITY DEFINER functions are there     (44)
 ✓ no storage schema exists (as on Neon) and the migration did not fail
 ✓ one event, nine nights, five pass types      (the seed)
@@ -99,7 +99,7 @@ data, and finally asserts the end state:
   18 applied, 0 skipped, of 18 section(s).
 
 The schema as it now stands:
-  ✓ 11 public tables, 26 policies, RLS on every table
+  ✓ 10 public tables, 6 policies, RLS on every table
   ✓ 44 SECURITY DEFINER functions — 44 found
   ✓ the identity shim answers (auth.uid() is callable)
   ✓ seed: one event, nine nights, five pass types
@@ -117,7 +117,7 @@ would fail on the first restatement. So:
 
 | Situation | What a run does |
 | --------- | --------------- |
-| Fresh database | applies all 18 sections |
+| Fresh database | applies all 20 sections |
 | Already applied | `· skipped`, 18 of them, and re-checks the end state |
 | Stopped part-way | resumes at the first file that is not recorded |
 | A file changed after it was applied | `! filename changed since it was applied — left alone` |
@@ -167,7 +167,7 @@ To check a database without touching it, run it with **verify_only** ticked.
 ### Option A3 — one paste, no tooling at all
 
 [`docs/one-shot-schema.sql`](./one-shot-schema.sql) is the entire schema — prelude, all 16
-migrations and the seed — as a **single 309 KB statement batch wrapped in one transaction**.
+migrations and the seed — as a **single 373 KB statement batch wrapped in one transaction**.
 
 First, check what your login role may do: the batch creates `anon`, `authenticated` and
 `service_role` (`service_role` with `BYPASSRLS`), and Postgres refuses to create a role with an
@@ -248,7 +248,7 @@ platform:
   under PostgREST, including Neon's Data API, and under a direct connection that sets the
   claims itself.
 
-Nothing else in the 16 migrations is Supabase-specific. The gallery migration notices the
+Nothing else in the migrations is Supabase-specific. The gallery migration notices the
 missing `storage` schema and skips its bucket setup.
 
 ## Step 4 · Verify the schema landed
