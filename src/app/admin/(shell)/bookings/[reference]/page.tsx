@@ -51,7 +51,7 @@ export default async function BookingDetailPage({ params, searchParams }: Bookin
 
   // `reference` arrives URL-decoded from the router; it is passed on as-is so a
   // reference containing a `%` is never decoded twice.
-  const result = await getBookingDetail(reference);
+  const result = await getBookingDetail(reference, staff.role);
 
   if (!result.ok) {
     return (

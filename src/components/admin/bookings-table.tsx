@@ -9,15 +9,15 @@ import { formatEventDate, formatInr, formatTimeRange, formatTimestamp } from "@/
  * The booking list itself.
  *
  * Every column the operations team asked for is here — booking ID, customer, mobile,
- * date, pass, amount, payment status, booking status, created at, check-in
+ * email, date, pass, amount, payment status, booking status, created at, check-in
  * status — but not every column is drawn at every width. A phone shows the identity of
  * the booking, its night, and where it stands; the table widens as the screen does and
  * a desktop shows all of it at once. The hidden columns are still in the markup, so the
  * page a screen reader or a test sees is the same page at every width.
  *
- * Contact columns are not rendered when they are absent from the payload: rows arrive with
- * `customerMobile` and `totalAmount` already null, and the table asks `includeContact`
- * before drawing the header, so
+ * Columns a role is not allowed to see are not rendered *at all* for that role: a
+ * staff member's rows arrive with `customerMobile`, `customerEmail` and `totalAmount`
+ * already null, and the table asks `includeContact` before drawing the header, so
  * there is no empty column implying withheld data. The note underneath says, in words,
  * why the columns are absent.
  */
@@ -50,6 +50,9 @@ export function BookingsTable({
                   <>
                     <th scope="col" className="border-border/60 hidden border-b px-4 py-2.5 lg:table-cell">
                       Mobile
+                    </th>
+                    <th scope="col" className="border-border/60 hidden border-b px-4 py-2.5 xl:table-cell">
+                      Email
                     </th>
                   </>
                 ) : null}
@@ -92,7 +95,7 @@ export function BookingsTable({
 
       {!includeContact ? (
         <p className="text-muted/80 text-xs/5">
-          Contact details, amounts and Razorpay IDs are not shown here. Everything you need to find a guest
+          Contact details, amounts and Razorpay IDs are not shown for your role. Everything you need to find a guest
           and admit them — their name, night, pass and check-in state — is here. Ask an admin if you need the rest.
         </p>
       ) : null}
@@ -133,7 +136,7 @@ function Row({
 
         {includeContact ? (
           <p className="text-muted mt-0.5 text-xs xl:hidden">
-            {row.customerMobile || "No mobile"}
+            {[row.customerMobile, row.customerEmail].filter(Boolean).join(" · ") || "No contact details"}
           </p>
         ) : null}
       </td>
@@ -144,6 +147,7 @@ function Row({
             <span className="text-xs">{row.customerMobile ?? "—"}</span>
           </td>
           <td className="hidden px-4 py-3 align-top xl:table-cell">
+            <span className="text-xs break-all">{row.customerEmail ?? "—"}</span>
           </td>
         </>
       ) : null}

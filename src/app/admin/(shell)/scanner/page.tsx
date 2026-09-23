@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { ScannerPanel } from "@/components/admin/scanner-panel";
 import { ShieldCheckIcon } from "@/components/icons";
 import { ErrorState } from "@/components/ui/error-state";
-import { isDatabaseConfigured } from "@/config/env";
+import { isSupabaseConfigured } from "@/config/env";
 import { requirePermission } from "@/lib/auth/guard";
 import { formatEventDate, formatTimeRange } from "@/lib/format";
 import { gateNight } from "@/lib/gate/night";
@@ -33,13 +33,13 @@ export const dynamic = "force-dynamic";
  * can be bypassed.
  */
 export default async function ScannerPage() {
-  if (!isDatabaseConfigured()) {
+  if (!isSupabaseConfigured()) {
     return (
       <ErrorState
         error={{
           kind: "not-configured",
           message:
-            "The gate needs the database: pass checks read from Neon. Add DATABASE_URL and try again.",
+            "The gate needs the database: staff sign-in and pass checks both read from Supabase. Add the Supabase variables and try again.",
         }}
         title="The scanner is not connected"
       />

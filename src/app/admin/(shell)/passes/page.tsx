@@ -117,7 +117,7 @@ export default async function PassesPage({ searchParams }: PassesPageProps) {
     );
   }
 
-  const snapshot = await getPassesSnapshot(query);
+  const snapshot = await getPassesSnapshot(query, staff.role);
 
   if (!snapshot.ok) {
     return (
@@ -187,7 +187,7 @@ export default async function PassesPage({ searchParams }: PassesPageProps) {
                 value={summary.passes_revenue === null ? "—" : formatInr(summary.passes_revenue)}
               />
             ) : (
-              <Fact label="Paid bookings holding passes" value="Amounts are not included" />
+              <Fact label="Paid bookings holding passes" value="Amounts are hidden for your role" />
             )}
             <Fact label="Used passes" value={String(summary.passes_used)} />
             <Fact
@@ -378,7 +378,7 @@ function PassHeading({ view, includeContact = true }: { view: "issued" | "types"
         {view === "types"
           ? "What is on sale: the pass types, their prices, who each one admits and how many have been sold."
           : "Every pass issued for the event: which ticket is which, who it belongs to, and whether it has been admitted. Search by pass ID, booking reference, guest name or mobile number."}
-        {view === "issued" && !includeContact ? "" : ""}
+        {view === "issued" && !includeContact ? " Contact details and amounts are hidden for your role." : ""}
       </p>
     </div>
   );

@@ -23,6 +23,7 @@ export type BookingField =
   | "passCategoryId"
   | "customerName"
   | "customerMobile"
+  | "customerEmail"
   | "quantity"
   | "numberOfPeople";
 
@@ -36,6 +37,7 @@ export interface BookingRequestInput {
   customerName: string;
   /** Normalised to `+91XXXXXXXXXX` before it is sent. */
   customerMobile: string;
+  customerEmail: string;
   quantity: number;
   numberOfPeople: number;
   /** Per-attempt key so a retried request cannot create a second booking. */
@@ -110,6 +112,7 @@ export type BookingStep = 1 | 2 | 3 | 4;
 export interface BookingDetailsDraft {
   customerName: string;
   customerMobile: string;
+  customerEmail: string;
   quantity: string;
   numberOfPeople: string;
 }
@@ -134,7 +137,7 @@ export interface PaymentOrderView {
   keyId: string;
   booking: CreatedBooking;
   /** Prefill values the server already has for this booking (never client input). */
-  prefill: { name: string; contact: string };
+  prefill: { name: string; email: string; contact: string };
   description: string;
 }
 

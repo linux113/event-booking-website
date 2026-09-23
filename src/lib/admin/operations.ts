@@ -394,7 +394,7 @@ export function paiseToRupees(paise: number | null): number | null {
  * The columns a door list has, in the order a person reads them.
  *
  * Shared by the table, the export and the tests. `contact: true` marks the columns a
- * contact-less query may not have — and in that case they are absent
+ * role without `bookings:view_contact` may not have — and for that role they are absent
  * from the header row, not blank: a file of empty columns still tells you what you are
  * missing, which is not the same as not being allowed to know it.
  */

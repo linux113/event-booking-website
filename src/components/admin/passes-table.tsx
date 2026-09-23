@@ -113,7 +113,7 @@ export function PassTable({
                   <td className="px-4 py-3 align-top">
                     <p className="text-xs whitespace-nowrap">{formatEventDate(row.valid_date)}</p>
                     <p className="text-muted mt-0.5 text-[0.6875rem] whitespace-nowrap">
-                      {formatTimeRange(row.start_time ?? null, row.end_time ?? null) ?? row.event_name}
+                      {formatTimeRange(row.start_time, row.end_time) ?? row.event_name}
                     </p>
                   </td>
 
@@ -169,7 +169,7 @@ export function PassTable({
 
       {!includeContact ? (
         <p className="text-muted/80 text-xs/5">
-          Guest contact details and amounts are not shown here. Everything you need at a door — the pass, the
+          Guest contact details and amounts are not shown for your role. Everything you need at a door — the pass, the
           guest, the night and the entry — is here.
         </p>
       ) : null}

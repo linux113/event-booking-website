@@ -6,22 +6,32 @@ import { PrismaClient } from "@/generated/prisma/client";
 /**
  * The one database client.
  *
- * Everything that touches the database goes through here: Prisma Client for CRUD,
- * and the `sql` / `rpc` helpers for the PostgreSQL functions where capacity,
- * pricing, idempotency and double-check-in guarantees actually live.
+ * Everything that touches the database goes through here, and this module is
+ * `server-only`: importing it from a client component is a build error, not a
+ * runtime surprise. The browser never sees a connection string, never opens a
+ * connection, and cannot reach the database at all.
  *
  * How it connects
  *   Through Neon's serverless driver adapter, over the pooled connection string
- *   in `DATABASE_URL` (the host with `-pooler`). Schema work wants the *direct*
- *   string — that is `npm run db:setup`'s business, not this file's.
+ *   in `DATABASE_URL`. That is the string with `-pooler` in the host: serverless
+ *   functions open and close connections constantly, and the pooler is what makes
+ *   that cheap instead of exhausting the database's connection limit.
+ *
+ *   Schema work is different — it wants the *direct* string. That is not this
+ *   file's business: `npm run db:setup` takes the direct URL for the run and uses
+ *   it for migrations only.
  *
  * Why a singleton
- *   Next re-evaluates modules on every hot reload in development; caching on
- *   `globalThis` gives one client per process.
+ *   Next re-evaluates modules on every hot reload in development, and a new
+ *   PrismaClient per reload means a new pool per reload until the database stops
+ *   answering. Caching on `globalThis` gives one client per process — in
+ *   production the module is evaluated once anyway, so this only matters locally.
  *
  * Why lazy
- *   A missing `DATABASE_URL` must not make the site throw on import; pages render
- *   a "database not connected" state (`isDatabaseConfigured`) instead.
+ *   A missing `DATABASE_URL` must not make the site throw on import; the app has
+ *   a "database is not connected yet" state that has to render instead (see
+ *   `isDatabaseConfigured`). The client is therefore built on first use, not on
+ *   import.
  */
 
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
@@ -29,9 +39,12 @@ const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 /**
  * The connection string, or null when the app has not been configured yet.
  *
- * `channel_binding=require` is stripped: it is a libpq option Neon's dashboard
- * writes into the URL, and some drivers forward unknown parameters into the
- * PostgreSQL startup packet, which the server then rejects.
+ * `channel_binding=require` is stripped. It is a libpq option — Neon's dashboard
+ * writes it into the connection string it hands you — and it means nothing to a
+ * Node driver. Some drivers forward unknown URL parameters into the PostgreSQL
+ * startup packet, and the server rejects any parameter it does not recognise, so
+ * the connection dies before it is made. `scripts/setup-database.mjs` strips it
+ * for the same reason. TLS still applies: Neon always speaks it.
  */
 function connectionString(): string | null {
   const value = process.env.DATABASE_URL?.trim();
@@ -62,56 +75,12 @@ export class DatabaseNotConfiguredError extends Error {
 }
 
 /**
- * A database error normalised for the service layer: SQLSTATE in `code`,
- * human detail in `details` (Prisma may surface these on `meta`).
+ * The client, created on first use.
+ *
+ * Throws `DatabaseNotConfiguredError` when there is no connection string — catch
+ * that, or check `isDatabaseConfigured()` first, wherever the UI needs the
+ * friendly "not connected yet" message rather than a 500.
  */
-export class DatabaseError extends Error {
-  readonly code: string | undefined;
-  readonly details: string | undefined;
-  readonly hint: string | undefined;
-
-  constructor(message: string, options: { code?: string; details?: string; hint?: string } = {}) {
-    super(message);
-    this.name = "DatabaseError";
-    this.code = options.code;
-    this.details = options.details;
-    this.hint = options.hint;
-  }
-}
-
-function toDatabaseError(error: unknown): DatabaseError {
-  if (error instanceof DatabaseError) {
-    return error;
-  }
-
-  if (error instanceof Error) {
-    const source = error as Error & {
-      code?: unknown;
-      meta?: Record<string, unknown>;
-      detail?: unknown;
-      hint?: unknown;
-    };
-
-    const meta = source.meta ?? {};
-    const code =
-      (typeof source.code === "string" ? source.code : undefined) ??
-      (typeof meta.code === "string" ? meta.code : undefined) ??
-      (typeof meta.databaseErrorCode === "string" ? meta.databaseErrorCode : undefined);
-    const details =
-      (typeof source.detail === "string" ? source.detail : undefined) ??
-      (typeof meta.detail === "string" ? meta.detail : undefined) ??
-      (typeof meta.details === "string" ? meta.details : undefined);
-    const hint =
-      (typeof source.hint === "string" ? source.hint : undefined) ??
-      (typeof meta.hint === "string" ? meta.hint : undefined);
-
-    return new DatabaseError(source.message, { code, details, hint });
-  }
-
-  return new DatabaseError(String(error));
-}
-
-/** The client, created on first use. Throws when DATABASE_URL is missing. */
 export function getDb(): PrismaClient {
   if (globalForPrisma.prisma) return globalForPrisma.prisma;
 
@@ -126,119 +95,25 @@ export function getDb(): PrismaClient {
   return client;
 }
 
-/** Drop the cached client (tests / hot-reload edge cases). */
-export function resetDb(): void {
-  delete globalForPrisma.prisma;
-}
-
 /**
- * Tagged-template SQL — parameters stay bound, never interpolated.
+ * Calls a database function with `$queryRaw`, exactly as the SQL defines it.
  *
- *   const [row] = await sql<Row[]>`select * from public.events limit 1`;
+ * The booking flow, the check-in verdict and the admin read models are 51
+ * PostgreSQL functions; they are where capacity, pricing, idempotency and the
+ * double-check-in guarantee actually live, and they are deliberately not
+ * reimplemented in TypeScript. Prisma Client does CRUD; this does the functions.
  *
- * Also accepts a plain string + values (used by `rpc`): the text is still
- * parameterised via `$queryRawUnsafe`'s bind markers, never string-interpolated.
+ * Tagged-template usage keeps the parameters bound, never interpolated:
+ *
+ *   const [booking] = await sql<BookingRow[]>`
+ *     select * from public.create_pending_booking(
+ *       ${eventId}::uuid, ${dateId}::uuid, ${passId}::uuid, ${name}, ${mobile},
+ *       ${quantity}::integer, ${people}::integer, ${idempotencyKey}::text
+ *     )`;
  */
 export function sql<T = unknown>(
-  strings: TemplateStringsArray | string,
+  strings: TemplateStringsArray,
   ...values: unknown[]
 ): Promise<T> {
-  try {
-    if (typeof strings === "string") {
-      // Called with a plain query text (from rpc): bind via unsafe raw API.
-      return getDb().$queryRawUnsafe<T>(strings, ...(values as never[]));
-    }
-    return getDb().$queryRaw<T>(strings, ...values);
-  } catch (error) {
-    return Promise.reject(toDatabaseError(error));
-  }
-}
-
-/** Run the promise and rethrow failures as `DatabaseError`. */
-export async function withDb<T>(work: () => Promise<T>): Promise<T> {
-  try {
-    return await work();
-  } catch (error) {
-    throw toDatabaseError(error);
-  }
-}
-
-const FN_NAME = /^[a-z][a-z0-9_]*$/;
-
-/**
- * Call a PostgreSQL function the way the SQL defines it — named arguments,
- * result as rows:
- *
- *   const rows = await rpc("get_event_night_availability", {
- *     p_event_id: eventId,
- *   });
- *
- * The function name is allowlisted by shape (identifier only); arguments are
- * always bound parameters.
- */
-export async function rpc<T = Record<string, unknown>>(
-  fn: string,
-  params: Record<string, unknown> = {},
-): Promise<T[]> {
-  if (!FN_NAME.test(fn)) {
-    throw new DatabaseError(`Refusing to call unknown function shape: ${fn}`);
-  }
-
-  const keys = Object.keys(params);
-  const args = keys.map((name, index) => `${name} => $${index + 1}`).join(", ");
-  const values = keys.map((name) => params[name]);
-  const query = `select * from public.${fn}(${args})`;
-
-  try {
-    return await sql<T[]>(query, ...values);
-  } catch (error) {
-    throw toDatabaseError(error);
-  }
-}
-
-/**
- * Call a function that returns a single scalar (not a row set).
- *
- * Postgres answers `select * from fn()` as `[{ value }]` for some drivers and
- * may raise `0A000` for the form variant — retry with `select fn() as value`.
- */
-export async function rpcScalar<T = unknown>(
-  fn: string,
-  params: Record<string, unknown> = {},
-): Promise<T | null> {
-  if (!FN_NAME.test(fn)) {
-    throw new DatabaseError(`Refusing to call unknown function shape: ${fn}`);
-  }
-
-  const keys = Object.keys(params);
-  const args = keys.map((name, index) => `${name} => $${index + 1}`).join(", ");
-  const values = keys.map((name) => params[name]);
-
-  try {
-    const rows = await sql<Record<string, unknown>[]>(
-      `select * from public.${fn}(${args})`,
-      ...values,
-    );
-    const row = rows[0];
-    if (!row) return null;
-    const value = row.value ?? Object.values(row)[0];
-    return (value ?? null) as T | null;
-  } catch (error) {
-    const dbError = toDatabaseError(error);
-
-    // 0A000 — feature not supported for the set-returning form of a scalar.
-    if (dbError.code === "0A000") {
-      try {
-        const rows = await sql<Record<string, unknown>[]>(
-          `select public.${fn}(${args}) as value`,
-          ...values,
-        );
-        return (rows[0]?.value ?? null) as T | null;
-      } catch (retryError) {
-        throw toDatabaseError(retryError);
-      }
-    }
-
-    throw dbError;
-  }
+  return getDb().$queryRaw<T>(strings, ...values);
 }

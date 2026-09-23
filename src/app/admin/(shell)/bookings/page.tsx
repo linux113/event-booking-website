@@ -49,7 +49,7 @@ export default async function BookingsPage({ searchParams }: BookingsPageProps) 
 
   // Two independent reads, so one round trip's worth of latency for the page: the
   // results, and the pass categories the filter bar offers.
-  const [list, passOptions] = await Promise.all([listBookings(query), listBookingPassOptions()]);
+  const [list, passOptions] = await Promise.all([listBookings(query, staff.role), listBookingPassOptions()]);
 
   if (!list.ok) {
     return (
@@ -77,7 +77,7 @@ export default async function BookingsPage({ searchParams }: BookingsPageProps) 
           email, pass ID or a Razorpay ID — and narrow with the filters.
           {page.includeContact
             ? " You can see contact details and amounts for every booking."
-            : " Contact details and amounts are not included in this view."}
+            : " Contact details and amounts are hidden for your role; ask an admin if you need them."}
         </p>
       </div>
 

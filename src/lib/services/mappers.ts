@@ -141,8 +141,8 @@ export function toEventFeature(row: EventFeatureRow): EventFeature {
  * One gallery row, as the public site needs it.
  *
  * The URL is **derived, not stored**: an uploaded photograph's row holds the object
- * key inside the gallery bucket, and the public address is the Blob URL stored in `url`.
- * Only externally hosted media (a video on a
+ * key inside the gallery bucket, and the public address is that key under
+ * `/storage/v1/object/public/gallery/`. Only externally hosted media (a video on a
  * CDN, a photo added straight from a URL) carries its own `url`, and that wins when
  * it is set.
  *
@@ -151,23 +151,16 @@ export function toEventFeature(row: EventFeatureRow): EventFeature {
  * there is no public address for it even if somebody published the row by hand.
  */
 export function toGalleryItem(row: GalleryRow): GalleryItem | null {
-  const src = row.url ?? (row.storage_path ? publicGalleryUrl(row.storage_path) : null);
+  const src = row.url ?? publicGalleryUrl(row.storage_path);
 
   if (!src) {
     return null;
   }
 
-  // Vercel Blob stores one absolute URL per object in `url`; thumbnails share the
-  // item path (`.../full.webp` ↔ `.../thumb.webp`).
-  const thumbnailSrc =
-    row.thumbnail_url ??
-    (row.thumbnail_path ? publicGalleryUrl(row.thumbnail_path) : null) ??
-    src.replace(/\/full\.(webp|jpg|jpeg|png)$/i, "/thumb.$1");
-
   return {
     id: row.id,
     src,
-    thumbnailSrc,
+    thumbnailSrc: row.thumbnail_url ?? publicGalleryUrl(row.thumbnail_path),
     alt: row.alt_text,
     caption: row.title ?? row.album ?? "Festival moment",
     tag: row.album ?? (row.media_type === "video" ? "Video" : "Photo"),

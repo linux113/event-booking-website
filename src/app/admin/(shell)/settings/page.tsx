@@ -85,7 +85,7 @@ export default async function SettingsPage() {
           </dl>
         ) : (
           <p className="text-muted text-sm/6">
-            No event row exists yet. Apply the schema seed (see docs) or create one
+            No event row exists yet. Apply <code className="font-mono text-xs">supabase/seed.sql</code> or create one
             before the site can show anything.
           </p>
         )}
@@ -104,15 +104,17 @@ export default async function SettingsPage() {
       <section className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-5">
         <h2 className="text-sm font-semibold tracking-tight">Your access</h2>
         <p className="text-muted text-sm/6">
-          You are signed in as the administrator ({ROLE_LABELS[staff.role]}). Everything below is enforced by the server
-          on every request, and the database enforces the parts that matter most.
+          You are {staff.displayName} ({ROLE_LABELS[staff.role]}). Everything below is enforced by the server on every
+          request, and the database enforces the parts that matter most.
         </p>
         <ul className="text-muted grid gap-1.5 text-xs/5 sm:grid-cols-2">
           <li className="font-semibold text-foreground sm:col-span-2">
             {permissionsFor(staff.role).length} capabilities granted to this role
           </li>
           <li className="sm:col-span-2">
-            Full access: bookings, payments, passes, dates, gallery and settings. No separate staff accounts.
+            {can(staff.role, "staff:manage")
+              ? "Including staff account management."
+              : "Staff account management is limited to super admins."}
           </li>
         </ul>
       </section>

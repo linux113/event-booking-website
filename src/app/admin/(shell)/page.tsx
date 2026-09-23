@@ -34,7 +34,7 @@ type AdminHomeProps = {
  *
  *   * `p_include_revenue` — false without `payments:view`, and the database then
  *     returns NULL for each money column rather than a number to hide;
- *   * `p_include_contact` — false for a contact-less query, so a limited session
+ *   * `p_include_contact` — false without `bookings:view_contact`, so a staff session
  *     never receives a guest's mobile number or amount in the first place.
  *
  * That is why this page does not add anything up, filter anything out, or blank a
@@ -54,23 +54,23 @@ export default async function AdminHomePage({ searchParams }: AdminHomeProps) {
   const denied = Array.isArray(params.denied) ? params.denied[0] : params.denied;
   const message = deniedMessage(denied);
 
-  const result = await getDashboardSnapshot();
+  const result = await getDashboardSnapshot(staff.role);
   const dashboard = result.ok ? result.data : null;
 
-  const sections = sectionsFor();
+  const sections = sectionsFor(staff.role);
   const built = sections.filter((section) => section.built && section.href);
   const planned = sections.filter((section) => !section.built);
 
   const deniedBanner = message ? (
     <p role="alert" className="border-marigold/40 bg-marigold/10 text-marigold-soft rounded-2xl border px-4 py-3 text-sm/6">
-      {message} Reload the page; if it continues, sign out and in again.
+      {message} Ask a super admin if you need access.
     </p>
   ) : null;
 
   const heading = (
     <div className="flex flex-col gap-1">
       <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
-        {`${ROLE_LABELS[staff.role]} dashboard`}
+        {staff.role === "staff" ? "Your shift" : `${ROLE_LABELS[staff.role]} dashboard`}
       </h1>
       <p className="text-muted text-sm/6">
         Signed in as {staff.displayName}
@@ -110,7 +110,7 @@ export default async function AdminHomePage({ searchParams }: AdminHomeProps) {
         {heading}
         <EmptyState
           title="There is nothing to count yet"
-          description="This dashboard reads its numbers from Postgres. Apply the schema (docs/neon-setup.md) and reload."
+          description="This dashboard reads its numbers from Postgres. Apply the migrations in supabase/migrations and the seed file, then reload."
         />
       </>
     );
@@ -222,8 +222,8 @@ export default async function AdminHomePage({ searchParams }: AdminHomeProps) {
           description="Bookings placed each day, with the part of them already confirmed."
           points={series.map((point) => ({
             day: point.day,
-            value: point.bookings ?? 0,
-            secondary: point.confirmed ?? 0,
+            value: point.bookings,
+            secondary: point.confirmed,
           }))}
           formatValue={(value) => String(value)}
           primaryLabel="Bookings"
@@ -294,7 +294,8 @@ export default async function AdminHomePage({ searchParams }: AdminHomeProps) {
         <section className="flex flex-col gap-3">
           <h2 className="text-sm font-semibold tracking-tight">Arriving in the next step</h2>
           <p className="text-muted text-xs/5">
-            These sections are planned; every built section above is available to the administrator.
+            These sections are part of the admin area&apos;s permission model already — your role&apos;s access to them
+            is decided by the same check that guards everything above — but the screens themselves are built next.
           </p>
 
           <ul className="grid gap-3 sm:grid-cols-2">
@@ -332,14 +333,16 @@ export default async function AdminHomePage({ searchParams }: AdminHomeProps) {
             ) : null}
             {can(staff.role, "staff:manage") ? (
               <>
-                <Fact label="Active staff accounts" value={stats.staff_active ?? 0} />
-                <Fact label="Staff accounts in total" value={stats.staff_total ?? 0} />
+                <Fact label="Active staff accounts" value={stats.staff_active} />
+                <Fact label="Staff accounts in total" value={stats.staff_total} />
               </>
             ) : null}
           </dl>
-          <p className="text-muted/80 text-xs/5">
-            One administrator account; no separate staff accounts.
-          </p>
+          {!can(staff.role, "staff:manage") ? (
+            <p className="text-muted/80 text-xs/5">
+              Staff numbers are on the staff accounts page, which a super admin keeps.
+            </p>
+          ) : null}
         </section>
       ) : null}
 

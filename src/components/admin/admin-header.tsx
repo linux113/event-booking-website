@@ -9,8 +9,10 @@ import type { StaffMember } from "@/types/admin";
 /**
  * The admin chrome: who is signed in, what they may open, and the way out.
  *
- * Navigation lists every built admin section. Each page still checks the session
- * on the server before reading anything.
+ * The navigation is built from the same permission table the pages are guarded by,
+ * so a link that appears is a link that will open and a link that would be refused
+ * is simply not rendered. That is convenience, not security — the page checks again
+ * — but it stops the admin area offering doors that slam.
  */
 export function AdminHeader({ staff }: { staff: StaffMember }) {
   const sections = sectionsFor(staff.role).filter((section) => section.built && section.href);
@@ -22,13 +24,13 @@ export function AdminHeader({ staff }: { staff: StaffMember }) {
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="flex flex-col gap-1">
               <p className="text-marigold-soft text-[0.6875rem] font-semibold tracking-[0.22em] uppercase">
-                Admin area
+                Staff area
               </p>
               <Link href={"/admin" as Route} className="text-xl font-bold tracking-tight hover:underline">
                 {staff.displayName}
               </Link>
               <p className="text-muted text-xs">
-                {ROLE_LABELS[staff.role]} · {staff.displayName}
+                {ROLE_LABELS[staff.role]} · {staff.email}
               </p>
             </div>
 

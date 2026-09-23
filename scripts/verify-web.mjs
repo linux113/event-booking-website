@@ -1,8 +1,4 @@
 /**
- * HISTORICAL harness from the Supabase era (customer email, roles, storage doubles).
- * Not part of the post-migration acceptance path; use test:prisma, db:setup:test,
- * typecheck, lint and build instead.
- *
  * End-to-end data verification for the public site.
  *
  *   1. Boots PostgreSQL (PGlite) with the real migrations + seed.

@@ -69,12 +69,13 @@ export function ErrorState({ error, title, action, className }: ErrorStateProps)
             Connection checklist
           </p>
           <ol className="text-muted mt-2 flex flex-col gap-1.5 text-sm/6">
-            <li>1. Create a Neon project and copy the pooled connection string.</li>
+            <li>1. Create a Supabase project and copy its Project URL and anon key.</li>
             <li>
-              2. Set <code className="text-marigold-soft">DATABASE_URL</code> (see{" "}
+              2. Set <code className="text-marigold-soft">NEXT_PUBLIC_SUPABASE_URL</code> and{" "}
+              <code className="text-marigold-soft">NEXT_PUBLIC_SUPABASE_ANON_KEY</code> (see{" "}
               <code className="text-marigold-soft">.env.example</code>).
             </li>
-            <li>3. Apply the Neon schema (docs/neon-setup.md), then seed if you use it.</li>
+            <li>3. Apply the migrations in supabase/migrations, then supabase/seed.sql.</li>
           </ol>
         </div>
       ) : null}

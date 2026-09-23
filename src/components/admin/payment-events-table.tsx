@@ -69,7 +69,7 @@ export function PaymentEventsTable({
                 </td>
 
                 <td className="px-4 py-3 align-top">
-                  <StatusPill label={outcomeLabel(row.outcome ?? "unknown")} tone={outcomeTone(row.outcome ?? "unknown") as StatusTone} />
+                  <StatusPill label={outcomeLabel(row.outcome)} tone={outcomeTone(row.outcome) as StatusTone} />
                 </td>
 
                 {includeContact ? (
@@ -85,7 +85,7 @@ export function PaymentEventsTable({
                 </td>
 
                 <td className="text-muted hidden px-4 py-3 align-top text-xs whitespace-nowrap md:table-cell">
-                  {row.processed_at ? row.processed_at ? formatTimestamp(row.processed_at ?? row.received_at) : "—" : "—"}
+                  {row.processed_at ? formatTimestamp(row.processed_at) : "—"}
                 </td>
 
                 <td className="px-4 py-3 align-top">

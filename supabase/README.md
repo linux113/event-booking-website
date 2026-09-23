@@ -1,10 +1,5 @@
 # Database (Supabase)
 
-> **HISTORICAL.** Written for the Supabase Auth / RLS / Storage era.
-> Runtime today: Neon + Prisma, single admin session cookie, Vercel Blob.
-> The SQL under `migrations/` is still what `npm run db:setup` applies as standard PostgreSQL.
-
-
 PostgreSQL schema for the event booking system. Everything the application reads
 about events, passes and bookings lives here — nothing is hard-coded in the UI.
 

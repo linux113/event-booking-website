@@ -10,7 +10,7 @@ type EmptyStateProps = {
 };
 
 /**
- * Placeholder shown wherever the real content comes from the database and is not
+ * Placeholder shown wherever the real content comes from Supabase and is not
  * available yet. Used instead of mock/dummy data so the UI never lies.
  */
 export function EmptyState({ title, description, action, className }: EmptyStateProps) {

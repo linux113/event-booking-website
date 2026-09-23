@@ -23,7 +23,7 @@ import { formatEventDate, formatInr, formatTimeRange, formatTimestamp } from "@/
  *     gateway's own events, with the times they were received and the outcome the site
  *     recorded. That is the "clearly defined secure administrative process" — re-deliver
  *     the gateway's event, do not type a status.
- *   * **When contact is omitted, the panel arrives with the money and the
+ *   * **A role without `bookings:view_contact` receives a panel with the money and the
  *     contact details already absent.** The sections below render a short explanation
  *     rather than blanks, so nobody is left guessing whether a value is missing or
  *     hidden.
@@ -70,6 +70,7 @@ export function BookingDetailPanel({
           {includeContact ? (
             <>
               <Fact label="Mobile" value={booking.customerMobile ?? "—"} />
+              <Fact label="Email" value={booking.customerEmail ?? "—"} />
             </>
           ) : null}
           <Fact label="Booked" value={formatTimestamp(booking.createdAt)} />
@@ -111,7 +112,7 @@ export function BookingDetailPanel({
           </dl>
         ) : (
           <p className="text-muted border-border/70 bg-background/40 rounded-xl border px-4 py-3 text-xs/5">
-            Amounts and Razorpay IDs are not included. The payment status itself is visible above, because it
+            Amounts and Razorpay IDs are hidden for your role. The payment status itself is visible above, because it
             decides whether a guest can be admitted.
           </p>
         )}

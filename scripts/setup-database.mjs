@@ -8,14 +8,14 @@
  *   DATABASE_URL='…' npm run db:setup -- --mark-all-applied
  *
  * What it does:
- *   1. applies `supabase/prelude.sql` once (minimal `auth.uid()` shim so residual
- *      public read policies still resolve on bare PostgreSQL / Neon);
- *   2. applies every `supabase/migrations/*.sql` (standard PostgreSQL) in filename
- *      order, each in its own transaction and recorded in `setup.applied_migrations`,
- *      stopping at the first failure so the database is never left half-migrated;
+ *   1. applies `supabase/prelude.sql` once (the `auth.users` + `auth.uid()` shim the
+ *      schema expects — on Supabase that schema is part of the platform);
+ *   2. applies every `supabase/migrations/*.sql` in filename order, each in its own
+ *      transaction and recorded in `setup.applied_migrations`, stopping at the first
+ *      failure so the database is never left half-migrated;
  *   3. optionally applies `supabase/seed.sql`;
- *   4. asserts the end state — table/policy counts, public-read hardening, and that
- *      a stranger is refused on bookings.
+ *   4. asserts the end state — counts, RLS flags, the hardening policy, and two
+ *      boundaries a stranger must not cross.
  *
  * Re-running is safe and incremental: whatever is already recorded is skipped, and a
  * file whose contents changed since it was applied is reported. Migrations are

@@ -10,8 +10,8 @@ import type { CatalogueError, CatalogueResult } from "@/types/catalogue";
  * submitted wants to know what happened to it, not to be sent somewhere.
  *
  *   400 invalid-input     the payload failed validation, or was not JSON
- *   401 not-authorized    no admin session
- *   403 forbidden         the session is fine; this action is not allowed
+ *   401 not-authorized    no staff session
+ *   403 forbidden         the session is fine; the role cannot change this
  *   409 refused           the database refused the change (a rule, not a bug)
  *   503 not-configured    the deployment has no database credentials
  *   500 server-error      anything unexpected
@@ -43,7 +43,7 @@ export function catalogueError<T>(
 
 /** The two failures every management endpoint shares. */
 export function unauthorized<T>(): NextResponse {
-  return catalogueError<T>("not-authorized", "Sign in as the event admin to change this.");
+  return catalogueError<T>("not-authorized", "Sign in as event staff to change this.");
 }
 
 export function forbidden<T>(message: string): NextResponse {

@@ -35,7 +35,7 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   if (!can(staff.role, "gallery:view")) {
-    return forbidden("You cannot open the gallery.");
+    return forbidden("Your role cannot open the gallery.");
   }
 
   const url = new URL(request.url);

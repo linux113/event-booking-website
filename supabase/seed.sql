@@ -1,5 +1,5 @@
 -- =============================================================================
--- Savriya Seth Events — initial seed data
+-- Garba Nights — initial seed data
 --
 -- Idempotent: every row has a hard-coded uuid and an `on conflict ... do update`
 -- branch, so re-running this file never duplicates or orphans anything.
@@ -26,7 +26,7 @@ insert into public.events (
 values (
   'e0000000-0000-4000-8000-000000000001',
   'navratri-2026-jaipur',
-  'Garba Night',
+  'Garba Nights Navratri Utsav',
   'Nine nights of garba, dandiya and non-stop beats',
   'A nine-night Navratri and Dandiya festival with live dhol, garba raas rounds, dandiya circles, an anchor, DJ, LED wall, videographer and drone coverage. Family section and food court on site.',
   'My Village Garden',
@@ -158,8 +158,11 @@ on conflict (id) do update set
 --
 -- gallery       → published photos/videos come from the first shoot; seeding
 --                 placeholder URLs would put non-existent files on the site.
--- admin         → configured only via env (ADMIN_USERNAME, ADMIN_PASSWORD_HASH,
---                 AUTH_SECRET). The admin_users table no longer exists.
+-- admin_users   → rows require a matching auth.users row. Create the owner in
+--                 Supabase Auth first, then insert the allow-list row, e.g.:
+--
+--                   insert into public.admin_users (user_id, email, full_name, role)
+--                   values ('<auth-user-uuid>', 'you@example.com', 'Your Name', 'owner');
 --
 -- bookings,
 -- digital_passes,

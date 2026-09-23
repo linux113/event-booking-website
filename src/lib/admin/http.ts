@@ -10,7 +10,7 @@ import type { ScanApiError, ScanApiResponse } from "@/types/admin";
  * from "the gate is broken" without parsing prose:
  *
  *   400 invalid-input     the body was not JSON, or carried no token
- *   401 not-authorized    no valid admin session
+ *   401 not-authorized    no staff session (or the account is no longer staff)
  *   413 —                 a payload that cannot be a scanned code
  *   503 not-configured    the deployment has no database credentials
  *   500 server-error      anything unexpected
@@ -49,9 +49,9 @@ export function scanServiceFailure(error: { kind: string; message: string }): Ne
   return scanError("server-error", error.message);
 }
 
-/** 401: the caller has no admin session. */
+/** 401: the caller has no staff session. */
 export function scanUnauthorized(): NextResponse<ScanApiResponse> {
-  return scanError("not-authorized", "Sign in as the event admin to scan passes.");
+  return scanError("not-authorized", "Sign in as event staff to scan passes.");
 }
 
 /**

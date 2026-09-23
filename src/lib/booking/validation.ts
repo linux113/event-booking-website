@@ -163,7 +163,7 @@ export type BookingValidationResult =
  * Server-side validation of a raw request body.
  *
  * Returns the *normalised* input (trimmed name, `+91` mobile, lower-case email,
- * integer quantity) so the caller never has to sanitise again. Customer email is not collected. Unknown fields —
+ * integer quantity) so the caller never has to sanitise again. Unknown fields —
  * including any price a client might try to inject — are dropped.
  */
 export function validateBookingRequest(payload: unknown): BookingValidationResult {
@@ -203,6 +203,14 @@ export function validateBookingRequest(payload: unknown): BookingValidationResul
 
   if (mobileError) {
     fieldErrors.customerMobile = mobileError;
+  }
+
+  const emailRaw = typeof input.customerEmail === "string" ? input.customerEmail : "";
+  const emailError = validateEmail(emailRaw);
+  const customerEmail = normaliseEmail(emailRaw);
+
+  if (emailError) {
+    fieldErrors.customerEmail = emailError;
   }
 
   const quantity = parsePositiveInteger(
@@ -251,6 +259,7 @@ export function validateBookingRequest(payload: unknown): BookingValidationResul
       passCategoryId: passCategoryId as string,
       customerName,
       customerMobile: customerMobile as string,
+      customerEmail,
       quantity: quantity as number,
       numberOfPeople: numberOfPeople as number,
       idempotencyKey,

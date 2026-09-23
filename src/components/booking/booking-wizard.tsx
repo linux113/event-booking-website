@@ -14,6 +14,7 @@ import { createIdempotencyKey } from "@/lib/booking/idempotency";
 import { loadRazorpayCheckout, openRazorpayCheckout } from "@/lib/payments/checkout";
 import {
   parsePositiveInteger,
+  validateEmail,
   validateMobile,
   validateName,
   validatePeople,
@@ -79,6 +80,7 @@ type BookingWizardProps = {
 const EMPTY_DETAILS: BookingDetailsDraft = {
   customerName: "",
   customerMobile: "",
+  customerEmail: "",
   quantity: "1",
   numberOfPeople: "1",
 };
@@ -86,6 +88,7 @@ const EMPTY_DETAILS: BookingDetailsDraft = {
 const DETAIL_FIELDS: readonly (keyof BookingFieldErrors)[] = [
   "customerName",
   "customerMobile",
+  "customerEmail",
   "quantity",
   "numberOfPeople",
 ];
@@ -211,6 +214,12 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
       fieldErrors.customerMobile = mobileError;
     }
 
+    const emailError = validateEmail(details.customerEmail);
+
+    if (emailError) {
+      fieldErrors.customerEmail = emailError;
+    }
+
     const quantityError = validateQuantity(details.quantity, pass?.maxPerBooking ?? 1);
 
     if (quantityError) {
@@ -277,6 +286,7 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
       passCategoryId: pass?.id ?? "",
       customerName: details.customerName.trim(),
       customerMobile: details.customerMobile.trim(),
+      customerEmail: details.customerEmail.trim(),
       quantity: quantity ?? 0,
       numberOfPeople: numberOfPeople ?? 0,
       idempotencyKey: idempotencyKey.current,

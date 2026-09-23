@@ -8,14 +8,15 @@ import { ButtonElement } from "@/components/ui/button";
 import { TextField } from "@/components/ui/field";
 
 /**
- * The administrator sign-in form.
+ * The staff sign-in form.
  *
- * Admin email and password go to the server action, where they are checked
- * against `ADMIN_EMAIL` / `ADMIN_PASSWORD_HASH` (scrypt). Nothing client-side
- * stores or logs the password.
+ * Deliberately plain: email, password, submit. The password goes straight to
+ * Supabase Auth from the server action — it is never stored, logged or sent
+ * anywhere else, and the form shows one honest error for a wrong pair or an account
+ * that is not on the allow-list.
  *
- * `next` rides along as a hidden field so the page the visitor was heading for
- * is where they land after signing in.
+ * `next` rides along as a hidden field so the gate a staff member was heading for
+ * is the page they land on after signing in.
  */
 export function SignInForm({ next }: { next: string }) {
   const [email, setEmail] = useState("");
@@ -27,12 +28,12 @@ export function SignInForm({ next }: { next: string }) {
       <input type="hidden" name="next" value={next} />
 
       <TextField
-        label="Admin email"
+        label="Staff email"
         name="email"
         type="email"
-        autoComplete="username"
         inputMode="email"
-        placeholder="admin@example.com"
+        autoComplete="email"
+        placeholder="you@example.com"
         value={email}
         onChange={setEmail}
         required

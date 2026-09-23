@@ -1,11 +1,5 @@
 # Connect this project to a free Supabase database
 
-> **HISTORICAL — pre-migration Supabase guide.** The app no longer uses Supabase
-> (Auth, PostgREST, Storage). For a new deploy follow [`docs/neon-setup.md`](./neon-setup.md)
-> and [`docs/deploy-vercel.md`](./deploy-vercel.md) instead. This file is kept only as a
-> record of the old path.
-
-
 Everything below is the free tier: **Supabase Free** ($0), **Razorpay test mode** (free
 forever), and the app itself. The only line item that ever costs money is hosting a
 **ticket-selling** site (see §7) — nothing in this guide.

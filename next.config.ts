@@ -25,7 +25,7 @@ const nextConfig: NextConfig = {
   // a permissions policy that hands out the camera — which the scanner needs — and
   // nothing else.
   //
-  // Frame protection is deliberately scoped to the admin area. The public site is
+  // Frame protection is deliberately scoped to the staff area. The public site is
   // meant to be embeddable (a preview pane, a venue's own portal), while a framed
   // gallery or pass screen is exactly how an admin gets tricked into clicking
   // "Delete": the frame *is* our origin, so no cookie attribute stops that click.
@@ -49,22 +49,54 @@ const nextConfig: NextConfig = {
     ];
   },
 
-  // Remote images: public gallery files live on Vercel Blob (and may be on any
-  // `public.blob.vercel-storage.com` project). The path restriction is not used
-  // for Blob (keys are not path-prefixed on the host), so hosts are limited to
-  // the well-known Blob CDN domains.
+  // Remote images come from Supabase Storage. The wildcard covers every project
+  // ref (the ref is not known at build time) and is limited to the public
+  // storage path, so nothing else can be proxied through the image optimiser.
   images: {
-    remotePatterns: [
-      {
-        protocol: "https",
-        hostname: "**.public.blob.vercel-storage.com",
-      },
-      {
-        protocol: "https",
-        hostname: "**.blob.vercel-storage.com",
-      },
-    ],
+    remotePatterns: storagePatterns(),
   },
 };
+
+/**
+ * Where optimised images may be fetched from.
+ *
+ * Two entries at most, and both are as narrow as the pattern language allows:
+ *
+ *   1. **Any hosted Supabase project**, limited to the public storage path — the
+ *      project ref is not known at build time, but the path is always ours.
+ *   2. **The project this deployment is configured with**, whatever it is. That is
+ *      what makes a self-hosted Supabase, a local stack, or an automated check
+ *      pointed at a test double work without weakening the rule above: the host
+ *      comes from `NEXT_PUBLIC_SUPABASE_URL`, and the path is still restricted.
+ */
+function storagePatterns(): NonNullable<NextConfig["images"]>["remotePatterns"] {
+  const patterns: NonNullable<NextConfig["images"]>["remotePatterns"] = [
+    {
+      protocol: "https",
+      hostname: "**.supabase.co",
+      pathname: "/storage/v1/object/public/**",
+    },
+  ];
+
+  const configured = process.env.NEXT_PUBLIC_SUPABASE_URL;
+
+  if (configured) {
+    try {
+      const url = new URL(configured);
+
+      patterns.push({
+        protocol: url.protocol.replace(":", "") as "http" | "https",
+        hostname: url.hostname,
+        port: url.port || undefined,
+        pathname: "/storage/v1/object/public/**",
+      });
+    } catch {
+      // A URL that cannot be parsed is a deployment problem the app reports at
+      // runtime (`src/config/env.ts`); the build should not fail over it.
+    }
+  }
+
+  return patterns;
+}
 
 export default nextConfig;

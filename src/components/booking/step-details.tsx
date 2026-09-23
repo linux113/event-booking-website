@@ -64,6 +64,21 @@ export function StepDetails({
           required
           disabled={disabled}
         />
+
+        <TextField
+          label="Email address"
+          name="customerEmail"
+          type="email"
+          inputMode="email"
+          value={details.customerEmail}
+          onChange={(value) => onChange("customerEmail", value)}
+          error={errors.customerEmail}
+          hint="Where the booking confirmation is sent."
+          autoComplete="email"
+          placeholder="you@example.com"
+          required
+          disabled={disabled}
+        />
       </div>
 
       <div className="border-border bg-surface/50 flex flex-col gap-5 rounded-2xl border p-5">

@@ -1,7 +1,8 @@
 import type { NextResponse } from "next/server";
 
-import { readScanBody, scanJson, scanServiceFailure, scanUnauthorized } from "@/lib/admin/http";
+import { readScanBody, scanError, scanJson, scanServiceFailure, scanUnauthorized } from "@/lib/admin/http";
 import { getStaffMember } from "@/lib/auth/staff";
+import { can } from "@/lib/auth/permissions";
 import { gateNight } from "@/lib/gate/night";
 import { checkInPass } from "@/lib/services/check-in";
 import type { ScanApiResponse } from "@/types/admin";
@@ -32,6 +33,11 @@ export async function POST(request: Request): Promise<NextResponse<ScanApiRespon
     return scanUnauthorized();
   }
 
+  if (!can(staff.role, "scanner:use")) {
+    // 403, not 401: the session is perfectly good, this role simply cannot work the
+    // gate. The request hook refuses this too — this is the second lock.
+    return scanError("forbidden", "Your role cannot check passes in.");
+  }
 
   const body = readScanBody(await request.text());
 
@@ -42,7 +48,7 @@ export async function POST(request: Request): Promise<NextResponse<ScanApiRespon
   const result = await checkInPass({
     token: body.token,
     gateDate: gateNight(),
-    staffUserId: null,
+    staffUserId: staff.userId,
     gate: body.gate,
   });
 

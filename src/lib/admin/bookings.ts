@@ -2,7 +2,7 @@
  * Booking management: the vocabulary the /admin/bookings screen, its CSV export and
  * the verification harness all share.
  *
- * This module is deliberately pure — no `server-only`, no framework import, nothing
+ * This module is deliberately pure — no `server-only`, no Supabase import, nothing
  * that touches the network — for two reasons. It is the one place that decides what a
  * search *means* (which query strings are honoured, which are dropped, how a page of
  * results is framed), so it has to be readable and testable on its own; and the same
@@ -60,6 +60,7 @@ export interface BookingRow {
   reference: string;
   customerName: string;
   customerMobile: string | null;
+  customerEmail: string | null;
   eventName: string;
   eventDate: string;
   startTime: string | null;
@@ -122,6 +123,7 @@ export interface BookingDetail {
   reference: string;
   customerName: string;
   customerMobile: string | null;
+  customerEmail: string | null;
   eventName: string;
   eventSlug: string;
   venueName: string | null;
@@ -503,9 +505,9 @@ function quoteCsv(text: string): string {
 /**
  * The export's columns.
  *
- * `contact: true` marks the contact/amount columns (always true for the single admin;
+ * `contact: true` marks the columns that only a role with `bookings:view_contact` may
  * export. They are *not written at all* for anyone else — the header row itself omits
- * them, so a partial export is never an empty shell that hints at
+ * them, so a staff member's file is not a file full of empty columns that hints at
  * what it is missing.
  */
 interface ExportColumn {
@@ -518,6 +520,7 @@ const EXPORT_COLUMNS: readonly ExportColumn[] = [
   { header: "Booking ID", contact: false, value: (row) => row.reference },
   { header: "Customer", contact: false, value: (row) => row.customerName },
   { header: "Mobile", contact: true, value: (row) => row.customerMobile },
+  { header: "Email", contact: true, value: (row) => row.customerEmail },
   { header: "Event", contact: false, value: (row) => row.eventName },
   { header: "Date", contact: false, value: (row) => row.eventDate },
   { header: "Pass", contact: false, value: (row) => row.passName },
@@ -535,7 +538,7 @@ const EXPORT_COLUMNS: readonly ExportColumn[] = [
   { header: "Razorpay Payment ID", contact: true, value: (row) => row.razorpayPaymentId },
 ];
 
-/** The header row of an export. */
+/** The header row of an export, for the caller's role. */
 export function csvHeader(includeContact: boolean): string[] {
   return EXPORT_COLUMNS.filter((column) => includeContact || !column.contact).map((column) => column.header);
 }
@@ -577,5 +580,5 @@ export function exportScopeNote(includeContact: boolean, rowCount: number): stri
 
   return includeContact
     ? `Download all ${rows} matching the current filters, with contact details and amounts.`
-    : `Download all ${rows} matching the current filters. Contact details and amounts are not included.`;
+    : `Download all ${rows} matching the current filters. Contact details and amounts are not included for your role.`;
 }

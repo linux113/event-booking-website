@@ -25,7 +25,7 @@ import { collectPassesForExport } from "@/lib/services/admin-operations";
  *      signed-in visitor who is not staff → `403`. The request hook refuses both before
  *      this handler runs — this is the lock that would still hold if a route were added
  *      without it.
- *   2. **`includeContact` decides the shape of the file.** Without contact columns the
+ *   2. **The role decides the shape of the file.** Without `bookings:view_contact` the
  *      Mobile, Amount and Currency columns are absent from the header row, and the rows
  *      behind them were never fetched: the query ran with `p_include_contact = false`.
  *   3. **The token is never in the file.** There is no column for `qr_token` and no
@@ -40,7 +40,7 @@ function jsonError(status: number, kind: string, message: string): Response {
   return Response.json({ ok: false, error: { kind, message } }, { status, headers: { "cache-control": "no-store" } });
 }
 
-/** The door list as text, with the columns the caller may have. */
+/** The door list as text, with the columns the caller's role may have. */
 export function passesToCsv(rows: readonly PassExportRow[], includeContact: boolean): string {
   const columns = PASS_EXPORT_COLUMNS.filter((column) => includeContact || !column.contact);
   const lines = [columns.map((column) => csvCell(column.header)).join(",")];
@@ -60,7 +60,7 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   if (!can(staff.role, "passes:view")) {
-    return jsonError(403, "forbidden", "You cannot read the pass list.");
+    return jsonError(403, "forbidden", "Your role cannot read the pass list.");
   }
 
   const params: SearchParamsInput = {};
@@ -71,7 +71,7 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   const query = parsePassQuery(params);
-  const result = await collectPassesForExport(query);
+  const result = await collectPassesForExport(query, staff.role);
 
   if (!result.ok) {
     return jsonError(
