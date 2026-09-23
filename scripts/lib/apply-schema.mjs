@@ -231,15 +231,15 @@ export async function verifySchema(db) {
   `);
 
   add(
-    "11 public tables, 26 policies, RLS on every table",
-    counts.tables === 11 && counts.policies === 26 && counts.rls_on === 11,
+    "10 public tables, 6 policies (public reads only), RLS on every table",
+    counts.tables === 10 && counts.policies === 6 && counts.rls_on === 10,
     JSON.stringify(counts),
   );
-  add("44 SECURITY DEFINER functions", counts.definer_fns === 44, `${counts.definer_fns} found`);
+  add("40 SECURITY DEFINER functions", counts.definer_fns === 40, `${counts.definer_fns} found`);
   add("the identity shim answers (auth.uid() is callable)", counts.uid_present === true);
   add(
     "no leftover tables in public from the setup bookkeeping",
-    counts.tables === 11 || counts.tables === 12,
+    counts.tables === 10 || counts.tables === 11,
     `public has ${counts.tables} tables`,
   );
 
@@ -281,11 +281,20 @@ export async function verifySchema(db) {
 }
 
 async function hasHardening(db) {
+  // The posture the single-admin migration leaves behind: RLS is on everywhere,
+  // the only policies left are the six public reads, and nothing exposes a pass,
+  // a payment or a booking to the anon/authenticated roles.
   const [row] = await db.query(`
-    select count(*)::int as n
-      from pg_policies
-     where schemaname = 'public' and tablename = 'bookings' and policyname = 'bookings_admin_update'
+    select
+      (select count(*)::int from pg_policies where schemaname = 'public')                    as policies,
+      (select count(*)::int from pg_policies
+        where schemaname = 'public'
+          and tablename in ('bookings', 'digital_passes', 'check_ins'))                      as exposed,
+      (select count(*)::int from pg_class c join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity)                 as rls_on,
+      (select count(*)::int from pg_class c join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = 'public' and c.relkind = 'r')                                      as tables
   `);
 
-  return row.n === 1;
+  return row.policies === 6 && row.exposed === 0 && row.rls_on === row.tables;
 }

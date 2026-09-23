@@ -66,7 +66,7 @@ const fresh = async () => {
 const sections = listSections({ root: REPO, seed: true });
 const total = sections.length;
 
-console.log(`\n${total} sections in a full run (prelude + 16 migrations + seed)`);
+console.log(`\n${total} sections in a full run (prelude + every migration + seed)`);
 
 section("1 · a fresh database");
 const { pg, db } = await fresh();
@@ -97,7 +97,7 @@ const [afterRerun] = (
 ).rows;
 check(
   "the data is untouched by the re-run",
-  afterRerun.events === 1 && afterRerun.tables === 11,
+  afterRerun.events === 1 && afterRerun.tables === 10,
   JSON.stringify(afterRerun),
 );
 

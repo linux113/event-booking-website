@@ -35,7 +35,7 @@ add them *before* the first production build — or redeploy after adding them.
 | `SUPABASE_SERVICE_ROLE_KEY` | the **secret** key `sb_secret_…` (legacy `service_role` key also works) — server-only, never paste it anywhere public |
 
 If the database does not exist yet: `docs/connect-free-supabase.md` steps 1–2 (create the
-project, run the 16 migrations in filename order, then `seed.sql`). Do that first, or the
+project, run the migrations in filename order, then `seed.sql`). Do that first, or the
 site will deploy and show nothing.
 
 ---

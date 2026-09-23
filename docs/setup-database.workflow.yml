@@ -1,106 +1,127 @@
-# ---------------------------------------------------------------------------
-# Copy this file to  .github/workflows/setup-database.yml  to enable it.
+# Copy this file to .github/workflows/setup-database.yml to let Actions keep the
+# Neon database in step with supabase/ — it applies the prelude, the migrations and
+# the seed through the same scripts/setup-database.mjs the local path uses, then
+# prints the verification report.
 #
-# It lives here rather than in place because GitHub refuses to let an app push
-# `.github/workflows/**` without the `workflows` permission — and no workflow file
-# is worth an app permission it does not otherwise need. Two ways to install it:
+# It needs one repository secret, NEON_DATABASE_URL, holding the *direct* connection
+# string (Neon → Connect → Direct connection, without `-pooler`).
 #
-#   GitHub UI   repo → Actions → "New workflow" → "set up a workflow yourself",
-#               delete the sample, paste this file, commit.
-#   Locally     mkdir -p .github/workflows
-#               cp docs/setup-database.workflow.yml .github/workflows/setup-database.yml
-#               git add .github/workflows/setup-database.yml && git commit -m "ci: database setup" && git push
-#
-# Then: repo → Settings → Secrets and variables → Actions → New repository secret
-#       name NEON_DATABASE_URL, value = the DIRECT (non-pooler) connection string.
-#       Actions → Set up database → Run workflow.
-# ---------------------------------------------------------------------------
+# (It lives in docs/ rather than .github/workflows/ because only the repository owner
+# can add workflow files: GitHub refuses App-authored pushes to that path.)
 name: Set up database
 
-# Applies supabase/prelude.sql, the 16 migrations and (optionally) the seed to a
-# hosted PostgreSQL — Neon, or any Postgres.
+# Applies supabase/prelude.sql, every migration and (optionally) the seed to the Neon
+# database, then prints the verification report. This is exactly what `npm run db:setup`
+# does locally — it just runs somewhere whose network can reach Neon.
 #
-# Manual only, on purpose: it writes to a real database, so it must never run on a
-# push. Run it from the Actions tab, or: gh workflow run "Set up database" -f seed=true
+# The connection string lives in the repository secret **NEON_DATABASE_URL**. Use the
+# *direct* string (Neon → Connect → Direct connection), not the `-pooler` one: schema
+# changes should not travel through a connection pooler. The script masks it in its
+# output and the secret is never echoed.
 #
-# Reads the connection string from the NEON_DATABASE_URL repository secret. GitHub
-# masks secrets in logs, and scripts/setup-database.mjs masks the password in its own
-# output as well, so neither the secret nor the log leaks it.
+# Runs on a manual dispatch from the Actions tab, or on a push that touches supabase/ —
+# a migration that lands in the repository is a migration the database should have.
+#
+# What a first run against an empty database does: prelude → 18 migrations → seed, in
+# per-file transactions, recorded in setup.applied_migrations. Running it again applies
+# only what is new (or nothing), which is why a push is a safe trigger.
 
 on:
   workflow_dispatch:
     inputs:
       seed:
-        description: "Also load supabase/seed.sql (one event, nine nights, five pass types)"
+        description: Also apply supabase/seed.sql (idempotent)
         type: boolean
-        default: false
+        default: true
       verify_only:
-        description: "Only check what is already there; apply nothing"
+        description: Apply nothing — print the verification report only
         type: boolean
         default: false
+  push:
+    paths:
+      - "supabase/**"
+      - ".github/workflows/setup-database.yml"
 
-permissions:
-  contents: read
-
+# One database: never let two of these run against it at once.
 concurrency:
-  group: setup-database
+  group: database-setup
   cancel-in-progress: false
 
 jobs:
-  apply:
-    name: Apply the schema
+  setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
     steps:
-      - name: Check out the repository
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      - name: Node 22
-        uses: actions/setup-node@v7
+      - uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Check the secret is set
+      # A missing secret is a setup step someone forgot, not a failure of the schema, so
+      # this notices and stops instead of painting the run red.
+      - name: Is NEON_DATABASE_URL configured?
+        id: credentials
         env:
-          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          CONNECTION: ${{ secrets.NEON_DATABASE_URL }}
         run: |
-          if [ -z "$DATABASE_URL" ]; then
-            echo "::error title=Missing secret::Add NEON_DATABASE_URL under Settings → Secrets and variables → Actions → New repository secret. Use the DIRECT (non-pooler) connection string, including ?sslmode=require."
-            exit 1
-          fi
-          echo "The secret is set — $(printf '%s' "$DATABASE_URL" | sed -E 's#://([^:/@]+):[^@]*@#://\1:***@#')"
-
-      - name: Apply the prelude and the migrations
-        if: ${{ inputs.verify_only == false }}
-        env:
-          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-        run: |
-          if [ "${{ inputs.seed }}" = "true" ]; then
-            npm run db:setup -- --seed
+          if [ -z "$CONNECTION" ]; then
+            echo "::notice title=Database setup skipped::Add the repository secret NEON_DATABASE_URL (Neon → Connect → Direct connection, without -pooler) and run this workflow again."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
           else
-            npm run db:setup
+            echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Verify only
-        if: ${{ inputs.verify_only == true }}
+      # The scripts import node builtins and `postgres` only — they do not need the app's
+      # dependencies, so this installs one package instead of the whole tree.
+      - name: Install the driver
+        if: ${{ steps.credentials.outputs.ready == 'true' }}
+        run: npm install --no-save --no-audit --no-fund postgres@3.4.9
+
+      # The verification below assumes the anon role inside a transaction to prove the
+      # public boundary. PostgreSQL 16+ gives a CREATEROLE user only ADMIN OPTION on the
+      # roles it created, so without this the check fails on `set local role anon` before
+      # it reaches a table. Idempotent — safe on every run.
+      - name: Make the app roles assumable
+        if: ${{ steps.credentials.outputs.ready == 'true' }}
         env:
           DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
-        run: npm run db:setup -- --verify-only
-
-      - name: What to look at next
-        if: ${{ always() }}
         run: |
+          node --input-type=module -e '
+            import postgres from "postgres";
+            const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+            await sql.unsafe("grant anon, authenticated, service_role to current_user");
+            await sql.end();
+            console.log("anon, authenticated and service_role are assumable ✓");
+          '
+
+      - name: Apply the schema
+        if: ${{ steps.credentials.outputs.ready == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.verify_only) }}
+        env:
+          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          SEED: ${{ github.event_name != 'workflow_dispatch' || inputs.seed }}
+        run: |
+          if [ "$SEED" = "true" ]; then
+            node scripts/setup-database.mjs --seed
+          else
+            node scripts/setup-database.mjs
+          fi
+
+      - name: Verify
+        if: ${{ steps.credentials.outputs.ready == 'true' }}
+        env:
+          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+        run: |
+          node scripts/setup-database.mjs --verify-only
           {
-            echo "### Database setup finished"
             echo ""
-            echo "The step above is the check: 11 public tables, 26 policies, RLS on all 11,"
-            echo "44 SECURITY DEFINER functions, the identity shim answering, a stranger able to"
-            echo "read the published event and refused on \`bookings\`."
+            echo "### Expected on the current schema"
             echo ""
-            echo "Re-run with **verify_only** ticked to check without touching anything."
-            echo "Re-run with **seed** ticked to load the demo event, nights and pass types."
+            echo "| what | value |"
+            echo "| --- | --- |"
+            echo "| public tables | 10 |"
+            echo "| policies (public reads only) | 6 |"
+            echo "| tables with RLS on | 10 |"
+            echo "| security-definer functions | 40 |"
+            echo "| recorded sections | 20 (prelude + 18 migrations + seed) |"
+            echo "| seed | 1 event, 9 nights, 5 passes, 6 highlights, 6 features |"
           } >> "$GITHUB_STEP_SUMMARY"

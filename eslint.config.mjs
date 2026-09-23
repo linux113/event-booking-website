@@ -18,6 +18,10 @@ const eslintConfig = defineConfig([
     // nor `build/**` reaches inside it — without this line, a lint run after a
     // verification run reports thousands of errors from bundles nobody wrote.
     ".next-verify/**",
+    // Prisma generates the typed client into src/generated/prisma on every build
+    // (`npm run db:generate`). It is machine-written TypeScript, it is gitignored,
+    // and linting it reports style rules nobody can fix.
+    "src/generated/**",
   ]),
 ]);
 

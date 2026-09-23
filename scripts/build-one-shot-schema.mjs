@@ -5,7 +5,7 @@
  *
  *   node scripts/build-one-shot-schema.mjs
  *
- * Order: the prelude (auth.users + auth.uid()), the 16 migrations in filename order,
+ * Order: the prelude (auth.users + auth.uid()), every migration in filename order,
  * and — with `--seed` — supabase/seed.sql. The batch is wrapped in a single
  * transaction, so a failure anywhere leaves the database exactly as it was, not
  * half-migrated. Nothing in the migrations needs to run outside a transaction
