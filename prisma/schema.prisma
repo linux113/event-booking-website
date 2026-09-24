@@ -178,11 +178,14 @@ model GalleryItem {
   title         String?
   description   String?
   mediaType     String    @default("image") @map("media_type")
-  /// Vercel Blob pathname (object key). Binaries are never stored in Postgres.
   storagePath   String?   @map("storage_path")
   url           String?
   thumbnailUrl  String?   @map("thumbnail_url")
   thumbnailPath String?   @map("thumbnail_path")
+  /// Optimized WebP bytes for full gallery image, stored in Neon bytea.
+  imageData     Bytes?    @map("image_data") @db.ByteA
+  /// Optimized WebP bytes for gallery thumbnail, stored in Neon bytea.
+  thumbnailData Bytes?    @map("thumbnail_data") @db.ByteA
   altText       String    @map("alt_text")
   capturedOn    DateTime? @map("captured_on") @db.Date
   status        String    @default("draft")

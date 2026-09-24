@@ -122,11 +122,12 @@ export interface GalleryRow {
   title: string | null;
   description: string | null;
   media_type: MediaType;
-  /** Vercel Blob key (not a public URL). */
   storage_path: string | null;
   thumbnail_path: string | null;
   url: string | null;
   thumbnail_url: string | null;
+  image_data?: unknown;
+  thumbnail_data?: unknown;
   width: number | null;
   height: number | null;
   byte_size: number | null;

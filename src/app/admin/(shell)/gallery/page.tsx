@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 
 import { GalleryPanel } from "@/components/admin/gallery-panel";
 import { ErrorState } from "@/components/ui/error-state";
-import { isBlobConfigured } from "@/config/env";
 import { requirePermission } from "@/lib/auth/guard";
 import { can } from "@/lib/auth/permissions";
 import { listGalleryItems } from "@/lib/services/gallery-admin";
@@ -37,7 +36,7 @@ export default async function AdminGalleryPage() {
   }
 
   const canEdit = can(staff.role, "gallery:edit");
-  const storageConfigured = isBlobConfigured();
+  const storageConfigured = true;
 
   return (
     <>

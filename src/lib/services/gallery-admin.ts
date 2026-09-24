@@ -1,35 +1,14 @@
 import "server-only";
 
 import { refusalFromDatabase } from "@/lib/admin/catalogue";
-import { GALLERY_STORAGE_SETUP_MESSAGE, titleFromFileName } from "@/lib/admin/gallery";
+import { titleFromFileName } from "@/lib/admin/gallery";
 import { prepareGalleryImage } from "@/lib/gallery/images";
 import { publicGalleryUrl } from "@/lib/gallery/paths";
-import { storageFailureMessage } from "@/lib/gallery/storage-errors";
-import {
-  deleteObject,
-  downloadObject,
-  isStorageConfigured,
-  putObject,
-  type StoredObject,
-} from "@/lib/gallery/storage";
 import { isDatabaseConfigured } from "@/config/env";
 import { DatabaseError, rpc, sql } from "@/lib/db/client";
 import { fail, ok, type Result } from "@/lib/services/result";
 import type { CatalogueResult } from "@/types/catalogue";
 import type { AdminGalleryItem, GalleryFormValues, GalleryStatus } from "@/types/gallery";
-
-/**
- * The gallery's data access — the only place that touches both the table and
- * object storage (Vercel Blob).
- *
- * **The row decides whether a file is public.** Blobs live under unguessable
- * keys; only `status = 'published'` rows expose a URL through the public
- * gallery and mappers. Draft previews stream through the admin preview route.
- *
- * **The database is asked first, storage second.** Publishing flips the row;
- * deleting removes the row then the files. A failed delete is logged — an
- * orphaned object beats a row pointing at a deleted file.
- */
 
 type WriteOutcome<T> = CatalogueResult<T>;
 
@@ -79,10 +58,9 @@ function toItem(row: GalleryRow): AdminGalleryItem {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     isPublic,
-    url: isPublic ? row.url ?? (row.storage_path ? publicGalleryUrl(row.storage_path) : null) : null,
+    url: isPublic ? row.url ?? publicGalleryUrl(row.item_id, "full") : null,
     thumbnailUrl: isPublic
-      ? row.thumbnail_url ??
-        (row.thumbnail_path ? publicGalleryUrl(row.thumbnail_path) : row.storage_path ? publicGalleryUrl(row.storage_path) : null)
+      ? row.thumbnail_url ?? publicGalleryUrl(row.item_id, "thumb")
       : null,
   };
 }
@@ -178,24 +156,11 @@ export interface UploadGalleryInput {
 }
 
 /**
- * Take one upload: optimise it, store it, and record the row.
- *
- * Order: optimise → upload both variants → insert the draft row → re-read.
- * If the insert fails, the objects are removed so a refused upload leaves no litter.
+ * Take one upload: optimise it and store bytes directly in database bytea columns.
  */
 export async function uploadGalleryItem(input: UploadGalleryInput): Promise<WriteOutcome<AdminGalleryItem>> {
   if (!isDatabaseConfigured()) {
     return notConfigured();
-  }
-
-  if (!isStorageConfigured()) {
-    return {
-      ok: false,
-      error: {
-        kind: "not-configured",
-        message: GALLERY_STORAGE_SETUP_MESSAGE,
-      },
-    };
   }
 
   const prepared = await prepareGalleryImage({ bytes: input.bytes, contentType: input.contentType });
@@ -210,46 +175,19 @@ export async function uploadGalleryItem(input: UploadGalleryInput): Promise<Writ
   const image = prepared.image;
   const id = crypto.randomUUID();
   const eventId = await defaultEventId();
-  // Key prefix embeds the item id — keys are not guessable and are stable for this item.
-  const storagePath = `gallery/${id}/full.webp`;
-  const thumbnailPath = `gallery/${id}/thumb.webp`;
-
-  let fullUpload: StoredObject;
-  let thumbUpload: StoredObject;
-
-  try {
-    [fullUpload, thumbUpload] = await Promise.all([
-      putObject(storagePath, image.full.data, { contentType: image.full.contentType }),
-      putObject(thumbnailPath, image.thumb.data, { contentType: image.thumb.contentType }),
-    ]);
-  } catch (error) {
-    console.error("[gallery] upload to storage failed:", error);
-    // A paired upload can fail after the other object landed. Clean both known
-    // deterministic paths so a refused upload does not leave an orphan behind.
-    await Promise.allSettled([deleteObject(storagePath), deleteObject(thumbnailPath)]);
-    return {
-      ok: false,
-      error: {
-        kind: "server-error",
-        message: storageFailureMessage(error, "store"),
-      },
-    };
-  }
 
   try {
     await sql`
       insert into public.gallery (
-        id, event_id, media_type, storage_path, thumbnail_path, url, thumbnail_url,
+        id, event_id, media_type, image_data, thumbnail_data,
         width, height, byte_size, title, description, alt_text, album,
         captured_on, sort_order, status
       ) values (
         ${id}::uuid,
         ${eventId}::uuid,
         'image',
-        ${storagePath},
-        ${thumbnailPath},
-        ${fullUpload.url},
-        ${thumbUpload.url},
+        ${image.full.data},
+        ${image.thumb.data},
         ${image.full.width},
         ${image.full.height},
         ${image.full.byteSize},
@@ -268,7 +206,6 @@ export async function uploadGalleryItem(input: UploadGalleryInput): Promise<Writ
       returning id
     `;
   } catch (error) {
-    await Promise.allSettled([deleteObject(storagePath), deleteObject(thumbnailPath)]);
     return refused("upload", error);
   }
 
@@ -316,10 +253,6 @@ export async function saveGalleryItem(values: GalleryFormValues): Promise<WriteO
 
 /**
  * Publish, unpublish or archive one photograph.
- *
- * Blobs do not move between buckets (single store); only the row status flips.
- * The public gallery only lists published rows, so a draft disappears from the
- * site as soon as the status changes.
  */
 export async function setGalleryItemStatus(
   id: string,
@@ -377,8 +310,7 @@ export async function moveGalleryItem(
 }
 
 /**
- * Delete one photograph: the row first, then the files it named.
- * A file that cannot be deleted is logged; the row is already gone.
+ * Delete one photograph from the database.
  */
 export async function deleteGalleryItem(
   id: string,
@@ -387,115 +319,108 @@ export async function deleteGalleryItem(
     return notConfigured();
   }
 
-  type DeleteRow = {
-    item_id: string;
-    storage_path: string | null;
-    thumbnail_path: string | null;
-    removed_paths: string[] | null;
-  };
-
-  let row: DeleteRow | undefined;
-
   try {
-    const rows = await sql<DeleteRow[]>`
-      with deleted as (
-        delete from public.gallery
-        where id = ${id}::uuid
-        returning id, storage_path, thumbnail_path
-      )
-      select
-        id as item_id,
-        storage_path,
-        thumbnail_path,
-        array_remove(array[storage_path, thumbnail_path], null) as removed_paths
-      from deleted
+    const rows = await sql<{ id: string }[]>`
+      delete from public.gallery
+      where id = ${id}::uuid
+      returning id
     `;
-    row = rows[0];
+    const row = rows[0];
+
+    if (!row?.id) {
+      return { ok: false, error: { kind: "server-error", message: "That photograph could not be found — reload the page." } };
+    }
+
+    return saved({ id, filesDeleted: 1, filesToDelete: 1 });
   } catch (error) {
     return refused("delete", error);
-  }
-
-  if (!row?.item_id) {
-    return { ok: false, error: { kind: "server-error", message: "That photograph could not be found — reload the page." } };
-  }
-
-  const keys = (row.removed_paths ?? []).filter((key): key is string => Boolean(key));
-  if (keys.length === 0) {
-    return saved({ id, filesDeleted: 0, filesToDelete: 0 });
-  }
-
-  if (!isStorageConfigured()) {
-    return saved({ id, filesDeleted: 0, filesToDelete: keys.length });
-  }
-
-  try {
-    await Promise.all(keys.map((key) => deleteObject(key)));
-    return saved({ id, filesDeleted: keys.length, filesToDelete: keys.length });
-  } catch (error) {
-    console.error(`[gallery] object delete failed:`, error, keys.join(", "));
-    return saved({ id, filesDeleted: 0, filesToDelete: keys.length });
   }
 }
 
 export interface GalleryPreview {
   bytes: Buffer;
   contentType: string;
-  /** Seconds a browser may cache this. Short: the file can be replaced or deleted. */
   maxAge: number;
 }
 
 /**
- * Read one object so the management screen can show it.
- *
- * Drafts have no public URL in the page; bytes stream through this admin-only
- * route after the session check.
+ * Read image bytes directly from Postgres bytea.
  */
-export async function readGalleryPreview(
+async function readGalleryImageBytes(
   id: string,
   variant: "thumb" | "full",
+  publishedOnly: boolean,
 ): Promise<Result<GalleryPreview>> {
   if (!isDatabaseConfigured()) {
     return fail("not-configured", "The gallery needs the database: add DATABASE_URL.");
   }
 
-  let storagePath: string | null;
-  let thumbPath: string | null;
-
   try {
-    const rows = await sql<{ storage_path: string | null; thumbnail_path: string | null }[]>`
-      select storage_path, thumbnail_path from public.gallery where id = ${id}::uuid
-    `;
-    const data = rows[0];
-    if (!data) {
-      return fail("not-found", "That photograph is no longer in the gallery.");
+    const rows = publishedOnly
+      ? variant === "thumb"
+        ? await sql<{ image_base64: string | null }[]>`
+            select
+              encode(thumbnail_data, 'base64') as image_base64
+            from public.gallery
+            where id = ${id}::uuid and status = 'published'
+            limit 1
+          `
+        : await sql<{ image_base64: string | null }[]>`
+            select
+              encode(image_data, 'base64') as image_base64
+            from public.gallery
+            where id = ${id}::uuid and status = 'published'
+            limit 1
+          `
+      : variant === "thumb"
+        ? await sql<{ image_base64: string | null }[]>`
+            select
+              encode(thumbnail_data, 'base64') as image_base64
+            from public.gallery
+            where id = ${id}::uuid
+            limit 1
+          `
+        : await sql<{ image_base64: string | null }[]>`
+            select
+              encode(image_data, 'base64') as image_base64
+            from public.gallery
+            where id = ${id}::uuid
+            limit 1
+          `;
+
+    const row = rows[0];
+    if (!row?.image_base64) {
+      return fail("not-found", "That photograph has no stored image data.");
     }
-    storagePath = data.storage_path;
-    thumbPath = data.thumbnail_path;
-  } catch (error) {
-    const dbError = toDbError(error);
-    console.error("[gallery] preview row failed:", dbError.message);
-    return fail("query-failed", "We could not load that photograph right now.");
-  }
 
-  const path = variant === "thumb" ? thumbPath ?? storagePath : storagePath ?? thumbPath;
-
-  if (!path) {
-    return fail("not-found", "That photograph has no stored file.");
-  }
-
-  if (!isStorageConfigured()) {
-    return fail("not-configured", GALLERY_STORAGE_SETUP_MESSAGE);
-  }
-
-  try {
-    const file = await downloadObject(path);
     return ok({
-      bytes: file.bytes,
-      contentType: file.contentType || "image/webp",
+      bytes: Buffer.from(row.image_base64, "base64"),
+      contentType: "image/webp",
       maxAge: 60,
     });
   } catch (error) {
-    console.error(`[gallery] preview download failed:`, error, path);
-    return fail("query-failed", storageFailureMessage(error, "read"));
+    const dbError = toDbError(error);
+    console.error("[gallery] read image bytes failed:", dbError.message, dbError.code ?? "");
+    return fail("query-failed", "We could not load that photograph right now.");
   }
+}
+
+/**
+ * Read one image for admin preview (including drafts).
+ */
+export function readGalleryPreview(
+  id: string,
+  variant: "thumb" | "full",
+): Promise<Result<GalleryPreview>> {
+  return readGalleryImageBytes(id, variant, false);
+}
+
+/**
+ * Read one image for public serving (published rows only).
+ */
+export function readPublishedGalleryImage(
+  id: string,
+  variant: "thumb" | "full",
+): Promise<Result<GalleryPreview>> {
+  return readGalleryImageBytes(id, variant, true);
 }
