@@ -43,9 +43,12 @@ model Event {
   city             String
   state            String?
   mapsUrl          String?   @map("maps_url")
-  /// The hero/banner image. Named for what the brief calls it; the column keeps
-  /// its original name so nothing has to be copied or renamed in the database.
+  /// Legacy external hero/banner URL; database uploads use heroImageData below.
   bannerUrl        String?   @map("hero_image_url")
+  /// Optimized, metadata-stripped WebP bytes for the homepage hero, stored in Neon.
+  heroImageData    Bytes?    @map("hero_image_data") @db.ByteA
+  /// Cache-busting revision, incremented whenever the hero is uploaded or removed.
+  heroImageVersion BigInt    @default(0) @map("hero_image_version")
   logoUrl          String?   @map("logo_url")
   contactPhone     String?   @map("contact_phone")
   /// The organiser's address. Distinct from the customer's, which does not exist

@@ -1,7 +1,7 @@
 # Deploy this project on Vercel
 
 **Stack:** Next.js on Vercel · Neon PostgreSQL · Razorpay (test mode) · Vercel Blob.
-There are **no Supabase environment variables**.
+Runtime database access uses the Neon `DATABASE_URL` only.
 
 **Time:** about 10–15 minutes if Neon and Razorpay already exist.
 
@@ -14,10 +14,34 @@ There are **no Supabase environment variables**.
    Production Branch* at the branch you want deployed. Deploying the wrong branch is
    the most common “it shows the scaffold” failure.
 2. **Neon database** created and schema applied — see
-   [`docs/neon-setup.md`](./neon-setup.md). Use the **direct** URL for
-   `npm run db:setup -- --seed`, then keep the **pooled** URL for the app.
+   [`docs/neon-setup.md`](./neon-setup.md). Use the **direct** URL for migrations,
+   then keep the **pooled** URL for the app.
 3. **Razorpay test keys** and a webhook secret (step 4 below).
-4. **Vercel Blob store** if you will use gallery uploads.
+4. **Vercel Blob store** if you will use gallery uploads; the homepage hero image is
+   stored in Neon and does not need Blob.
+
+---
+
+## Apply the homepage hero migration before deploying
+
+For an **existing** Neon database, apply `database/migrations/20260924090000_database_hero_image.sql`
+first. From this repository, `npm run db:setup` with the **direct** (non-pooler)
+`DATABASE_URL` applies any pending migrations and records them in `setup.applied_migrations`:
+
+```bash
+DATABASE_URL='<DIRECT_NEON_URL>' npm run db:setup
+```
+
+Alternatively, open Neon SQL Editor and run that migration file once. Do not paste the
+whole one-shot schema into a database that is already set up.
+
+For a **new** database, the generated `docs/one-shot-schema.sql` already includes the
+migration; `npm run db:setup -- --seed` is also supported.
+
+The migration adds `events.hero_image_data` (`bytea`) and its revision counter. Admin
+uploads are converted to a metadata-stripped WebP and saved there; removing the image
+clears the database bytes and restores the built-in diya artwork. Gallery media remains
+separate and continues to use Vercel Blob.
 
 ---
 
@@ -74,6 +98,19 @@ not “simplify” it.
 
 ---
 
+## Homepage hero image (Neon)
+
+The homepage hero image is uploaded, replaced and removed in **Admin → Event settings**.
+The server resizes it, strips source metadata, converts it to WebP, and stores the bytes
+in Neon `events.hero_image_data`. It is served from the app's public hero-image route.
+It is **not** a Gallery item, does not use Vercel Blob and needs no extra environment
+variable. Removing it returns the homepage to its built-in diya artwork.
+
+Apply the `20260924090000_database_hero_image.sql` migration before deploying this
+feature; see the instructions at the top of this guide.
+
+---
+
 ## Gallery storage (Vercel Blob)
 
 1. Open **Vercel → Project → Storage → Create → Blob**.
@@ -109,14 +146,16 @@ show a photo on `/gallery`. For setup errors and failed previews, see
 
 ---
 
-## Five checks that prove the deployment is real
+## Six checks that prove the deployment is real
 
 1. `/` shows **your** event data from Neon (not the empty shell).
 2. `/admin/login` accepts the env credentials and lands on `/admin`.
-3. A Razorpay **test** booking appears under `/admin/bookings` with an issued pass.
-4. `/admin/scanner` on a phone (HTTPS) validates that pass, then refuses a second
+3. **Admin → Event settings** can upload, replace and remove a hero image; removing it
+   restores the diya artwork beside **Book Now**.
+4. A Razorpay **test** booking appears under `/admin/bookings` with an issued pass.
+5. `/admin/scanner` on a phone (HTTPS) validates that pass, then refuses a second
    check-in.
-5. Gallery upload/publish works (Blob token set) and `/gallery` shows the image.
+6. Gallery upload/publish works (Blob token set) and `/gallery` shows the image.
 
 ---
 

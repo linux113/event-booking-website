@@ -15,7 +15,7 @@ You will put this booking website on the internet so real people can open it.
 | **Vercel** | Company that runs the website 24/7 | The landlord / electricity |
 | **Neon** | Company that stores data (Postgres) | The ledger / accounts book |
 | **Razorpay** | Company that takes card/UPI payments | The cash register |
-| **Vercel Blob** | Stores photo files for the gallery | The photo album shelf |
+| **Vercel Blob** | Stores Gallery photos only; the homepage hero WebP is stored in Neon | The gallery shelf; hero art stays in the event record |
 | **Admin login** | Only you sign in with email + password | The shop key |
 
 **Important rules**
@@ -61,41 +61,31 @@ If `typecheck` or `build` fails, fix code first — cloud setup will only waste 
 ### A3. Run the project’s own tests
 
 ```bash
-npm run test:prisma      # expect: 18 passed, 0 failed (includes gallery draft/publish/delete)
+npm run test:prisma      # expect: 25 passed, 0 failed (includes the Neon hero-image lifecycle)
 npm run test:normalise   # expect: 21 passed, 0 failed
-npm run test:settings    # expect: 8 passed, 0 failed
+npm run test:settings    # expect: 9 passed, 0 failed (includes the WhatsApp icon)
 npm run test:gallery-upload # expect: 8 passed, 0 failed
-npm run db:setup:test    # expect: 20 passed, 0 failed
+npm run test:hero-image  # expect: 7 passed, 0 failed
+npm run db:setup:test    # expect: 21 passed, 0 failed
 ```
 
-**CHECK A3:** both say all passed.
+**CHECK A3:** all tests report zero failures.
 
-### A4. Put the work on `main` (so Vercel can deploy it)
+### A4. Merge the feature branch to `main` (so Vercel can deploy it)
 
-Vercel normally deploys the branch called **`main`**. Your work is on  
-`arena/01a0ce9c-event-booking-website`.
-
-**Option 1 — GitHub (easiest if you use the website):**
-
-1. Push your branch (if not already pushed).  
-2. Open the repo on GitHub → **Pull requests** → **New pull request**  
-3. Base: `main` ← Compare: `arena/01a0ce9c-event-booking-website`  
-4. Review the diff → **Create pull request** → **Merge pull request**  
-5. Confirm **main** now has your files.
-
-**Option 2 — command line:**
+Vercel normally deploys the branch called **`main`**. Keep your work on its current
+feature branch, push it, then open a pull request to `main`:
 
 ```bash
-# commit anything outstanding on the arena branch first, then:
-git push origin arena/01a0ce9c-event-booking-website
-
-git checkout main
-git pull origin main
-git merge arena/01a0ce9c-event-booking-website
-git push origin main
+git push origin "$(git branch --show-current)"
 ```
 
-**CHECK A4:** On GitHub, `main` shows the new files (e.g. `src/lib/auth/session.ts` exists, `src/lib/supabase/` is gone).
+On GitHub, choose **Pull requests → New pull request**, set base to `main` and compare
+to your feature branch, review the diff and checks, then merge the pull request.
+
+**CHECK A4:** On GitHub, `main` includes
+`database/migrations/20260924090000_database_hero_image.sql` and the Event settings
+hero-image feature.
 
 ---
 
@@ -189,9 +179,13 @@ Replace `粘贴DIRECT…` with your **direct** (non-pooler) URL from B2, includi
 What this does in plain words:
 
 1. Creates a small helper schema (`auth.uid`) the SQL expects on a bare Postgres.  
-2. Runs every file in `supabase/migrations/` in order (creates tables, functions, triggers).  
-3. Runs `supabase/seed.sql` (demo event, 9 nights, 5 pass types) because you passed `--seed`.  
+2. Runs every file in `database/migrations/` in order (including the homepage hero-image `bytea` migration).
+3. Runs `database/seed.sql` (demo event, 9 nights, 5 pass types) because you passed `--seed`.
 4. Checks the end state and prints success / failure.
+
+For an existing Neon database, this safe re-run applies the new pending migration only.
+You may instead run `database/migrations/20260924090000_database_hero_image.sql` by
+itself in Neon SQL Editor. Do not paste the full one-shot schema into an existing database.
 
 **Re-running is safe.** It remembers what it already applied.
 
@@ -343,7 +337,7 @@ Leave `RAZORPAY_ALLOW_LIVE` **empty**. The app refuses live keys until you set i
 3. For photos: after the project exists → project → **Storage → Blob → Create**.  
    Vercel then provides `BLOB_READ_WRITE_TOKEN` automatically when the store is linked, **or** you copy the token into env vars yourself.
 
-Gallery can wait until after the first deploy; the rest of the site does not need Blob.
+Gallery can wait until after the first deploy; only Gallery needs Blob. The homepage hero is stored in Neon and does not need a Blob token.
 
 **CHECK D:** you have saved test Key ID + Key Secret. Vercel account can log in with GitHub.
 
@@ -383,7 +377,7 @@ Add each key for **Production** (and again for **Preview** if you want previews 
 
 **How to paste a multi-line / special URL:** Vercel sometimes wraps values — paste on one line.
 
-**Never add:** `NEXT_PUBLIC_DATABASE_URL`, `NEXT_PUBLIC_AUTH_SECRET`, anything `SUPABASE_*`.
+**Never add:** `NEXT_PUBLIC_DATABASE_URL`, `NEXT_PUBLIC_AUTH_SECRET`, or any other secret with a `NEXT_PUBLIC_` prefix.
 
 **CHECK E:** Environment Variables list shows **all required names** with values (webhook secret may be pending until F). Red badge / empty value = not saved.
 
@@ -419,7 +413,7 @@ Open `https://your-domain-or-vercel.app/`:
 | 6 | Login with admin user + **your password** | Dashboard opens; stats not all zero if seed exists |
 | 7 | `/admin/bookings` | Page opens (may be empty) |
 | 8 | `/gallery` | Opens (may be empty) |
-| 9 | View Page Source → search `supabase` | No matches |
+| 9 | View Page Source | No database URLs, admin secrets, or payment secrets |
 | 10 | Neon query history | New queries when you reload (proves Vercel → Neon) |
 
 **CHECK F (Gate before payments):** **all 10 pass.**
@@ -489,7 +483,18 @@ Check Razorpay → Webhooks → **View Webhook History / logs** for status codes
 
 ---
 
-## PART H — Gallery (photos)
+## PART H — Homepage hero + Gallery images
+
+### H1. Homepage hero (stored in Neon)
+
+1. Confirm migration `20260924090000_database_hero_image.sql` has been applied (see B4).
+2. Sign in → **Event settings** → **Homepage hero image** → upload or replace a photo.
+3. The server optimizes and stores it as WebP bytes in Neon. No Gallery row, Blob store or `BLOB_READ_WRITE_TOKEN` is involved.
+4. Use **Remove and restore diya** to return the homepage to its built-in artwork.
+
+**CHECK H1:** upload/replacement appears beside **Book Now**; removal restores the diya.
+
+### H2. Gallery (stored in Vercel Blob)
 
 1. Vercel → project → **Storage → Blob → Create store** (if not done).  
 2. Ensure `BLOB_READ_WRITE_TOKEN` is set (UI link often does this) → redeploy if you added it manually.  
@@ -497,7 +502,7 @@ Check Razorpay → Webhooks → **View Webhook History / logs** for status codes
 4. Fill caption / alt → **Publish**.  
 5. Public `/gallery` shows the image.
 
-**CHECK H:** image appears publicly; delete in admin removes it.
+**CHECK H2:** image appears publicly; delete in admin removes it.
 
 ---
 

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 
 import { EventContactSettingsForm } from "@/components/admin/event-contact-settings-form";
+import { EventHeroImageSettings } from "@/components/admin/event-hero-image-settings";
 import { ErrorState } from "@/components/ui/error-state";
 import { siteConfig } from "@/config/site";
 import { siteUrl } from "@/config/env";
@@ -47,8 +48,8 @@ export default async function SettingsPage() {
       <div className="flex flex-col gap-1">
         <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Event settings</h1>
         <p className="text-muted text-sm/6">
-          Check the event the site is using, then update its public contact and venue details below. Saved changes take
-          effect without a deployment.
+          Check the event the site is using, update the homepage hero artwork, and edit its public contact and venue
+          details. Saved changes take effect without a deployment.
         </p>
       </div>
 
@@ -71,6 +72,18 @@ export default async function SettingsPage() {
           </p>
         )}
       </section>
+
+      {event ? (
+        <EventHeroImageSettings
+          eventId={event.id}
+          eventName={event.name}
+          canEdit={canEdit}
+          initialImageUrl={event.heroImageUrl}
+          initialHasImage={event.hasHeroImage}
+          initialByteSize={event.heroImageByteSize}
+          initialVersion={event.heroImageVersion}
+        />
+      ) : null}
 
       {event ? <EventContactSettingsForm event={event} canEdit={canEdit} /> : null}
 

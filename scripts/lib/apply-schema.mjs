@@ -6,9 +6,8 @@
  * with a different return shape (090400 → 090500 → 091200 for `create_pending_booking`),
  * which is how `create or replace function` is meant to be used. That means a
  * half-applied file list cannot simply be replayed, so what has already been applied is
- * recorded in `setup.applied_migrations` and skipped on the next run — the same idea as
- * Supabase's own `supabase_migrations.schema_migrations`. The record lives in its own
- * schema so `public` keeps exactly the 11 tables the app expects.
+ * recorded in `setup.applied_migrations` and skipped on the next run. The record lives
+ * in its own schema so `public` keeps exactly the 11 tables the app expects.
  *
  * The database is reached through a small adapter so the same code runs against a
  * network driver (postgres.js, in the CLI) and against the in-process PostgreSQL the
@@ -24,6 +23,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+
+import { isKnownLegacyChecksum } from "./legacy-migration-checksums.mjs";
 
 export const TRACKING_SCHEMA = "setup";
 export const TRACKING_TABLE = "applied_migrations";
@@ -72,17 +73,17 @@ export function listSections({ root, seed = false, skipPrelude = false }) {
   const sections = [];
 
   if (!skipPrelude) {
-    sections.push(read(PRELUDE_NAME, join(root, "supabase/prelude.sql")));
+    sections.push(read(PRELUDE_NAME, join(root, "database/prelude.sql")));
   }
 
-  for (const name of readdirSync(join(root, "supabase/migrations"))
+  for (const name of readdirSync(join(root, "database/migrations"))
     .filter((entry) => entry.endsWith(".sql"))
     .sort()) {
-    sections.push(read(name, join(root, "supabase/migrations", name)));
+    sections.push(read(name, join(root, "database/migrations", name)));
   }
 
   if (seed) {
-    sections.push(read(SEED_NAME, join(root, "supabase/seed.sql")));
+    sections.push(read(SEED_NAME, join(root, "database/seed.sql")));
   }
 
   return sections;
@@ -174,7 +175,7 @@ export async function applySchema({
     if (recorded) {
       report.skipped.push(section.name);
 
-      if (recorded !== section.checksum) {
+      if (recorded !== section.checksum && !isKnownLegacyChecksum(section.name, recorded)) {
         report.changed.push(section.name);
       }
 

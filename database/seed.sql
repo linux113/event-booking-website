@@ -9,7 +9,7 @@
 --     will edit them directly. Replace the venue/city/prices here (or in the
 --     dashboard) rather than anywhere in the frontend.
 --
--- Apply with: supabase db reset (local) or paste into the Supabase SQL editor.
+-- Apply with: npm run db:setup -- --seed, or paste into Neon SQL Editor.
 -- =============================================================================
 
 

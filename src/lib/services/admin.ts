@@ -14,6 +14,7 @@ import {
 } from "@/lib/admin/bookings";
 import { isDatabaseConfigured } from "@/config/env";
 import { DatabaseError, rpc, sql } from "@/lib/db/client";
+import { adminHeroImagePreviewUrl } from "@/lib/admin/hero-image";
 import { gateNight } from "@/lib/gate/night";
 import { fail, ok, type Result } from "@/lib/services/result";
 import type { EventContactSettingsValues, EventSettings } from "@/types/event-settings";
@@ -489,6 +490,7 @@ export async function listBookingPassOptions(): Promise<Result<FilterOption[]>> 
 // -----------------------------------------------------------------------------
 
 interface EventSettingsRow {
+  id: string;
   name: string;
   slug: string;
   status: string;
@@ -506,10 +508,17 @@ interface EventSettingsRow {
   youtube_url: string | null;
   support_hours: string[] | null;
   currency: string;
+  hero_image_url: string | null;
+  hero_image_present: boolean;
+  hero_image_byte_size: number | null;
+  hero_image_version: string;
 }
 
 function toEventSettings(row: EventSettingsRow): EventSettings {
+  const hasHeroImage = row.hero_image_present || Boolean(row.hero_image_url);
+
   return {
+    id: row.id,
     name: row.name,
     slug: row.slug,
     status: row.status,
@@ -527,6 +536,12 @@ function toEventSettings(row: EventSettingsRow): EventSettings {
     youtubeUrl: row.youtube_url,
     supportHours: row.support_hours ?? [],
     currency: row.currency,
+    heroImageUrl: row.hero_image_present
+      ? adminHeroImagePreviewUrl(row.id, row.hero_image_version)
+      : row.hero_image_url,
+    hasHeroImage,
+    heroImageByteSize: row.hero_image_byte_size === null ? null : Number(row.hero_image_byte_size),
+    heroImageVersion: row.hero_image_version,
   };
 }
 
@@ -543,9 +558,12 @@ export async function getEventSettings(): Promise<Result<EventSettings | null>> 
   try {
     const data = await sql<EventSettingsRow[]>`
       select
-        name, slug, status, tagline, venue_name, venue_address, city, state,
+        id, name, slug, status, tagline, venue_name, venue_address, city, state,
         contact_phone, contact_email, whatsapp_number, maps_url, instagram_url,
-        facebook_url, youtube_url, support_hours, currency
+        facebook_url, youtube_url, support_hours, currency, hero_image_url,
+        (hero_image_data is not null) as hero_image_present,
+        octet_length(hero_image_data)::int as hero_image_byte_size,
+        hero_image_version::text as hero_image_version
       from public.events
       order by (status = 'published') desc, created_at asc
       limit 1
@@ -591,9 +609,12 @@ export async function saveEventContactSettings(
         limit 1
       )
       returning
-        name, slug, status, tagline, venue_name, venue_address, city, state,
+        id, name, slug, status, tagline, venue_name, venue_address, city, state,
         contact_phone, contact_email, whatsapp_number, maps_url, instagram_url,
-        facebook_url, youtube_url, support_hours, currency
+        facebook_url, youtube_url, support_hours, currency, hero_image_url,
+        (hero_image_data is not null) as hero_image_present,
+        octet_length(hero_image_data)::int as hero_image_byte_size,
+        hero_image_version::text as hero_image_version
     `;
 
     if (!rows[0]) {

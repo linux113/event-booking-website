@@ -1,9 +1,8 @@
 -- =============================================================================
 -- Garba Nights — initial schema
 --
--- Target: Supabase (PostgreSQL 15+). Managed with the Supabase CLI
--- (`supabase db push` / `supabase migration up`) or by pasting into the
--- Supabase SQL editor. See supabase/README.md.
+-- Target: PostgreSQL 15+ on Neon. Apply with `npm run db:setup` or the
+-- generated `docs/one-shot-schema.sql`; see `docs/neon-setup.md`.
 --
 -- Conventions used throughout:
 --   * uuid primary keys with `gen_random_uuid()` (built into PG13+, no extension)
@@ -18,9 +17,8 @@
 -- -----------------------------------------------------------------------------
 -- Roles
 --
--- Supabase already defines anon / authenticated / service_role, so this block is
--- a no-op there. It exists so the migration can also be applied to a bare
--- PostgreSQL instance (CI, local testing) without edits.
+-- Create the app's database roles when they are missing, so the migration works
+-- on a fresh Neon or bare PostgreSQL instance without manual preparation.
 -- -----------------------------------------------------------------------------
 do $$
 begin
@@ -347,7 +345,7 @@ create table if not exists public.admin_users (
   updated_at     timestamptz not null default now()
 );
 
-comment on table public.admin_users is 'Allow-list mapping Supabase Auth users to an admin role. No public access whatsoever.';
+comment on table public.admin_users is 'Legacy allow-list mapping auth users to admin roles. No public access whatsoever.';
 comment on column public.admin_users.user_id is 'References auth.users(id); rows are created after the user signs up.';
 
 create index if not exists admin_users_active_idx on public.admin_users (is_active);
@@ -402,7 +400,7 @@ create table if not exists public.gallery (
   constraint gallery_alt_text_not_blank check (length(btrim(alt_text)) > 0)
 );
 
-comment on table public.gallery is 'Event photos and videos. Files live in Supabase Storage; this table holds the metadata.';
+comment on table public.gallery is 'Event photos and videos. Gallery files are stored in Vercel Blob; this table holds their metadata.';
 comment on column public.gallery.alt_text is 'Required: every published image needs descriptive alternative text for accessibility.';
 comment on column public.gallery.event_id is 'Nullable so festival-wide media can exist outside a single event.';
 
@@ -418,10 +416,8 @@ create trigger gallery_set_updated_at
 -- -----------------------------------------------------------------------------
 -- Table privileges
 --
--- Supabase grants broad privileges to anon/authenticated by default; stating them
--- explicitly keeps the intent readable and makes the migration portable to a bare
--- PostgreSQL instance. Row Level Security (see the next migration) is what
--- actually restricts which rows each role can see.
+-- State these role grants explicitly so the intended public read surface is clear.
+-- Row Level Security (see the next migration) restricts which rows each role can see.
 -- -----------------------------------------------------------------------------
 grant select on public.events, public.event_dates, public.pass_categories, public.gallery
   to anon, authenticated;

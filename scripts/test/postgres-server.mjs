@@ -5,15 +5,12 @@
  * exposes it over the Postgres wire protocol on a TCP port. Anything that speaks
  * that protocol can connect to it — including Prisma.
  *
- * Why this exists: the old verification harness shimmed PostgREST over HTTP,
- * because the app talked to Supabase over HTTP. The app now opens a proper
- * database connection, so the tests need a proper database to open it against.
- * This is that database: the same schema, the same functions, the same triggers,
- * the same constraints as Neon, on localhost.
+ * This test database applies the same PostgreSQL migration chain and seed used by
+ * Neon. It exercises real queries, SQL functions, triggers and constraints without
+ * opening a connection to the hosted database.
  *
- * What it is not: Neon. The wire transport (the driver adapter, the pooler, TLS)
- * is not exercised by this — only the SQL is. Everything above the transport —
- * every query, every SQL function, every constraint — is real.
+ * What it is not: Neon. The wire transport (the driver adapter, pooler and TLS) is
+ * not exercised here — only the SQL is.
  */
 import { PGlite } from "@electric-sql/pglite";
 import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
@@ -32,7 +29,7 @@ export const REPO_ROOT = join(import.meta.dirname, "..", "..");
 export async function startPostgres({ seed = true, port = 0 } = {}) {
   const db = await PGlite.create();
   await db.exec(readFileSync(join(REPO_ROOT, "docs", "one-shot-schema.sql"), "utf8"));
-  if (seed) await db.exec(readFileSync(join(REPO_ROOT, "supabase", "seed.sql"), "utf8"));
+  if (seed) await db.exec(readFileSync(join(REPO_ROOT, "database", "seed.sql"), "utf8"));
 
   const server = new PGLiteSocketServer({ db, port });
   await server.start();
@@ -53,12 +50,12 @@ export async function startPostgres({ seed = true, port = 0 } = {}) {
 
 /** Applies a single migration file, for tests that start from an older schema. */
 export async function applyMigration(db, name) {
-  await db.exec(readFileSync(join(REPO_ROOT, "supabase", "migrations", name), "utf8"));
+  await db.exec(readFileSync(join(REPO_ROOT, "database", "migrations", name), "utf8"));
 }
 
 /** Every migration filename, in apply order. */
 export function migrationFiles() {
-  return readdirSync(join(REPO_ROOT, "supabase", "migrations"))
+  return readdirSync(join(REPO_ROOT, "database", "migrations"))
     .filter((f) => f.endsWith(".sql"))
     .sort();
 }

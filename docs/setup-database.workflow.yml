@@ -1,5 +1,5 @@
 # Copy this file to .github/workflows/setup-database.yml to let Actions keep the
-# Neon database in step with supabase/ — it applies the prelude, the migrations and
+# Neon database in step with database/ — it applies the prelude, migrations and
 # the seed through the same scripts/setup-database.mjs the local path uses, then
 # prints the verification report.
 #
@@ -10,7 +10,7 @@
 # can add workflow files: GitHub refuses App-authored pushes to that path.)
 name: Set up database
 
-# Applies supabase/prelude.sql, every migration and (optionally) the seed to the Neon
+# Applies database/prelude.sql, every migration and (optionally) the seed to the Neon
 # database, then prints the verification report. This is exactly what `npm run db:setup`
 # does locally — it just runs somewhere whose network can reach Neon.
 #
@@ -19,10 +19,10 @@ name: Set up database
 # changes should not travel through a connection pooler. The script masks it in its
 # output and the secret is never echoed.
 #
-# Runs on a manual dispatch from the Actions tab, or on a push that touches supabase/ —
+# Runs on a manual dispatch from the Actions tab, or on a push that touches database/ —
 # a migration that lands in the repository is a migration the database should have.
 #
-# What a first run against an empty database does: prelude → 18 migrations → seed, in
+# What a first run against an empty database does: prelude → 19 migrations → seed, in
 # per-file transactions, recorded in setup.applied_migrations. Running it again applies
 # only what is new (or nothing), which is why a push is a safe trigger.
 
@@ -30,7 +30,7 @@ on:
   workflow_dispatch:
     inputs:
       seed:
-        description: Also apply supabase/seed.sql (idempotent)
+        description: Also apply database/seed.sql (idempotent)
         type: boolean
         default: true
       verify_only:
@@ -39,7 +39,7 @@ on:
         default: false
   push:
     paths:
-      - "supabase/**"
+      - "database/**"
       - ".github/workflows/setup-database.yml"
 
 # One database: never let two of these run against it at once.
@@ -122,6 +122,6 @@ jobs:
             echo "| policies (public reads only) | 6 |"
             echo "| tables with RLS on | 10 |"
             echo "| security-definer functions | 40 |"
-            echo "| recorded sections | 20 (prelude + 18 migrations + seed) |"
+            echo "| recorded sections | 21 (prelude + 19 migrations + seed) |"
             echo "| seed | 1 event, 9 nights, 5 passes, 6 highlights, 6 features |"
           } >> "$GITHUB_STEP_SUMMARY"

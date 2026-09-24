@@ -9,7 +9,7 @@
 --                    user is present in admin_users with an active role.
 --   service_role   → bypasses RLS. Used only in server code for writing
 --                    bookings/passes and for Razorpay webhooks. Never shipped
---                    to the browser (see src/lib/supabase/admin.ts).
+--                    to the browser; all privileged queries stay server-side.
 --
 -- Helper functions are SECURITY DEFINER so an admin check on admin_users does not
 -- recurse through that table's own policies.

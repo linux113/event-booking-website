@@ -8,12 +8,12 @@
  *   DATABASE_URL='…' npm run db:setup -- --mark-all-applied
  *
  * What it does:
- *   1. applies `supabase/prelude.sql` once (minimal `auth.uid()` shim so residual
- *      public read policies still resolve on bare PostgreSQL / Neon);
- *   2. applies every `supabase/migrations/*.sql` (standard PostgreSQL) in filename
- *      order, each in its own transaction and recorded in `setup.applied_migrations`,
- *      stopping at the first failure so the database is never left half-migrated;
- *   3. optionally applies `supabase/seed.sql`;
+ *   1. applies `database/prelude.sql` once (minimal `auth.uid()` shim so residual
+ *      public-read policies still resolve on Neon and bare PostgreSQL);
+ *   2. applies every `database/migrations/*.sql` in filename order, each in its own
+ *      transaction and recorded in `setup.applied_migrations`, stopping at the first
+ *      failure so the database is never left half-migrated;
+ *   3. optionally applies `database/seed.sql`;
  *   4. asserts the end state — table/policy counts, public-read hardening, and that
  *      a stranger is refused on bookings.
  *
@@ -80,7 +80,7 @@ if (
 ) {
   console.error(
     `${RED}That looks like a local database.${RESET} This script is for a hosted one.\n` +
-      `For local work use ${DIM}npm run db:verify${RESET} — it boots its own throwaway PostgreSQL.`,
+      `For local SQL checks use ${DIM}npm run db:setup:test${RESET} or ${DIM}npm run test:prisma${RESET} — they use throwaway PostgreSQL.`,
   );
   process.exit(1);
 }

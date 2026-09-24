@@ -6,6 +6,7 @@ import {
   PASS_EXPORT_MAX_ROWS,
   passOffset,
   paymentOffset,
+  type PaiseAmount,
   type PassExportRow,
   type PassQuery,
   type PaymentQuery,
@@ -48,7 +49,7 @@ export interface PaymentEventRow {
   event_id?: string;
   event_type: string;
   outcome: string;
-  amount_paise: number | null;
+  amount_paise: PaiseAmount;
   currency: string | null;
   received_at: string;
   processed_at: string | null;
@@ -92,8 +93,8 @@ export interface PaymentSummary {
   events_ignored: number;
   events_duplicate: number;
   orders_awaiting: number;
-  captured_paise: number | null;
-  refunded_paise: number | null;
+  captured_paise: PaiseAmount;
+  refunded_paise: PaiseAmount;
   last_received_at: string | null;
 }
 

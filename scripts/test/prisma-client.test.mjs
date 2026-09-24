@@ -33,6 +33,68 @@ check("Event.findFirst reads the event", event?.slug === "navratri-2026-jaipur",
 await pg.db.query(`update public.events set hero_image_url = $1 where id = $2`, ["https://blob.example/hero.webp", event.id]);
 const relisted = await prisma.event.findUnique({ where: { id: event.id }, select: { bannerUrl: true } });
 check("Event.bannerUrl reads the hero_image_url column", relisted?.bannerUrl === "https://blob.example/hero.webp", String(relisted?.bannerUrl));
+check(
+  "Event maps the Neon hero bytea and starts at image revision zero",
+  event?.heroImageData === null && event?.heroImageVersion === 0n,
+  `${String(event?.heroImageData)} / revision ${String(event?.heroImageVersion)}`,
+);
+
+const firstHeroWebp = Buffer.from("RIFF\u0000\u0000\u0000\u0000WEBP-test-image");
+const [storedHero] = await prisma.$queryRaw`
+  update public.events
+     set hero_image_data = ${firstHeroWebp}, hero_image_version = hero_image_version + 1
+   where id = ${event.id}::uuid
+  returning hero_image_version::text as version,
+            octet_length(hero_image_data)::int as byte_size
+`;
+check(
+  "parameterized Prisma SQL stores the homepage WebP bytes directly in Neon",
+  storedHero?.version === "1" && storedHero?.byte_size === firstHeroWebp.byteLength,
+);
+const firstHeroRead = await prisma.event.findUnique({
+  where: { id: event.id },
+  select: { heroImageData: true, heroImageVersion: true },
+});
+check(
+  "the stored hero image round-trips byte-for-byte",
+  Buffer.from(firstHeroRead?.heroImageData ?? []).equals(firstHeroWebp) && firstHeroRead?.heroImageVersion === 1n,
+);
+
+const replacementHeroWebp = Buffer.from("RIFF\u0000\u0000\u0000\u0000WEBP-replacement");
+const replacedHero = await prisma.event.update({
+  where: { id: event.id },
+  data: { heroImageData: replacementHeroWebp, heroImageVersion: { increment: 1n } },
+});
+check(
+  "replacing the hero writes the new bytes and advances its cache revision",
+  Buffer.from(replacedHero.heroImageData ?? []).equals(replacementHeroWebp) && replacedHero.heroImageVersion === 2n,
+);
+const removedHero = await prisma.event.update({
+  where: { id: event.id },
+  data: { heroImageData: null, heroImageVersion: { increment: 1n } },
+});
+check(
+  "removing the custom hero clears the bytea and advances its revision",
+  removedHero.heroImageData === null && removedHero.heroImageVersion === 3n,
+);
+
+try {
+  await pg.db.query(
+    `update public.events set hero_image_data = $1 where id = $2`,
+    [Buffer.alloc(2 * 1024 * 1024 + 1), event.id],
+  );
+  check("the database refuses hero images larger than 2 MiB", false, "ALLOWED — size constraint is missing");
+} catch (error) {
+  check("the database refuses hero images larger than 2 MiB", error.code === "23514", String(error.code ?? error.message));
+}
+
+try {
+  await pg.db.query(`update public.events set hero_image_version = -1 where id = $1`, [event.id]);
+  check("the database refuses a negative hero image revision", false, "ALLOWED — revision constraint is missing");
+} catch (error) {
+  check("the database refuses a negative hero image revision", error.code === "23514", String(error.code ?? error.message));
+}
+
 check("relationship include works (passes + nights)", event?.passCategories.length === 5 && event?.dates.length === 9, `${event?.passCategories.length} passes, ${event?.dates.length} nights`);
 
 const couple = await prisma.passCategory.findFirst({ where: { code: { equals: "couple", mode: "insensitive" } } });

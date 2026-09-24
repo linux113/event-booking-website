@@ -2,14 +2,13 @@
 -- 17 · One admin, no roles — plus the columns the new brief asks for
 --
 -- Why this exists
---   The application is moving off Supabase onto Neon through a single trusted
---   server-side connection, and off the staff/role model onto one admin account
+--   The application uses Neon through a single trusted server-side connection,
+--   and the staff/role model has been replaced by one admin account
 --   authenticated by the app itself. In that world the database does not need to
 --   know who is asking:
 --
 --     * there is one admin, so there is no staff table, no roles and no
---       permissions matrix — and nothing left that references the Supabase auth
---       schema;
+--       permissions matrix — and no dependency on the legacy auth provider;
 --     * the gate verdict (pass_entry) no longer resolves a staff row: the session
 --       was already proven before the call, and the audit row records the booking
 --       instead of the staff member;
@@ -126,7 +125,7 @@ drop function if exists public.is_super_admin(uuid);
 drop function if exists public.current_staff_role();
 
 -- The allow-list itself. It referenced auth.users, so this also removes the last
--- database object that knew about Supabase Auth.
+-- database object that knew about the previous hosted authentication system.
 drop table if exists public.admin_users;
 
 -- ---------------------------------------------------------------------------

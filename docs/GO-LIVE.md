@@ -10,7 +10,7 @@ Each phase has a **Gate** you must pass before the next phase. Do not skip gates
 | Database | Neon PostgreSQL (pooled URL at runtime) |
 | Schema apply | `npm run db:setup` with the **direct** URL (or paste `docs/one-shot-schema.sql` **once**) |
 | App host | Vercel, region `bom1` (Mumbai) — already in `vercel.json` |
-| Storage | Vercel Blob (`BLOB_READ_WRITE_TOKEN`) — no files in Neon |
+| Storage | Homepage hero WebP bytes in Neon; Gallery photos in Vercel Blob (`BLOB_READ_WRITE_TOKEN`) |
 | Payments | Razorpay **test** keys first |
 | Admin | One account: `ADMIN_EMAIL` + `ADMIN_PASSWORD_HASH` + `AUTH_SECRET` |
 | Public URL | `NEXT_PUBLIC_SITE_URL` — set **before** any QR pass is printed |
@@ -21,20 +21,19 @@ Each phase has a **Gate** you must pass before the next phase. Do not skip gates
 
 ## Phase 0 — Repo ready (before any cloud wiring)
 
-### 0.1 Merge branch → `main`
+### 0.1 Merge the feature branch → `main`
 
-You are on `arena/01a0ce9c-event-booking-website` (session branch). Review `MIGRATION-REPORT.md`, then:
+Keep the work on your current feature branch, review the changes and passing checks,
+then push that branch and open a pull request to `main`:
 
 ```bash
 git status
-# commit migration work on the arena branch if not already committed
-git push origin arena/01a0ce9c-event-booking-website
-# then in GitHub: open PR → merge into main
-# or locally (only after review):
-# git checkout main && git pull && git merge arena/01a0ce9c-event-booking-website && git push
+git branch --show-current
+git push origin "$(git branch --show-current)"
 ```
 
-Vercel Production Branch should be **`main`** (or whatever branch you deliberately deploy).
+On GitHub, open a pull request with `main` as the base, review the diff and checks, then
+merge it. Vercel Production Branch should be **`main`** (or whatever branch you deliberately deploy).
 
 ### 0.2 Local green build (already verified in migration; re-run after merge)
 
@@ -44,11 +43,13 @@ npm run db:generate
 npm run typecheck    # must exit 0
 npm run lint         # must exit 0 (warnings OK)
 npm run build        # must exit 0
-npm run test:prisma  # 18/18
-npm run db:setup:test # 20/20
+npm run test:prisma     # 25/25
+npm run test:hero-image # 7/7
+npm run test:settings   # 9/9
+npm run db:setup:test  # 21/21
 ```
 
-**Gate 0 — all six commands exit 0.** Do not create cloud resources on a red tree.
+**Gate 0 — every command above exits 0.** Do not create cloud resources on a red tree.
 
 ---
 
@@ -74,7 +75,7 @@ From your machine, repo root:
 # Optional sanity: generate client (no DB needed)
 npm run db:generate
 
-# Apply everything (20 sections: prelude + 18 migrations + seed)
+# Apply everything (21 sections: prelude + 19 migrations + seed)
 DATABASE_URL='postgresql://USER:PASS@HOST/dbname?sslmode=require' \
   npm run db:setup -- --seed
 ```
@@ -194,7 +195,7 @@ For local-only testing before domain exists you can create a webhook later; Chec
 
 ### 3.2 Environment variables (Production **and** Preview)
 
-Exact names from `.env.example` — no Supabase variables exist:
+Exact names from `.env.example`:
 
 | Key | Scope | Value source | Notes |
 | --- | ----- | ------------ | ----- |
@@ -239,7 +240,7 @@ Open `https://<domain>/`:
 | 5 | `/admin/login` | Env credentials work → `/admin` dashboard numbers |
 | 6 | `/admin/bookings` | Empty or seeded list, no 500 |
 | 7 | `/gallery` | Renders (empty OK) |
-| 8 | View source | No `SUPABASE`, no `service_role` strings |
+| 8 | View source | No database URLs, admin secrets, or payment secrets |
 | 9 | Response headers on `/admin/*` | Site not open to anonymous admin HTML |
 | 10 | Neon → Queries | Hits when you load pages (proves pooled URL from Vercel) |
 
@@ -302,7 +303,7 @@ Failure text will name `BLOB_READ_WRITE_TOKEN` if unset.
 - [ ] Strong admin password hash; `AUTH_SECRET` random; neither in git
 - [ ] Neon: direct URL used only for setup; pooled in Vercel only
 - [ ] No `channel_binding` in any runtime URL
-- [ ] Blob store connected; no large binaries in Postgres
+- [ ] Blob store connected only if Gallery is used; hero WebP in Neon is capped at 2 MiB
 - [ ] Seed event replaced with real event/nights/prices (SQL or admin UI)
 - [ ] Contact columns filled (`contact_phone`, `contact_email`, WhatsApp, venue, maps)
 - [ ] Brand placeholder in `src/config/site.ts` updated if used
@@ -346,7 +347,7 @@ Failure text will name `BLOB_READ_WRITE_TOKEN` if unset.
 ## What this environment could not do for you
 
 - No Neon/Vercel/Razorpay credentials in this sandbox — **you** run Phases 1–5.
-- Local automated proof already done: typecheck, lint, build, `test:prisma` 18/18, `test:normalise` 21/21, `test:settings` 8/8, `test:gallery-upload` 8/8, `db:setup:test` 20/20.
+- Local automated proof: typecheck, lint, build, `test:prisma` 25/25, `test:normalise` 21/21, `test:settings` 9/9, `test:gallery-upload` 8/8, `test:hero-image` 7/7 and `db:setup:test` 21/21.
 - Live E2E (real Neon + real Vercel + real Razorpay) starts at Gate 1.
 
 **Recommended order (one line):** merge → local green → Neon create + `db:setup --seed` → SQL verify → local `.env.local` smoke → Vercel import + env + domain → deploy smoke (Gate 4) → webhook + full booking E2E (Gate 5) → harden → only then live keys.

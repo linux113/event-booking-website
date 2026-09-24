@@ -1,4 +1,5 @@
 import { siteConfig } from "@/config/site";
+import { publicHeroImageUrl } from "@/lib/admin/hero-image";
 import { publicGalleryUrl } from "@/lib/gallery/paths";
 import type {
   EventFeature,
@@ -39,7 +40,9 @@ export function toEventSummary(row: EventRow): EventSummary {
     city: row.city,
     state: row.state,
     mapsUrl: row.maps_url,
-    heroImageUrl: row.hero_image_url,
+    heroImageUrl: row.hero_image_data_present
+      ? publicHeroImageUrl(row.id, row.hero_image_version)
+      : row.hero_image_url,
     contactPhone: row.contact_phone,
     contactEmail: row.contact_email,
     whatsappNumber: row.whatsapp_number,

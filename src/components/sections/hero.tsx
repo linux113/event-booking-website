@@ -107,6 +107,7 @@ export function Hero({ bundle }: HeroProps) {
                   priority
                   sizes="(max-width: 1024px) 100vw, 45vw"
                   className="object-cover"
+                  unoptimized
                 />
               ) : (
                 <HeroArtwork />
@@ -150,7 +151,7 @@ function nightCountCopy(count: number): string {
   return `${count} ${count === 1 ? "night" : "nights"} of Navratri`;
 }
 
-/** Shown until the organiser uploads a hero image (gallery/Storage step). */
+/** Built-in diya artwork shown until a homepage hero image is uploaded. */
 function HeroArtwork() {
   return (
     <div className="from-navy via-surface to-[#2a1055] absolute inset-0 bg-gradient-to-br">

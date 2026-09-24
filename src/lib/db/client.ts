@@ -80,7 +80,7 @@ export class DatabaseError extends Error {
   }
 }
 
-function toDatabaseError(error: unknown): DatabaseError {
+export function toDatabaseError(error: unknown): DatabaseError {
   if (error instanceof DatabaseError) {
     return error;
   }
@@ -94,22 +94,36 @@ function toDatabaseError(error: unknown): DatabaseError {
     };
 
     const meta = source.meta ?? {};
-    const code =
-      (typeof source.code === "string" ? source.code : undefined) ??
-      (typeof meta.code === "string" ? meta.code : undefined) ??
-      (typeof meta.databaseErrorCode === "string" ? meta.databaseErrorCode : undefined);
-    const details =
-      (typeof source.detail === "string" ? source.detail : undefined) ??
-      (typeof meta.detail === "string" ? meta.detail : undefined) ??
-      (typeof meta.details === "string" ? meta.details : undefined);
-    const hint =
-      (typeof source.hint === "string" ? source.hint : undefined) ??
-      (typeof meta.hint === "string" ? meta.hint : undefined);
+    const adapterError = asRecord(meta.driverAdapterError);
+    const adapterCause = asRecord(adapterError.cause);
+    const code = [
+      adapterCause.originalCode,
+      adapterCause.code,
+      meta.databaseErrorCode,
+      meta.code,
+      source.code,
+    ].find((candidate): candidate is string => typeof candidate === "string");
+    const details = [
+      adapterCause.detail,
+      adapterCause.details,
+      source.detail,
+      meta.detail,
+      meta.details,
+    ].find((candidate): candidate is string => typeof candidate === "string");
+    const hint = [adapterCause.hint, source.hint, meta.hint].find(
+      (candidate): candidate is string => typeof candidate === "string",
+    );
+    const message =
+      (typeof adapterCause.message === "string" ? adapterCause.message : undefined) ?? source.message;
 
-    return new DatabaseError(source.message, { code, details, hint });
+    return new DatabaseError(message, { code, details, hint });
   }
 
   return new DatabaseError(String(error));
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
 /** The client, created on first use. Throws when DATABASE_URL is missing. */
