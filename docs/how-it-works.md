@@ -44,8 +44,8 @@ Postgres**, never in the browser and never from a form field.
 | 4 | `/admin/bookings` | Search, filters, detail, CSV export. Contact details and amounts are withheld from a `staff` session **in the query itself** |
 | 5 | `/admin/dates` | Add/edit nights, capacity, seats held back from online sale, open/close booking. Capacity can never go below what is already paid for |
 | 6 | `/admin/passes` | Pass types: price, description, how many people, max per booking, minimum age, on/off sale |
-| 7 | `/admin/gallery` | Upload → decoded, resized and re-encoded with `sharp` (metadata dropped) → stored in the **private** bucket as a draft → publish moves it to the public bucket. Public gallery shows published rows only |
-| 8 | `/admin/settings` | The event, venue, contact and social values the public site reads — **read-only today**; editing them from the UI is the next step, so today they are SQL / Table Editor rows |
+| 7 | `/admin/gallery` | The browser shrinks large photos to WebP and sends sequential batches; the server decodes/re-encodes with `sharp` (metadata dropped) and stores full/thumbnail objects in Vercel Blob. Uploads start as drafts; a staff preview uses the authenticated route; **Publish** changes the row status, and only published rows appear on the public gallery. The project uses a public Blob store, so draft URLs are unlisted rather than access-controlled. |
+| 8 | `/admin/settings` | The validated contact form edits the selected event row's phone, email, WhatsApp, street address, map/social links and support hours. Saving revalidates the public layout; the event's database values win over `siteConfig` fallbacks. |
 
 ---
 

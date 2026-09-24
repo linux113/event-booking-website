@@ -64,13 +64,13 @@ export const siteConfig = {
 
   /**
    * Fallback contact handles, used only where the event row has no value of its own.
-   * Placeholders — fill in the event record (or replace these) before launch.
+   * Keep these aligned with the organiser's published contact details.
    */
   contact: {
     /** International format, digits only — used to build wa.me links. */
-    whatsappNumber: "919000000000",
-    phoneDisplay: "+91 90000 00000",
-    email: "hello@example.com",
+    whatsappNumber: "919358535894",
+    phoneDisplay: "+91 9358535894",
+    email: "savriyasethevents@gmail.com",
     addressLines: ["My Village Garden", "Ajmer Road, Jaipur, Rajasthan"],
     /** Up to six lines, e.g. "Monday – Saturday · 10:00 AM – 8:00 PM". */
     supportHours: ["Monday – Saturday · 10:00 AM – 8:00 PM", "Festival days · 10:00 AM – 11:00 PM"],

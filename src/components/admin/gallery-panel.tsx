@@ -25,9 +25,11 @@ import type { AdminGalleryItem } from "@/types/gallery";
 export function GalleryPanel({
   items,
   canEdit,
+  storageConfigured,
 }: {
   items: readonly AdminGalleryItem[];
   canEdit: boolean;
+  storageConfigured: boolean;
 }) {
   const [rows, setRows] = useState<AdminGalleryItem[]>([...items]);
   const [notice, setNotice] = useState<string | null>(null);
@@ -49,9 +51,32 @@ export function GalleryPanel({
       <p className="text-muted text-sm/6">
         {summary.total} {summary.total === 1 ? "photo" : "photos"} ·{" "}
         <span className="text-peacock-soft font-semibold">{summary.published} live</span> ·{" "}
-        <span className="text-marigold-soft font-semibold">{summary.drafts} draft</span>
+        <span className="text-marigold-soft font-semibold">
+          {summary.drafts} {summary.drafts === 1 ? "draft" : "drafts"}
+        </span>
         {summary.archived > 0 ? ` · ${summary.archived} archived` : ""} · {formatBytes(summary.bytes)} of stored images
       </p>
+
+      {canEdit && !storageConfigured ? (
+        <section role="alert" className="border-marigold/40 bg-marigold/5 text-marigold-soft rounded-2xl border p-4">
+          <h2 className="font-semibold">Vercel Blob is not configured for this deployment</h2>
+          <p className="mt-1 text-sm/6">
+            Uploads and draft previews need a connected Blob store. In Vercel, open <strong>Project → Storage</strong>,
+            choose <strong>Create → Blob</strong>, create the store and connect it to this project. Enable the
+            Production environment, and Preview too if uploads happen on preview URLs. Then check Project → Settings →
+            Environment Variables for <code>BLOB_READ_WRITE_TOKEN</code> in those environments and redeploy.
+          </p>
+        </section>
+      ) : null}
+
+      {summary.drafts > 0 ? (
+        <p role="status" className="border-marigold/40 bg-marigold/5 text-marigold-soft rounded-xl border px-3.5 py-2.5 text-sm">
+          <strong>
+            {summary.drafts} {summary.drafts === 1 ? "draft" : "drafts"} — not visible on the site yet.
+          </strong>{" "}
+          Use the one-click Publish button on a photo below to make it live.
+        </p>
+      ) : null}
 
       {notice ? (
         <p role="status" className="border-peacock/40 bg-peacock/5 text-peacock-soft rounded-xl border px-3.5 py-2.5 text-sm">
@@ -62,6 +87,7 @@ export function GalleryPanel({
       {canEdit ? (
         <GalleryUploader
           albumSuggestions={albums}
+          storageConfigured={storageConfigured}
           onUploaded={(uploaded) => {
             for (const item of uploaded) {
               upsert(item);

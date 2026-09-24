@@ -30,15 +30,15 @@ values (
   'Nine nights of garba, dandiya and non-stop beats',
   'A nine-night Navratri and Dandiya festival with live dhol, garba raas rounds, dandiya circles, an anchor, DJ, LED wall, videographer and drone coverage. Family section and food court on site.',
   'My Village Garden',
-  'My Village Garden, Ajmer Road',
+  'Ajmer Road',
   'Jaipur',
   'Rajasthan',
   'https://maps.google.com/?q=My+Village+Garden+Jaipur',
-  -- Placeholder contact lines: the same ones the site used to carry in
-  -- `src/config`, now rows an organiser can change without a deploy.
-  '+91 90000 00000',
-  'hello@example.com',
-  '919000000000',
+  -- Real public contact details; the admin settings screen can update these
+  -- event-row values without a code deploy.
+  '+91 9358535894',
+  'savriyasethevents@gmail.com',
+  '919358535894',
   'https://www.instagram.com/',
   'https://www.facebook.com/',
   'https://www.youtube.com/',

@@ -44,7 +44,7 @@ npm run db:generate
 npm run typecheck    # must exit 0
 npm run lint         # must exit 0 (warnings OK)
 npm run build        # must exit 0
-npm run test:prisma  # 14/14
+npm run test:prisma  # 18/18
 npm run db:setup:test # 20/20
 ```
 
@@ -346,7 +346,7 @@ Failure text will name `BLOB_READ_WRITE_TOKEN` if unset.
 ## What this environment could not do for you
 
 - No Neon/Vercel/Razorpay credentials in this sandbox — **you** run Phases 1–5.
-- Local automated proof already done: typecheck, lint, build, `test:prisma` 14/14, `db:setup:test` 20/20.
+- Local automated proof already done: typecheck, lint, build, `test:prisma` 18/18, `test:normalise` 21/21, `test:settings` 8/8, `test:gallery-upload` 8/8, `db:setup:test` 20/20.
 - Live E2E (real Neon + real Vercel + real Razorpay) starts at Gate 1.
 
 **Recommended order (one line):** merge → local green → Neon create + `db:setup --seed` → SQL verify → local `.env.local` smoke → Vercel import + env + domain → deploy smoke (Gate 4) → webhook + full booking E2E (Gate 5) → harden → only then live keys.

@@ -114,7 +114,7 @@ in Vercel). Sign in at `/admin/login`.
 npm run typecheck   # 0 errors expected
 npm run lint        # 0 errors
 npm run build       # exit 0
-npm run test:prisma # 14/14 against a throwaway Postgres
+npm run test:prisma # 18/18 against a throwaway Postgres
 npm run db:setup:test # 20/20 setup tooling checks
 ```
 

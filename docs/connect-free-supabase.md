@@ -253,9 +253,9 @@ insert into public.events (
   'Your City',
   'Your State',
   'https://maps.google.com/?q=Your+Ground',
-  '+91 90000 00000',                          -- shown as a tel: link
-  'hello@example.com',                        -- shown as a mailto: link
-  '919000000000',                             -- digits only, no + or spaces
+  '+91 9358535894',                           -- shown as a tel: link
+  'savriyasethevents@gmail.com',              -- shown as a mailto: link
+  '919358535894',                             -- digits only, no + or spaces
   'https://www.instagram.com/yourhandle',
   'https://www.facebook.com/yourpage',
   'https://www.youtube.com/@yourchannel',

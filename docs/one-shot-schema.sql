@@ -34,15 +34,13 @@ begin;
 -- (Neon, or any bare PostgreSQL). It creates only the two things the schema
 -- actually assumes from the Supabase platform:
 --
---   1. an `auth` schema holding `auth.users` — `public.admin_users.user_id` is a
---      foreign key to it, because on Supabase staff accounts live in Supabase Auth;
---   2. `auth.uid()` — the function every Row Level Security policy is written
---      against (`is_staff(p_user_id uuid default auth.uid())`).
+--   1. an `auth` schema holding a minimal `auth.users` (kept so historical FKs in
+--      early migrations can apply cleanly before later migrations drop them);
+--   2. `auth.uid()` — still referenced by the six residual public read policies.
 --
--- Nothing else in the 16 migrations is Supabase-specific. The gallery migration
--- notices that there is no `storage` schema and skips its bucket setup; every
--- table, constraint, trigger, function, policy and grant in the schema is plain
--- PostgreSQL and behaves identically here.
+-- Nothing else in the migration chain is Supabase-specific. Gallery files live in
+-- Vercel Blob (keys on the row), not in a `storage` schema; every table, constraint,
+-- trigger, function and policy is plain PostgreSQL and behaves identically on Neon.
 --
 -- `auth.uid()` reads the same PostgREST-compatible claims Supabase reads, so it
 -- works under PostgREST (including Neon's Data API, which is PostgREST), under a
@@ -8677,7 +8675,7 @@ $function$;
 -- ===========================================================================
 
 -- =============================================================================
--- Garba Nights — initial seed data
+-- Savriya Seth Events — initial seed data
 --
 -- Idempotent: every row has a hard-coded uuid and an `on conflict ... do update`
 -- branch, so re-running this file never duplicates or orphans anything.
@@ -8704,19 +8702,19 @@ insert into public.events (
 values (
   'e0000000-0000-4000-8000-000000000001',
   'navratri-2026-jaipur',
-  'Garba Nights Navratri Utsav',
+  'Garba Night',
   'Nine nights of garba, dandiya and non-stop beats',
   'A nine-night Navratri and Dandiya festival with live dhol, garba raas rounds, dandiya circles, an anchor, DJ, LED wall, videographer and drone coverage. Family section and food court on site.',
   'My Village Garden',
-  'My Village Garden, Ajmer Road',
+  'Ajmer Road',
   'Jaipur',
   'Rajasthan',
   'https://maps.google.com/?q=My+Village+Garden+Jaipur',
-  -- Placeholder contact lines: the same ones the site used to carry in
-  -- `src/config`, now rows an organiser can change without a deploy.
-  '+91 90000 00000',
-  'hello@example.com',
-  '919000000000',
+  -- Real public contact details; the admin settings screen can update these
+  -- event-row values without a code deploy.
+  '+91 9358535894',
+  'savriyasethevents@gmail.com',
+  '919358535894',
   'https://www.instagram.com/',
   'https://www.facebook.com/',
   'https://www.youtube.com/',
@@ -8836,11 +8834,8 @@ on conflict (id) do update set
 --
 -- gallery       → published photos/videos come from the first shoot; seeding
 --                 placeholder URLs would put non-existent files on the site.
--- admin_users   → rows require a matching auth.users row. Create the owner in
---                 Supabase Auth first, then insert the allow-list row, e.g.:
---
---                   insert into public.admin_users (user_id, email, full_name, role)
---                   values ('<auth-user-uuid>', 'you@example.com', 'Your Name', 'owner');
+-- admin         → configured only via env (ADMIN_USERNAME, ADMIN_PASSWORD_HASH,
+--                 AUTH_SECRET). The admin_users table no longer exists.
 --
 -- bookings,
 -- digital_passes,
@@ -8927,7 +8922,7 @@ create table if not exists setup.applied_migrations (
 );
 
 insert into setup.applied_migrations (filename, checksum) values
-  ('prelude.sql', '4fa2fa5fd853d1bb8c5d41f1f2e423529b57ace1a87782076a204357a41c5d6f'),
+  ('prelude.sql', 'db1109e26adfb63763615ee6c0565160b441c42c0d608dca34a123f034d7563c'),
   ('20260922090000_init_schema.sql', 'd47ccf2a2b8f8d91cf318a97a2d0f88a57fda03ea617694a0ffc37539acd9ea6'),
   ('20260922090100_rls_policies.sql', '8fb100de19bff85c9a3c452e139c7cc02677a01b9e86bb1fa6dbbe8325e32bde'),
   ('20260922090200_public_data_api.sql', 'e690a83eca99b58f17491f738d400002d1ecdec996d220676eb950ffdc0adf31'),
@@ -8946,7 +8941,7 @@ insert into setup.applied_migrations (filename, checksum) values
   ('20260922091500_security_hardening.sql', '7aafacc9c3374b2b85ba9b2d1ee2d8a25f849c7da36c6ec812dea287ffb83fe4'),
   ('20260923090000_single_admin.sql', 'baafb2d8dd0549da33a4b37e303064e435c88b0ac796f04af0e586135c32950b'),
   ('20260923091000_no_customer_email.sql', '6550d98addf020667541d107bd63bbf5089d3b6a77cf85c67f03bd886fc8ce2c'),
-  ('seed.sql', 'ec74c8a328e40c9444133cc55cca088b3e41c2b7c52643a2ad2f657dae003a69')
+  ('seed.sql', '18005aa51a76513af83d5a8063bcae9cbc7dabd83bbe5f8d41c46604023342f7')
 on conflict (filename) do nothing;
 
 

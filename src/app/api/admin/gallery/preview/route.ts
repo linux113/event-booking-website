@@ -10,15 +10,15 @@ import { readGalleryPreview } from "@/lib/services/gallery-admin";
  *
  * The bytes of one photograph, for the staff screen.
  *
- * It exists because a draft lives in a private bucket: there is no public URL to put
- * in an `<img>`, and handing the browser a signed URL would put a working address for
- * an unpublished photograph into the page source. So the file comes through the staff
- * session instead, which is checked twice — by the request hook (`gallery:view`) and
- * again here. Only the `gallery:view` capability is needed: looking at a photograph
- * is not the same permission as publishing one.
+ * Drafts are excluded from the public gallery query, and their Blob URLs are not
+ * returned by the admin list. The project uses one public Blob store, so treat those
+ * unlisted URLs as non-sensitive rather than as access-controlled secrets. This route
+ * streams preview bytes through the staff session, checked by both the request hook
+ * (`gallery:view`) and this handler. Looking at a photograph is not the same permission
+ * as publishing one.
  *
- * The response is never cached by a shared cache: a private photograph must not
- * survive anywhere after it is unpublished.
+ * The response is private and short-lived so an authenticated preview is not retained
+ * by a shared cache after the row is unpublished or deleted.
  */
 
 export const runtime = "nodejs";
