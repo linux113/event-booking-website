@@ -39,7 +39,7 @@ type BookingsPageProps = {
  *
  * What changes with the role is the *shape of the answer*, not the layout of the page.
  * A staff member's request goes to the database with `p_include_contact = false`, so
- * mobile numbers, email addresses, amounts and gateway ids are never returned to this
+ * mobile numbers, amounts and gateway ids are never returned to this
  * process at all — there is nothing here to leak and nothing to remember to hide. The
  * panel says so in words rather than leaving empty columns to be wondered about.
  */
@@ -74,7 +74,7 @@ export default async function BookingsPage({ searchParams }: BookingsPageProps) 
         <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Bookings</h1>
         <p className="text-muted text-sm/6">
           Every booking for the event, newest first. Search by anything a guest can quote — reference, name, mobile,
-          email, pass ID or a Razorpay ID — and narrow with the filters.
+          pass ID or a Razorpay ID — and narrow with the filters.
           {page.includeContact
             ? " You can see contact details and amounts for every booking."
             : " Contact details and amounts are not included in this view."}

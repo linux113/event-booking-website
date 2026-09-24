@@ -232,7 +232,10 @@ export async function rpc<T = Record<string, unknown>>(
   }
 
   const keys = Object.keys(params);
-  const args = keys.map((name, index) => `${name} => $${index + 1}`).join(", ");
+  // Positional args ($1, $2...) are more compatible with @prisma/adapter-neon than
+  // named notation (p_arg => $1) which triggers "Invalid $queryRawUnsafe" on Neon.
+  // Callers already pass params in function-definition order.
+  const args = keys.map((_, index) => `$${index + 1}`).join(", ");
   const values = keys.map((name) => params[name]);
   const query = `select * from public.${fn}(${args})`;
 
@@ -258,7 +261,7 @@ export async function rpcScalar<T = unknown>(
   }
 
   const keys = Object.keys(params);
-  const args = keys.map((name, index) => `${name} => $${index + 1}`).join(", ");
+  const args = keys.map((_, index) => `$${index + 1}`).join(", ");
   const values = keys.map((name) => params[name]);
 
   try {
