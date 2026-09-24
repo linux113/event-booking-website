@@ -15,6 +15,7 @@
     "test:prisma": "node scripts/test/prisma-client.test.mjs",
     "test:normalise": "node scripts/test/db-normalise.test.mjs",
     "test:db-errors": "node --conditions=react-server scripts/test/db-errors.test.mjs",
+    "test:db-types": "node scripts/test/sql-driver-types.test.mjs",
     "test:admin-operations": "node scripts/test/admin-operations.test.mjs",
     "test:settings": "node scripts/test/event-settings.test.mjs",
     "test:gallery-upload": "node scripts/test/gallery-upload.test.mjs",

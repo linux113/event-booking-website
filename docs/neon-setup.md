@@ -57,7 +57,7 @@ full one-shot file into an existing database.
 
 For an existing database, use `npm run db:setup` with the **direct** URL to apply
 pending migrations, or run only the latest migration in Neon SQL Editor:
-`database/migrations/20260924090000_database_hero_image.sql`.
+`database/migrations/20260925130000_booking_check_in_times_text.sql`.
 
 The latest migrations are:
 
@@ -66,6 +66,7 @@ The latest migrations are:
 | `20260923090000_single_admin.sql` | Drops roles / `admin_users` / staff check-in attribution; keeps capacity, payment, pass and check-in guarantees |
 | `20260923091000_no_customer_email.sql` | Drops `bookings.customer_email`; restates booking/admin functions without email |
 | `20260924090000_database_hero_image.sql` | Adds optimized WebP `bytea` storage and a cache revision for the homepage hero; Gallery storage is unchanged |
+| `20260925130000_booking_check_in_times_text.sql` | Returns `admin_search_bookings.check_in_times` as ISO-8601 UTC `text[]` (was `timestamptz[]`, which `@prisma/adapter-neon` cannot deserialize); signature, column order and grants unchanged |
 
 `events.contact_email` is the organiser's contact and is unchanged by these migrations.
 `BLOB_READ_WRITE_TOKEN` is only needed for Gallery uploads.

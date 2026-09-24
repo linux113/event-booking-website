@@ -118,6 +118,7 @@ Vercel). Sign in at `/admin/login`.
 | `npm run test:settings` | Validate event contact rules and the WhatsApp brand icon — **9/9 passed** |
 | `npm run test:gallery-upload` | Verify gallery batches stay within request and file-count budgets |
 | `npm run test:hero-image` | Verify image validation, WebP optimization, size limits and versioned routes — **7/7 passed** |
+| `npm run test:db-types` | Check every SQL function the app calls (and every public table/view column) returns a type the Prisma driver adapter can deserialize — catches `UnsupportedNativeDataType` failures such as `timestamptz[]` before deploy — **33/33 passed** |
 | [`docs/one-shot-schema.sql`](./docs/one-shot-schema.sql) | Whole schema as one transactional batch for a provider SQL editor; regenerated with `node scripts/build-one-shot-schema.mjs --seed` |
 
 > **Prisma engine downloads:** if `binaries.prisma.sh` is blocked in your environment,
@@ -247,7 +248,10 @@ Razorpay or the database directly.
   `event_features` (plus setup bookkeeping outside `public`).
 - **Adapted by migrations:** `20260923090000_single_admin.sql` (drops roles /
   `admin_users` / staff check-in attribution), `20260923091000_no_customer_email.sql`
-  (drops `customer_email` and restates the booking/admin functions without it).
+  (drops `customer_email` and restates the booking/admin functions without it),
+  `20260925130000_booking_check_in_times_text.sql` (returns
+  `admin_search_bookings.check_in_times` as ISO-8601 UTC `text[]` instead of
+  `timestamptz[]`, which `@prisma/adapter-neon` cannot deserialize).
 - **Guarantees preserved:** unique booking reference & pass id generation, FK
   integrity, `idempotency_key` collapse, payment-state trigger protection, unique
   `qr_token`, unique `check_ins.digital_pass_id` (no double check-in), capacity checks
