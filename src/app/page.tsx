@@ -84,7 +84,6 @@ export default async function HomePage() {
   return (
     <>
       <Hero bundle={bundle} />
-      <FeatureStrip features={bundle.features} />
       <AboutSection
         event={bundle.event}
         highlights={bundle.highlights}
@@ -92,6 +91,7 @@ export default async function HomePage() {
         fallbackImage={result.gallery[0] ?? null}
       />
       <PassesPreview passes={bundle.passes} />
+      <FeatureStrip features={bundle.features} />
       <GalleryPreview items={result.gallery} content={bundle.content} />
       <ContactSection variant="preview" event={bundle.event} />
       <CtaBand contact={buildSiteContact(bundle.event)} />
