@@ -1,19 +1,18 @@
 /**
- * Gallery object keys and public URLs.
+ * Gallery media paths and public URLs.
  *
- * Objects live in a single Vercel Blob store (no separate draft/publish
- * buckets). Keys are namespaced under `gallery/` and embed the item id.
+ * Gallery images are stored in Postgres bytea (or external URLs).
  *
  * `publicGalleryUrl` must only be used for rows with `status = 'published'` —
  * drafts are never linked from public HTML; previews stream through the admin
- * route.
+ * preview route.
  */
 
-/** Namespace all gallery objects share in the Blob store. */
+/** Namespace all gallery objects share. Kept for backwards compatibility. */
 export const GALLERY_PREFIX = "gallery/" as const;
 
 /**
- * Build the storage key for one gallery item's file.
+ * Build the storage key / identifier for one gallery item's file.
  *
  *   full:  gallery/<itemId>/full.webp
  *   thumb: gallery/<itemId>/thumb.webp
@@ -27,12 +26,19 @@ export function galleryObjectKey(
   return `${GALLERY_PREFIX}${itemId}/${name}`;
 }
 
-/** Public URL for an object key (from its Blob `url` or the row's `url` column). */
-export function publicGalleryUrl(storagePath: string): string | null {
-  if (!storagePath) return null;
-  // Absolute URLs (Blob store / row.url) pass through.
-  if (/^https?:\/\//i.test(storagePath)) return storagePath;
-  // Relative keys without a stored URL are not publicly resolvable here.
+/** Public URL for a gallery item or storage path. */
+export function publicGalleryUrl(storagePathOrId: string, variant: "full" | "thumb" = "full"): string | null {
+  if (!storagePathOrId) return null;
+  // Absolute URLs pass through.
+  if (/^https?:\/\//i.test(storagePathOrId)) return storagePathOrId;
+
+  // If it's a UUID or starts with gallery/<uuid>
+  const match = storagePathOrId.match(/(?:^gallery\/)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+  if (match) {
+    const id = match[1];
+    return `/api/gallery-image/${id}?variant=${variant}`;
+  }
+
   return null;
 }
 

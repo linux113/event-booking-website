@@ -41,10 +41,12 @@ export function NightsPanel({
   const [notice, setNotice] = useState<string | null>(null);
   const [capacityDraft, setCapacityDraft] = useState<Record<string, string>>({});
   const [capacityError, setCapacityError] = useState<Record<string, string>>({});
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const capacity = useCatalogueSave<{ id: string; capacity: number; capacityHeld: number; seatsAvailable: number }>();
   const booking = useCatalogueSave<{ id: string; bookingOpen: boolean; seatsAvailable: number }>();
+  const remove = useCatalogueSave<{ id: string }>();
 
-  const busy = capacity.pending || booking.pending;
+  const busy = capacity.pending || booking.pending || remove.pending;
 
   function applySaved(saved: AdminNight) {
     setRows((current) => {
@@ -125,6 +127,23 @@ export function NightsPanel({
     }
   }
 
+  async function deleteNight(row: AdminNight) {
+    setNotice(null);
+    const result = await remove.send("/api/admin/dates", {
+      action: "delete",
+      id: row.id,
+    });
+
+    if (result.ok) {
+      setRows((current) => current.filter((r) => r.id !== row.id));
+      setConfirmDelete(null);
+      setEditing(null);
+      setNotice(`${formatEventDate(row.date)} removed.`);
+    } else {
+      setConfirmDelete(null);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -151,9 +170,9 @@ export function NightsPanel({
         </p>
       ) : null}
 
-      {(capacity.error ?? booking.error) ? (
+      {(capacity.error ?? booking.error ?? remove.error) ? (
         <p role="alert" className="border-rani/40 bg-rani/5 text-rani-soft rounded-xl border px-3.5 py-2.5 text-sm">
-          {(capacity.error ?? booking.error)?.message}
+          {(capacity.error ?? booking.error ?? remove.error)?.message}
         </p>
       ) : null}
 
@@ -266,6 +285,62 @@ export function NightsPanel({
                   >
                     {editing === row.id ? "Close" : "Edit night"}
                   </button>
+
+                  {confirmDelete === row.id ? (
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => deleteNight(row)}
+                        disabled={busy}
+                        className={buttonClasses({
+                          variant: "ghost",
+                          size: "sm",
+                          className: "text-rani-soft h-9 px-3.5",
+                        })}
+                      >
+                        {remove.pending ? "Removing…" : "Yes, remove night"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDelete(null)}
+                        disabled={busy}
+                        className={buttonClasses({ variant: "ghost", size: "sm", className: "h-9 px-2.5" })}
+                      >
+                        Cancel
+                      </button>
+                    </span>
+                  ) : (
+                    <span
+                      title={
+                        row.bookedPeople > 0 || row.bookedBookings > 0 || row.passesIssued > 0
+                          ? "This night has bookings and cannot be removed — close booking instead."
+                          : undefined
+                      }
+                      className="inline-flex"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setConfirmDelete(row.id);
+                          setEditing(null);
+                        }}
+                        disabled={busy || row.bookedPeople > 0 || row.bookedBookings > 0 || row.passesIssued > 0}
+                        className={buttonClasses({
+                          variant: "ghost",
+                          size: "sm",
+                          className: "text-rani-soft h-9 px-3.5 disabled:opacity-50",
+                        })}
+                      >
+                        Remove night
+                      </button>
+                    </span>
+                  )}
+
+                  {confirmDelete === row.id ? (
+                    <p className="text-rani-soft w-full text-xs font-medium">
+                      Remove {formatEventDate(row.date)}? This cannot be undone.
+                    </p>
+                  ) : null}
 
                   <p className="text-muted/80 text-[0.6875rem]">
                     Capacity cannot go below the {row.bookedPeople} people already paid for.

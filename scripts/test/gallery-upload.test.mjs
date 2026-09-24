@@ -76,13 +76,35 @@ check("a published Blob row resolves both stored image URLs for the public grid"
   assert.equal(item?.thumbnailSrc, "https://store.public.blob.vercel-storage.com/gallery/gallery-item/thumb.webp");
 });
 
-check("relative storage keys without a public Blob URL are not exposed", () => {
+check("a published row with database bytea resolves local endpoint image URLs for the public grid", () => {
+  const item = toGalleryItem({
+    id: "00000000-0000-0000-0000-000000000001",
+    url: null,
+    thumbnail_url: null,
+    storage_path: null,
+    thumbnail_path: null,
+    image_data: Buffer.from("image"),
+    thumbnail_data: Buffer.from("thumb"),
+    alt_text: "Dancers beneath stage lights",
+    title: "Festival night",
+    album: "Night 1",
+    media_type: "image",
+    width: 2400,
+    height: 1600,
+  });
+  assert.equal(item?.src, "/api/gallery-image/00000000-0000-0000-0000-000000000001?variant=full");
+  assert.equal(item?.thumbnailSrc, "/api/gallery-image/00000000-0000-0000-0000-000000000001?variant=thumb");
+});
+
+check("relative storage keys without a public Blob URL or image data are not exposed", () => {
   const item = toGalleryItem({
     id: "draft-item",
     url: null,
     thumbnail_url: null,
-    storage_path: "gallery/draft-item/full.webp",
-    thumbnail_path: "gallery/draft-item/thumb.webp",
+    storage_path: null,
+    thumbnail_path: null,
+    image_data: null,
+    thumbnail_data: null,
     alt_text: "Draft",
     title: "Draft",
     album: null,

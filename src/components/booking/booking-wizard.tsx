@@ -21,6 +21,7 @@ import {
   validateName,
   validatePeople,
   validateQuantity,
+  validateReferredBy,
 } from "@/lib/booking/validation";
 import type { EventNight, EventSummary, PassOption } from "@/types";
 import type {
@@ -91,6 +92,7 @@ const DETAIL_FIELDS: readonly (keyof BookingFieldErrors)[] = [
   "customerMobile",
   "quantity",
   "numberOfPeople",
+  "referredBy",
 ];
 
 /**
@@ -245,6 +247,12 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
       fieldErrors.numberOfPeople = peopleError;
     }
 
+    const referredByError = validateReferredBy(details.referredBy);
+
+    if (referredByError) {
+      fieldErrors.referredBy = referredByError;
+    }
+
     return fieldErrors;
   }
 
@@ -309,6 +317,7 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
       quantity: quantity ?? 0,
       numberOfPeople: numberOfPeople ?? 0,
       idempotencyKey: idempotencyKey.current,
+      referredBy: details.referredBy?.trim() || null,
     };
   }
 

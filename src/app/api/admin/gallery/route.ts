@@ -11,7 +11,6 @@ import {
 } from "@/lib/admin/api";
 import {
   firstGalleryError,
-  GALLERY_STORAGE_SETUP_MESSAGE,
   isCleanGalleryForm,
   parseGalleryForm,
 } from "@/lib/admin/gallery";
@@ -20,7 +19,6 @@ import {
   GALLERY_UPLOAD_REQUEST_BYTES,
 } from "@/lib/admin/gallery-upload";
 import { isDatabaseConfigured } from "@/config/env";
-import { isStorageConfigured } from "@/lib/gallery/storage";
 import { can } from "@/lib/auth/permissions";
 import { getStaffMember } from "@/lib/auth/staff";
 import {
@@ -175,10 +173,6 @@ export async function POST(request: Request): Promise<NextResponse> {
 async function uploadMany(request: Request): Promise<NextResponse> {
   if (!isDatabaseConfigured()) {
     return catalogueError("not-configured", "The gallery needs DATABASE_URL before photos can be uploaded.");
-  }
-
-  if (!isStorageConfigured()) {
-    return catalogueError("not-configured", GALLERY_STORAGE_SETUP_MESSAGE);
   }
 
   const declared = Number(request.headers.get("content-length") ?? "");

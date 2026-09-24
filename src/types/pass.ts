@@ -65,4 +65,5 @@ export interface DigitalPassTicket {
   city: string;
   passName: string;
   passComposition: string | null;
+  referredBy?: string | null;
 }

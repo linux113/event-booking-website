@@ -236,7 +236,7 @@ export async function verifySchema(db) {
     counts.tables === 10 && counts.policies === 6 && counts.rls_on === 10,
     JSON.stringify(counts),
   );
-  add("40 SECURITY DEFINER functions", counts.definer_fns === 40, `${counts.definer_fns} found`);
+  add("41 SECURITY DEFINER functions", counts.definer_fns === 41, `${counts.definer_fns} found`);
   add("the identity shim answers (auth.uid() is callable)", counts.uid_present === true);
   add(
     "no leftover tables in public from the setup bookkeeping",

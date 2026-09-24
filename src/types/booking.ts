@@ -24,7 +24,8 @@ export type BookingField =
   | "customerName"
   | "customerMobile"
   | "quantity"
-  | "numberOfPeople";
+  | "numberOfPeople"
+  | "referredBy";
 
 export type BookingFieldErrors = Partial<Record<BookingField, string>>;
 
@@ -40,6 +41,8 @@ export interface BookingRequestInput {
   numberOfPeople: number;
   /** Per-attempt key so a retried request cannot create a second booking. */
   idempotencyKey: string;
+  /** Optional referral name or partner. */
+  referredBy?: string | null;
 }
 
 /** A booking as the server confirmed it — every amount comes from the database. */
@@ -71,6 +74,7 @@ export interface CreatedBooking {
   createdAt: string;
   /** True when a retried/duplicate attempt returned an existing booking. */
   reusedExisting: boolean;
+  referredBy?: string | null;
 }
 
 export type BookingFailureKind =
@@ -112,6 +116,7 @@ export interface BookingDetailsDraft {
   customerMobile: string;
   quantity: string;
   numberOfPeople: string;
+  referredBy?: string;
 }
 
 // -----------------------------------------------------------------------------

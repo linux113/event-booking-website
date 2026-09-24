@@ -252,6 +252,7 @@ type DetailRow = {
   passes: unknown;
   check_ins: unknown;
   payment_events: unknown;
+  referred_by: string | null;
 };
 
 function mapBookingRow(row: SearchRow): BookingRow {
@@ -314,6 +315,7 @@ function mapDetail(row: DetailRow): BookingDetail {
     notes: row.notes,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    referredBy: row.referred_by,
     passes: passes.map((pass) => {
       const p = pass as Record<string, unknown>;
       return {

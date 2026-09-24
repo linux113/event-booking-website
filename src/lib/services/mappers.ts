@@ -146,18 +146,16 @@ export function toEventFeature(row: EventFeatureRow): EventFeature {
  * reach this mapper.
  */
 export function toGalleryItem(row: GalleryRow): GalleryItem | null {
-  const src = row.url ?? (row.storage_path ? publicGalleryUrl(row.storage_path) : null);
+  const src = row.url ?? (row.image_data !== null || row.storage_path ? publicGalleryUrl(row.id, "full") : null);
 
   if (!src) {
     return null;
   }
 
-  // New uploads store the thumbnail's exact Blob URL; retain key/path derivation
-  // only as a compatibility fallback for legacy rows.
   const thumbnailSrc =
     row.thumbnail_url ??
-    (row.thumbnail_path ? publicGalleryUrl(row.thumbnail_path) : null) ??
-    src.replace(/\/full\.(webp|jpg|jpeg|png)$/i, "/thumb.$1");
+    (row.thumbnail_data !== null || row.thumbnail_path ? publicGalleryUrl(row.id, "thumb") : null) ??
+    src;
 
   return {
     id: row.id,

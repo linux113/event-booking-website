@@ -38,6 +38,7 @@ export function PassTicket({ ticket, className }: PassTicketProps) {
     { label: "Pass", value: [ticket.passName, ticket.passComposition].filter(Boolean).join(" · ") },
     { label: "Date", value: formatEventDate(pass.validDate), icon: "calendar" },
     ...(timeRange ? [{ label: "Time", value: timeRange, icon: "clock" as const }] : []),
+    ...(ticket.referredBy ? [{ label: "Referred by", value: ticket.referredBy }] : []),
     { label: "Payment", value: ticket.paymentStatus.toUpperCase() },
   ];
 

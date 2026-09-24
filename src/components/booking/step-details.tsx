@@ -100,6 +100,18 @@ export function StepDetails({
           required
           disabled={disabled}
         />
+
+        <TextField
+          label="Referral name (optional)"
+          name="referredBy"
+          value={details.referredBy ?? ""}
+          onChange={(value) => onChange("referredBy", value)}
+          error={errors.referredBy}
+          hint="If a friend, promoter, or affiliate referred you, enter their name here."
+          placeholder="e.g. Rahul Sharma"
+          disabled={disabled}
+          className="sm:col-span-2"
+        />
       </div>
     </div>
   );

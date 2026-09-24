@@ -147,6 +147,7 @@ export interface BookingDetail {
   passes: BookingPass[];
   checkIns: BookingCheckIn[];
   paymentEvents: BookingPaymentEvent[];
+  referredBy?: string | null;
 }
 
 // -----------------------------------------------------------------------------
