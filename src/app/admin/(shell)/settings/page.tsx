@@ -20,11 +20,11 @@ export const metadata: Metadata = {
 export const dynamic = "force-dynamic";
 
 /**
- * Event settings — the selected event row that supplies the public contact block.
+ * Event settings — the selected event row that supplies every page's public copy.
  *
- * The contact form is intentionally narrow: it edits the phone, email, WhatsApp,
- * street address, map/social URLs and support hours without exposing unrelated event
- * publishing or booking settings.
+ * The event story (name, slug, status, tagline and description), the About Us /
+ * gallery / FAQ overrides and the contact block are all organised into separate
+ * form cards; none of them exposes booking, pass or payment mechanics.
  */
 export default async function SettingsPage() {
   const staff = await requirePermission("settings:view");
@@ -56,25 +56,16 @@ export default async function SettingsPage() {
         </p>
       </div>
 
-      <section className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-5">
-        <h2 className="text-sm font-semibold tracking-tight">The event</h2>
-
-        {event ? (
-          <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
-            <Field label="Name" value={event.name} />
-            <Field label="Slug" value={event.slug} />
-            <Field label="Status" value={event.status.toUpperCase()} hint={statusHint(event.status)} />
-            <Field label="Tagline" value={event.tagline ?? "—"} />
-            <Field label="Venue name" value={event.venueName} />
-            <Field label="City" value={[event.city, event.state].filter(Boolean).join(", ")} />
-            <Field label="Currency" value={event.currency} />
-          </dl>
-        ) : (
+      {event ? (
+        <EventBasicsSettingsForm event={event} canEdit={canEdit} />
+      ) : (
+        <section className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-5">
+          <h2 className="text-sm font-semibold tracking-tight">The event</h2>
           <p className="text-muted text-sm/6">
             No event row exists yet. Apply the schema seed (see docs) or create one before the site can show anything.
           </p>
-        )}
-      </section>
+        </section>
+      )}
 
       {event ? (
         <EventHeroImageSettings
@@ -87,8 +78,6 @@ export default async function SettingsPage() {
           initialVersion={event.heroImageVersion}
         />
       ) : null}
-
-      {event ? <EventBasicsSettingsForm event={event} canEdit={canEdit} /> : null}
 
       {event ? <SiteContentSettingsForm event={event} canEdit={canEdit} /> : null}
 
@@ -121,19 +110,6 @@ export default async function SettingsPage() {
       </section>
     </>
   );
-}
-
-function statusHint(status: string): string {
-  switch (status) {
-    case "published":
-      return "Live: every public page can read it.";
-    case "draft":
-      return "Hidden from the public site.";
-    case "archived":
-      return "Kept for history, not bookable.";
-    default:
-      return "";
-  }
 }
 
 function Field({ label, value, hint }: { label: string; value: string; hint?: string }) {

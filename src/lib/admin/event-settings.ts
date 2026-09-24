@@ -23,12 +23,16 @@ const LIMITS = {
 
 const BASICS_LIMITS = {
   name: 120,
+  slug: 80,
   tagline: 240,
   description: 2000,
   venueName: 120,
   city: 120,
   state: 120,
+  currency: 3,
 } as const;
+
+export const EVENT_STATUSES = ["draft", "published", "archived"] as const;
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -188,11 +192,14 @@ export function parseEventBasicsSettings(
   const source = (typeof input === "object" && input !== null ? input : {}) as Record<string, unknown>;
   const raw: EventBasicsSettingsInput = {
     name: asString(source.name),
+    slug: asString(source.slug),
+    status: asString(source.status),
     tagline: asString(source.tagline),
     description: asString(source.description),
     venueName: asString(source.venueName),
     city: asString(source.city),
     state: asString(source.state),
+    currency: asString(source.currency).toUpperCase(),
   };
   const errors: EventBasicsSettingsErrors = {};
 
@@ -200,6 +207,18 @@ export function parseEventBasicsSettings(
     errors.name = "Enter the event name.";
   } else if (hasTooManyCharacters(raw.name, BASICS_LIMITS.name)) {
     errors.name = `Keep the event name under ${BASICS_LIMITS.name} characters.`;
+  }
+
+  if (!raw.slug) {
+    errors.slug = "Enter the event slug.";
+  } else if (hasTooManyCharacters(raw.slug, BASICS_LIMITS.slug)) {
+    errors.slug = `Keep the slug under ${BASICS_LIMITS.slug} characters.`;
+  } else if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(raw.slug)) {
+    errors.slug = "Use lowercase letters, numbers and single hyphens, e.g. navratri-2026-jaipur.";
+  }
+
+  if (!EVENT_STATUSES.includes(raw.status as (typeof EVENT_STATUSES)[number])) {
+    errors.status = "Choose draft, published or archived.";
   }
 
   if (hasTooManyCharacters(raw.tagline, BASICS_LIMITS.tagline)) {
@@ -226,13 +245,20 @@ export function parseEventBasicsSettings(
     errors.state = `Keep the state under ${BASICS_LIMITS.state} characters.`;
   }
 
+  if (raw.currency.length !== BASICS_LIMITS.currency || !/^[A-Z]{3}$/.test(raw.currency)) {
+    errors.currency = `Use the 3-letter currency code, e.g. INR.`;
+  }
+
   const values: EventBasicsSettingsValues = {
     name: raw.name,
+    slug: raw.slug,
+    status: raw.status as EventBasicsSettingsValues["status"],
     tagline: raw.tagline || null,
     description: raw.description || null,
     venueName: raw.venueName,
     city: raw.city,
     state: raw.state || null,
+    currency: raw.currency,
   };
 
   return { values, errors };

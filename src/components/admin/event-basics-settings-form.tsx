@@ -4,8 +4,9 @@ import { useState, type FormEvent } from "react";
 
 import { useCatalogueSave } from "@/components/admin/use-catalogue-save";
 import { Button } from "@/components/ui/button";
-import { TextAreaField, TextField } from "@/components/ui/field";
+import { SelectField, TextAreaField, TextField } from "@/components/ui/field";
 import {
+  EVENT_STATUSES,
   isCleanEventBasicsSettings,
   parseEventBasicsSettings,
 } from "@/lib/admin/event-settings";
@@ -15,14 +16,23 @@ import type {
   EventSettings,
 } from "@/types/event-settings";
 
+const STATUS_LABELS: Record<(typeof EVENT_STATUSES)[number], string> = {
+  draft: "Draft — hidden from the public site",
+  published: "Published — live, every public page can read it",
+  archived: "Archived — kept for history, not bookable",
+};
+
 function inputFromEvent(event: EventSettings): EventBasicsSettingsInput {
   return {
     name: event.name,
+    slug: event.slug,
+    status: event.status,
     tagline: event.tagline ?? "",
     description: event.description ?? "",
     venueName: event.venueName,
     city: event.city,
     state: event.state ?? "",
+    currency: event.currency,
   };
 }
 
@@ -87,14 +97,16 @@ export function EventBasicsSettingsForm({
   if (!canEdit) {
     return (
       <section className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-5">
-        <h2 className="text-sm font-semibold tracking-tight">About the event</h2>
+        <h2 className="text-sm font-semibold tracking-tight">The event</h2>
         <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
           <ReadOnlyField label="Event name" value={event.name} />
+          <ReadOnlyField label="Slug" value={event.slug} />
+          <ReadOnlyField label="Status" value={event.status.toUpperCase()} />
           <ReadOnlyField label="Tagline" value={event.tagline ?? ""} />
           <ReadOnlyField label="Description" value={event.description ?? ""} />
           <ReadOnlyField label="Venue name" value={event.venueName} />
-          <ReadOnlyField label="City" value={event.city} />
-          <ReadOnlyField label="State" value={event.state ?? ""} />
+          <ReadOnlyField label="City" value={[event.city, event.state].filter(Boolean).join(", ")} />
+          <ReadOnlyField label="Currency" value={event.currency} />
         </dl>
       </section>
     );
@@ -103,15 +115,15 @@ export function EventBasicsSettingsForm({
   return (
     <section className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-5">
       <div className="flex flex-col gap-1">
-        <h2 className="text-sm font-semibold tracking-tight">About the event</h2>
+        <h2 className="text-sm font-semibold tracking-tight">The event</h2>
         <p className="text-muted text-sm/6">
-          The name and tagline headline the homepage hero; the description is the &ldquo;About the event&rdquo; text
-          next to the artwork on the homepage and on the About page. Saved changes go live without a deployment.
+          Everything the public site reads from the event record: the name, slug and status, the &ldquo;About the
+          event&rdquo; tagline and description, and the venue names. Saved changes go live without a deployment.
         </p>
       </div>
 
       <form className="flex flex-col gap-4" onSubmit={(submitEvent) => void submit(submitEvent)} noValidate>
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <TextField
             label="Event name"
             name="name"
@@ -122,6 +134,27 @@ export function EventBasicsSettingsForm({
             hint="Shown everywhere the event is named — the hero, page titles and passes."
           />
           <TextField
+            label="Slug"
+            name="slug"
+            autoComplete="off"
+            value={form.slug}
+            onChange={(value) => setForm((current) => ({ ...current, slug: value }))}
+            error={errors.slug}
+            hint="Lowercase letters, numbers and hyphens; unique across events."
+          />
+          <SelectField
+            label="Status"
+            name="status"
+            value={form.status}
+            onChange={(value) => setForm((current) => ({ ...current, status: value }))}
+            options={EVENT_STATUSES.map((status) => ({ value: status, label: STATUS_LABELS[status] }))}
+            error={errors.status}
+            hint="Draft hides the event and its booking from visitors."
+          />
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <TextField
             label="Tagline"
             name="tagline"
             autoComplete="off"
@@ -129,6 +162,15 @@ export function EventBasicsSettingsForm({
             onChange={(value) => setForm((current) => ({ ...current, tagline: value }))}
             error={errors.tagline}
             hint="One line under the event name, and the About-heading on the homepage."
+          />
+          <TextField
+            label="Currency"
+            name="currency"
+            autoComplete="off"
+            value={form.currency}
+            onChange={(value) => setForm((current) => ({ ...current, currency: value.toUpperCase() }))}
+            error={errors.currency}
+            hint="The 3-letter code prices are shown with, e.g. INR."
           />
         </div>
 

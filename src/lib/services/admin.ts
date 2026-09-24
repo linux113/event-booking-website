@@ -716,11 +716,14 @@ export async function saveEventBasicsSettings(
       update public.events
       set
         name = ${values.name},
+        slug = ${values.slug},
+        status = ${values.status},
         tagline = ${values.tagline},
         description = ${values.description},
         venue_name = ${values.venueName},
         city = ${values.city},
         state = ${values.state},
+        currency = ${values.currency},
         updated_at = now()
       where id = (
         select id from public.events
@@ -759,12 +762,19 @@ export async function saveEventBasicsSettings(
     const dbError = error instanceof DatabaseError ? error : new DatabaseError(String(error));
     console.error("[admin] event basics save failed:", dbError.message, dbError.code ?? "");
 
+    if (dbError.code === "23505") {
+      return {
+        ok: false,
+        error: { kind: "invalid-input", message: "That slug is already used by another event.", field: "slug" },
+      };
+    }
+
     if (dbError.code === "23514") {
       return {
         ok: false,
         error: {
           kind: "invalid-input",
-          message: "The database refused one of these values. The event and venue names cannot be blank.",
+          message: "The database refused one of these values. The event and venue names cannot be blank, the status must be draft/published/archived and the currency 3 letters.",
         },
       };
     }

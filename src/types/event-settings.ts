@@ -67,24 +67,30 @@ export interface EventContactSettingsValues {
 
 export type EventContactSettingsErrors = Partial<Record<keyof EventContactSettingsInput, string>>;
 
-/** Raw string values held by the "About the event" (basics) form. */
+/** Raw string values held by the "The event" (basics) form. */
 export interface EventBasicsSettingsInput {
   name: string;
+  slug: string;
+  status: string;
   tagline: string;
   description: string;
   venueName: string;
   city: string;
   state: string;
+  currency: string;
 }
 
 /** Normalised values ready to write to the event row. */
 export interface EventBasicsSettingsValues {
   name: string;
+  slug: string;
+  status: "draft" | "published" | "archived";
   tagline: string | null;
   description: string | null;
   venueName: string;
   city: string;
   state: string | null;
+  currency: string;
 }
 
 export type EventBasicsSettingsErrors = Partial<Record<keyof EventBasicsSettingsInput, string>>;

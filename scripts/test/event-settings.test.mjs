@@ -129,27 +129,63 @@ check("maps links require HTTPS and support hours are capped at six lines", () =
   assert.ok(invalid.errors.supportHours);
 });
 
-check("event basics validate: name, venue and city are required and lengths are capped", () => {
+check("event basics validate: required fields present, optional copy can be blanked", () => {
   const real = parseEventBasicsSettings({
     name: "Garba Night ×9",
+    slug: "navratri-2026-jaipur",
+    status: "published",
     tagline: "Jaipur's largest Navratri celebration",
     description: "Nine nights of garba, dandiya raas and live music.",
     venueName: "My Village Garden",
     city: "Jaipur",
     state: "Rajasthan",
+    currency: "INR",
   });
   assert.equal(isCleanEventBasicsSettings(real.errors), true);
   assert.equal(real.values.state, "Rajasthan");
 
-  const missing = parseEventBasicsSettings({ name: "  ", venueName: "", city: "" });
+  const missing = parseEventBasicsSettings({ name: "  ", slug: "", status: "", venueName: "", city: "", currency: "" });
   assert.ok(missing.errors.name);
+  assert.ok(missing.errors.slug);
+  assert.ok(missing.errors.status);
   assert.ok(missing.errors.venueName);
   assert.ok(missing.errors.city);
+  assert.ok(missing.errors.currency);
 
-  const optionalBlank = parseEventBasicsSettings({ name: "Garba Night ×9", venueName: "MV Garden", city: "Jaipur" });
+  const optionalBlank = parseEventBasicsSettings({
+    name: "Garba Night ×9",
+    slug: "navratri-2026-jaipur",
+    status: "draft",
+    venueName: "MV Garden",
+    city: "Jaipur",
+    currency: "INR",
+  });
+  assert.equal(isCleanEventBasicsSettings(optionalBlank.errors), true);
   assert.equal(optionalBlank.values.tagline, null);
   assert.equal(optionalBlank.values.description, null);
   assert.equal(optionalBlank.values.state, null);
+});
+
+check("event basics validate slug, status and currency", () => {
+  const real = parseEventBasicsSettings({
+    name: "Garba Night",
+    slug: "navratri-2026-jaipur",
+    status: "published",
+    venueName: "My Village Garden",
+    city: "Jaipur",
+    currency: "inr",
+  });
+  assert.equal(isCleanEventBasicsSettings(real.errors), true);
+  assert.equal(real.values.currency, "INR");
+
+  const badSlug = parseEventBasicsSettings({ name: "X", slug: "Bad Slug!", status: "published", venueName: "V", city: "C", currency: "INR" });
+  assert.ok(badSlug.errors.slug);
+
+  const badStatus = parseEventBasicsSettings({ name: "X", slug: "ok-slug", status: "live", venueName: "V", city: "C", currency: "INR" });
+  assert.ok(badStatus.errors.status);
+
+  const badCurrency = parseEventBasicsSettings({ name: "X", slug: "ok-slug", status: "draft", venueName: "V", city: "C", currency: "IN" });
+  assert.ok(badCurrency.errors.currency);
 });
 
 check("site content validates lengths, splits one checklist point per line and keeps filled FAQs", () => {
