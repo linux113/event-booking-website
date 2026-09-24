@@ -82,7 +82,7 @@ export function BookingFilters({
         </div>
         <p className="text-muted text-xs/5">
           One box for everything a guest can give you: the booking reference, their name, the number they booked
-          with, their email, a pass ID, or the Razorpay payment or order ID from their receipt.
+          with, a pass ID, or the Razorpay payment or order ID from their receipt.
         </p>
       </div>
 

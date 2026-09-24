@@ -47,11 +47,9 @@ export function BookingsTable({
                   Customer
                 </th>
                 {includeContact ? (
-                  <>
-                    <th scope="col" className="border-border/60 hidden border-b px-4 py-2.5 lg:table-cell">
-                      Mobile
-                    </th>
-                  </>
+                  <th scope="col" className="border-border/60 hidden border-b px-4 py-2.5 lg:table-cell">
+                    Mobile
+                  </th>
                 ) : null}
                 <th scope="col" className="border-border/60 border-b px-4 py-2.5">
                   Date
@@ -139,13 +137,9 @@ function Row({
       </td>
 
       {includeContact ? (
-        <>
-          <td className="hidden px-4 py-3 align-top lg:table-cell">
-            <span className="text-xs">{row.customerMobile ?? "—"}</span>
-          </td>
-          <td className="hidden px-4 py-3 align-top xl:table-cell">
-          </td>
-        </>
+        <td className="hidden px-4 py-3 align-top lg:table-cell">
+          <span className="text-xs">{row.customerMobile ?? "—"}</span>
+        </td>
       ) : null}
 
       <td className="px-4 py-3 align-top">
