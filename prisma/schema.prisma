@@ -224,6 +224,7 @@ model Booking {
   paymentStatus     String   @default("unpaid") @map("payment_status")
   razorpayOrderId   String?  @unique @map("razorpay_order_id")
   razorpayPaymentId String?  @unique @map("razorpay_payment_id")
+  referredBy        String?  @map("referred_by")
   notes             String?
   idempotencyKey    String?  @map("idempotency_key")
   createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)

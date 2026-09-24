@@ -70,6 +70,7 @@ export function BookingDetailPanel({
           {includeContact ? (
             <>
               <Fact label="Mobile" value={booking.customerMobile ?? "—"} />
+              {booking.referredBy ? <Fact label="Referred by" value={booking.referredBy} /> : null}
             </>
           ) : null}
           <Fact label="Booked" value={formatTimestamp(booking.createdAt)} />

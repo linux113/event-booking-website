@@ -39,6 +39,7 @@ const FIELD_BY_CODE: Record<string, keyof BookingFieldErrors> = {
   PB004: "quantity",
   PB005: "numberOfPeople",
   PB006: "eventDateId",
+  PB007: "referredBy",
 };
 
 export async function createPendingBooking(payload: unknown): Promise<CreateBookingResult> {
@@ -72,6 +73,7 @@ export async function createPendingBooking(payload: unknown): Promise<CreateBook
     p_quantity: input.quantity,
     p_number_of_people: input.numberOfPeople,
     p_idempotency_key: input.idempotencyKey,
+    p_referred_by: input.referredBy ?? null,
   };
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -186,6 +188,7 @@ type BookingRow = {
   razorpay_order_id: string | null;
   created_at: string;
   was_existing: boolean;
+  referred_by?: string | null;
 };
 
 function mapBooking(row: BookingRow): CreatedBooking {
@@ -211,5 +214,6 @@ function mapBooking(row: BookingRow): CreatedBooking {
     razorpayOrderId: row.razorpay_order_id,
     createdAt: row.created_at,
     reusedExisting: row.was_existing,
+    referredBy: row.referred_by ?? null,
   };
 }

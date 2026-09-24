@@ -111,6 +111,7 @@ type TicketRow = PassRow & {
   city: string;
   pass_name: string;
   pass_composition: string | null;
+  referred_by?: string | null;
 };
 
 function mapTicket(row: TicketRow): DigitalPassTicket {
@@ -152,6 +153,7 @@ function mapTicket(row: TicketRow): DigitalPassTicket {
     city: row.city,
     passName: row.pass_name,
     passComposition: row.pass_composition,
+    referredBy: row.referred_by ?? null,
   };
 }
 

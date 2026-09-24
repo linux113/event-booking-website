@@ -124,6 +124,7 @@ export function renderPassTicketSvg(ticket: DigitalPassTicket): string {
     ["Date", `${formatEventDate(ticket.eventDate)}${timeRange ? ` · ${timeRange}` : ""}`, 268, 200],
     ["Payment", ticket.paymentStatus.toUpperCase(), 268, 236],
     ["Status", pass.displayLabel, 268, 272],
+    ...(ticket.referredBy ? [["Referred by", ticket.referredBy, 44, 308] as [string, string, number, number]] : []),
   ];
 
   return [

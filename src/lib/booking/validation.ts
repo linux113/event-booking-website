@@ -43,6 +43,20 @@ export function validateName(raw: string): string | null {
   return null;
 }
 
+const REFERRED_BY_MAX = 80;
+
+export function validateReferredBy(raw: string | undefined | null): string | null {
+  if (!raw) return null;
+  const value = raw.trim();
+  if (value.length === 0) return null;
+
+  if (value.length > REFERRED_BY_MAX) {
+    return `Please keep the referral name under ${REFERRED_BY_MAX} characters.`;
+  }
+
+  return null;
+}
+
 /**
  * Normalise an Indian mobile number to `+91XXXXXXXXXX`, or return null when it is
  * not a valid 10-digit mobile. Accepts spaces, dashes, brackets, a `+91`, `91` or
@@ -223,6 +237,13 @@ export function validateBookingRequest(payload: unknown): BookingValidationResul
     fieldErrors.numberOfPeople = "Enter how many people are attending as a whole number.";
   }
 
+  const referredByRaw = typeof input.referredBy === "string" ? input.referredBy : "";
+  const referredByError = validateReferredBy(referredByRaw);
+  if (referredByError) {
+    fieldErrors.referredBy = referredByError;
+  }
+  const referredBy = referredByRaw.trim() || null;
+
   const idempotencyKey =
     typeof input.idempotencyKey === "string" ? input.idempotencyKey.trim() : "";
 
@@ -254,6 +275,7 @@ export function validateBookingRequest(payload: unknown): BookingValidationResul
       quantity: quantity as number,
       numberOfPeople: numberOfPeople as number,
       idempotencyKey,
+      referredBy,
     },
   };
 }

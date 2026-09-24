@@ -125,6 +125,12 @@ export function StepSummary({
               {" "}
               · {details.customerMobile || "—"}
             </span>
+            {details.referredBy?.trim() ? (
+              <span className="text-muted">
+                {" "}
+                · Referred by {details.referredBy.trim()}
+              </span>
+            ) : null}
           </dd>
           <button
             type="button"
