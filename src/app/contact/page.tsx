@@ -11,7 +11,8 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { SectionHeading } from "@/components/ui/section-heading";
 import { buildContactChannels, buildSiteContact, WHATSAPP_MESSAGE } from "@/lib/contact";
-import { getFeaturedEvent } from "@/lib/services/events";
+import { getFeaturedEvent, getSiteContent } from "@/lib/services/events";
+import { parseSiteContentJson } from "@/lib/site-content";
 
 export const metadata: Metadata = {
   title: "Contact",
@@ -21,7 +22,8 @@ export const metadata: Metadata = {
 
 export const revalidate = 300;
 
-const FAQS = [
+/** The default "Questions before booking", shown until the organiser saves their own. */
+const DEFAULT_FAQS = [
   {
     question: "Do I need a partner for garba or dandiya?",
     answer:
@@ -58,7 +60,7 @@ const FAQS = [
  * all the page says so instead of showing a placeholder telephone number.
  */
 export default async function ContactPage() {
-  const result = await getFeaturedEvent();
+  const [result, contentResult] = await Promise.all([getFeaturedEvent(), getSiteContent()]);
 
   if (!result.ok) {
     return (
@@ -73,6 +75,9 @@ export default async function ContactPage() {
   const event = result.data;
   const contact = buildSiteContact(event);
   const channels = buildContactChannels(event);
+  // Organiser-edited FAQs; falls back to the default questions when unset or unreadable.
+  const content = contentResult.ok ? contentResult.data : parseSiteContentJson(null);
+  const faqs = content.faqs.length > 0 ? content.faqs : DEFAULT_FAQS;
 
   return (
     <>
@@ -236,12 +241,12 @@ export default async function ContactPage() {
         <Container className="flex flex-col gap-8">
           <SectionHeading
             eyebrow="FAQ"
-            title="Common questions"
-            description="These answers describe how the event runs today. Booking-specific answers are updated once checkout is live."
+            title="Questions before booking"
+            description="These answers describe how the event runs today. Anything else, ask us on WhatsApp before you book."
           />
 
           <div className="grid gap-4 sm:grid-cols-2">
-            {FAQS.map((faq) => (
+            {faqs.map((faq) => (
               <div key={faq.question} className="border-border bg-surface/50 rounded-2xl border p-5">
                 <h3 className="text-base font-semibold tracking-tight">{faq.question}</h3>
                 <p className="text-muted mt-2 text-sm/6">{faq.answer}</p>

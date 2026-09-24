@@ -8,7 +8,9 @@ import { Container, Section } from "@/components/ui/container";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { SectionHeading } from "@/components/ui/section-heading";
+import { getSiteContent } from "@/lib/services/events";
 import { listPublishedGallery } from "@/lib/services/gallery";
+import { parseSiteContentJson } from "@/lib/site-content";
 
 export const metadata: Metadata = {
   title: "Gallery",
@@ -20,7 +22,7 @@ export const metadata: Metadata = {
 export const revalidate = 300;
 
 export default async function GalleryPage() {
-  const result = await listPublishedGallery();
+  const [result, contentResult] = await Promise.all([listPublishedGallery(), getSiteContent()]);
 
   if (!result.ok) {
     return (
@@ -34,13 +36,18 @@ export default async function GalleryPage() {
 
   const items = result.data;
   const albums = Array.from(new Set(items.map((item) => item.tag)));
+  // Organiser-edited heading; falls back to the default copy when unset or unreadable.
+  const content = contentResult.ok ? contentResult.data : parseSiteContentJson(null);
 
   return (
     <>
       <PageHero
         eyebrow="Gallery"
-        title="Moments from the dance floor"
-        description="Every photo and video on this page is published by the organiser from the event gallery. Nothing is stock imagery."
+        title={content.galleryTitle ?? "Moments from the dance floor"}
+        description={
+          content.galleryIntro ??
+          "Every photo and video on this page is published by the organiser from the event gallery. Nothing is stock imagery."
+        }
       />
 
       <Section className="pt-0">

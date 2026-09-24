@@ -3,14 +3,16 @@ import { Button } from "@/components/ui/button";
 import { Container, Section } from "@/components/ui/container";
 import { EmptyState } from "@/components/ui/empty-state";
 import { SectionHeading } from "@/components/ui/section-heading";
-import type { GalleryItem } from "@/types";
+import type { GalleryItem, SiteContent } from "@/types";
 
 type GalleryPreviewProps = {
   items: readonly GalleryItem[];
+  /** Organiser-edited gallery title/intro; null/empty fields fall back to the defaults. */
+  content: SiteContent;
 };
 
 /** Home-page gallery teaser, fed by the `gallery` table. */
-export function GalleryPreview({ items }: GalleryPreviewProps) {
+export function GalleryPreview({ items, content }: GalleryPreviewProps) {
   const [feature, ...rest] = items;
 
   return (
@@ -19,8 +21,11 @@ export function GalleryPreview({ items }: GalleryPreviewProps) {
         <div className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
           <SectionHeading
             eyebrow="Gallery"
-            title="Nights we are still talking about"
-            description="Photos and videos are published here by the organiser after each night."
+            title={content.galleryTitle ?? "Nights we are still talking about"}
+            description={
+              content.galleryIntro ??
+              "Photos and videos are published here by the organiser after each night."
+            }
           />
           <Button href="/gallery" variant="secondary" className="sm:self-end">
             Open full gallery

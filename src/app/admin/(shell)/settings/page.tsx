@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 
+import { EventBasicsSettingsForm } from "@/components/admin/event-basics-settings-form";
 import { EventContactSettingsForm } from "@/components/admin/event-contact-settings-form";
 import { EventHeroImageSettings } from "@/components/admin/event-hero-image-settings";
+import { SiteContentSettingsForm } from "@/components/admin/site-content-settings-form";
 import { ErrorState } from "@/components/ui/error-state";
 import { siteConfig } from "@/config/site";
 import { siteUrl } from "@/config/env";
@@ -48,8 +50,9 @@ export default async function SettingsPage() {
       <div className="flex flex-col gap-1">
         <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Event settings</h1>
         <p className="text-muted text-sm/6">
-          Check the event the site is using, update the homepage hero artwork, and edit its public contact and venue
-          details. Saved changes take effect without a deployment.
+          Check the event the site is using, update the homepage hero artwork, and edit its public story — the event
+          details, the About Us copy, the gallery heading, the booking FAQs and the contact details. Saved changes
+          take effect without a deployment.
         </p>
       </div>
 
@@ -84,6 +87,10 @@ export default async function SettingsPage() {
           initialVersion={event.heroImageVersion}
         />
       ) : null}
+
+      {event ? <EventBasicsSettingsForm event={event} canEdit={canEdit} /> : null}
+
+      {event ? <SiteContentSettingsForm event={event} canEdit={canEdit} /> : null}
 
       {event ? <EventContactSettingsForm event={event} canEdit={canEdit} /> : null}
 

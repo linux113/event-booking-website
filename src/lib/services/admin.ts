@@ -17,7 +17,13 @@ import { DatabaseError, rpc, sql } from "@/lib/db/client";
 import { adminHeroImagePreviewUrl } from "@/lib/admin/hero-image";
 import { gateNight } from "@/lib/gate/night";
 import { fail, ok, type Result } from "@/lib/services/result";
-import type { EventContactSettingsValues, EventSettings } from "@/types/event-settings";
+import { parseSiteContentJson, siteContentToJson } from "@/lib/site-content";
+import type { SiteContent } from "@/types";
+import type {
+  EventBasicsSettingsValues,
+  EventContactSettingsValues,
+  EventSettings,
+} from "@/types/event-settings";
 import type { CatalogueResult } from "@/types/catalogue";
 
 /**
@@ -495,6 +501,7 @@ interface EventSettingsRow {
   slug: string;
   status: string;
   tagline: string | null;
+  description: string | null;
   venue_name: string;
   venue_address: string | null;
   city: string;
@@ -514,7 +521,23 @@ interface EventSettingsRow {
   hero_image_version: string;
 }
 
-function toEventSettings(row: EventSettingsRow): EventSettings {
+/** The organiser-edited copy for the admin's selected event row.
+ *
+ * Soft-falls to the empty override set when the migration has not been applied
+ * yet (deployments apply migrations with db:setup), so the settings page and
+ * the contact/basics saves keep working before the column exists.
+ */
+async function getEventSiteContentSoft(): Promise<SiteContent> {
+  const rows = await sql<{ site_content: unknown }[]>`
+    select site_content
+    from public.events
+    order by (status = 'published') desc, created_at asc
+    limit 1
+  `;
+  return parseSiteContentJson(rows[0]?.site_content);
+}
+
+function toEventSettings(row: EventSettingsRow, siteContent: SiteContent): EventSettings {
   const hasHeroImage = row.hero_image_present || Boolean(row.hero_image_url);
 
   return {
@@ -523,6 +546,8 @@ function toEventSettings(row: EventSettingsRow): EventSettings {
     slug: row.slug,
     status: row.status,
     tagline: row.tagline,
+    description: row.description ?? null,
+    siteContent,
     venueName: row.venue_name,
     venueAddress: row.venue_address,
     city: row.city,
@@ -558,7 +583,7 @@ export async function getEventSettings(): Promise<Result<EventSettings | null>> 
   try {
     const data = await sql<EventSettingsRow[]>`
       select
-        id, name, slug, status, tagline, venue_name, venue_address, city, state,
+        id, name, slug, status, tagline, description, venue_name, venue_address, city, state,
         contact_phone, contact_email, whatsapp_number, maps_url, instagram_url,
         facebook_url, youtube_url, support_hours, currency, hero_image_url,
         (hero_image_data is not null) as hero_image_present,
@@ -569,7 +594,18 @@ export async function getEventSettings(): Promise<Result<EventSettings | null>> 
       limit 1
     `;
 
-    return ok(data[0] ? toEventSettings(data[0]) : null);
+    let siteContent: SiteContent;
+    try {
+      siteContent = await getEventSiteContentSoft();
+    } catch (error) {
+      if (error instanceof DatabaseError && error.code === "42703") {
+        siteContent = parseSiteContentJson(null);
+      } else {
+        throw error;
+      }
+    }
+
+    return ok(data[0] ? toEventSettings(data[0], siteContent) : null);
   } catch (error) {
     return dbFailure("event settings", error) as Result<EventSettings | null>;
   }
@@ -609,7 +645,7 @@ export async function saveEventContactSettings(
         limit 1
       )
       returning
-        id, name, slug, status, tagline, venue_name, venue_address, city, state,
+        id, name, slug, status, tagline, description, venue_name, venue_address, city, state,
         contact_phone, contact_email, whatsapp_number, maps_url, instagram_url,
         facebook_url, youtube_url, support_hours, currency, hero_image_url,
         (hero_image_data is not null) as hero_image_present,
@@ -624,7 +660,18 @@ export async function saveEventContactSettings(
       };
     }
 
-    return { ok: true, data: toEventSettings(rows[0]) };
+    let siteContent: SiteContent;
+    try {
+      siteContent = await getEventSiteContentSoft();
+    } catch (error) {
+      if (error instanceof DatabaseError && error.code === "42703") {
+        siteContent = parseSiteContentJson(null);
+      } else {
+        throw error;
+      }
+    }
+
+    return { ok: true, data: toEventSettings(rows[0], siteContent) };
   } catch (error) {
     const dbError = error instanceof DatabaseError ? error : new DatabaseError(String(error));
     console.error("[admin] event settings save failed:", dbError.message, dbError.code ?? "");
@@ -642,6 +689,175 @@ export async function saveEventContactSettings(
     return {
       ok: false,
       error: { kind: "server-error", message: "The event settings could not be saved right now." },
+    };
+  }
+}
+
+/**
+ * Save the event basics — name, tagline, description and venue names. The
+ * public hero, about sections and per-page details all read these columns, so
+ * the organiser edits the event's story in one place.
+ */
+export async function saveEventBasicsSettings(
+  values: EventBasicsSettingsValues,
+): Promise<CatalogueResult<EventSettings>> {
+  if (!isDatabaseConfigured()) {
+    return {
+      ok: false,
+      error: {
+        kind: "not-configured",
+        message: "Event settings need the database connection. Add DATABASE_URL and try again.",
+      },
+    };
+  }
+
+  try {
+    const rows = await sql<EventSettingsRow[]>`
+      update public.events
+      set
+        name = ${values.name},
+        tagline = ${values.tagline},
+        description = ${values.description},
+        venue_name = ${values.venueName},
+        city = ${values.city},
+        state = ${values.state},
+        updated_at = now()
+      where id = (
+        select id from public.events
+        order by (status = 'published') desc, created_at asc
+        limit 1
+      )
+      returning
+        id, name, slug, status, tagline, description, venue_name, venue_address, city, state,
+        contact_phone, contact_email, whatsapp_number, maps_url, instagram_url,
+        facebook_url, youtube_url, support_hours, currency, hero_image_url,
+        (hero_image_data is not null) as hero_image_present,
+        octet_length(hero_image_data)::int as hero_image_byte_size,
+        hero_image_version::text as hero_image_version
+    `;
+
+    if (!rows[0]) {
+      return {
+        ok: false,
+        error: { kind: "server-error", message: "There is no event row available to update." },
+      };
+    }
+
+    let siteContent: SiteContent;
+    try {
+      siteContent = await getEventSiteContentSoft();
+    } catch (error) {
+      if (error instanceof DatabaseError && error.code === "42703") {
+        siteContent = parseSiteContentJson(null);
+      } else {
+        throw error;
+      }
+    }
+
+    return { ok: true, data: toEventSettings(rows[0], siteContent) };
+  } catch (error) {
+    const dbError = error instanceof DatabaseError ? error : new DatabaseError(String(error));
+    console.error("[admin] event basics save failed:", dbError.message, dbError.code ?? "");
+
+    if (dbError.code === "23514") {
+      return {
+        ok: false,
+        error: {
+          kind: "invalid-input",
+          message: "The database refused one of these values. The event and venue names cannot be blank.",
+        },
+      };
+    }
+
+    return {
+      ok: false,
+      error: { kind: "server-error", message: "The event settings could not be saved right now." },
+    };
+  }
+}
+
+/**
+ * Save the organiser-edited public copy (About Us, gallery heading, FAQs) as
+ * the event row's `site_content` jsonb. Empty fields are stored as null/empty,
+ * which the public pages read as "use the built-in default text again".
+ */
+export async function saveEventSiteContentSettings(
+  content: SiteContent,
+): Promise<CatalogueResult<EventSettings>> {
+  if (!isDatabaseConfigured()) {
+    return {
+      ok: false,
+      error: {
+        kind: "not-configured",
+        message: "Event settings need the database connection. Add DATABASE_URL and try again.",
+      },
+    };
+  }
+
+  try {
+    const rows = await sql<EventSettingsRow[]>`
+      update public.events
+      set
+        site_content = ${siteContentToJson(content)}::jsonb,
+        updated_at = now()
+      where id = (
+        select id from public.events
+        order by (status = 'published') desc, created_at asc
+        limit 1
+      )
+      returning
+        id, name, slug, status, tagline, description, venue_name, venue_address, city, state,
+        contact_phone, contact_email, whatsapp_number, maps_url, instagram_url,
+        facebook_url, youtube_url, support_hours, currency, hero_image_url,
+        (hero_image_data is not null) as hero_image_present,
+        octet_length(hero_image_data)::int as hero_image_byte_size,
+        hero_image_version::text as hero_image_version
+    `;
+
+    if (!rows[0]) {
+      return {
+        ok: false,
+        error: { kind: "server-error", message: "There is no event row available to update." },
+      };
+    }
+
+    let siteContent: SiteContent;
+    try {
+      siteContent = await getEventSiteContentSoft();
+    } catch (error) {
+      if (error instanceof DatabaseError && error.code === "42703") {
+        siteContent = parseSiteContentJson(null);
+      } else {
+        throw error;
+      }
+    }
+
+    return { ok: true, data: toEventSettings(rows[0], siteContent) };
+  } catch (error) {
+    const dbError = error instanceof DatabaseError ? error : new DatabaseError(String(error));
+    console.error("[admin] site content save failed:", dbError.message, dbError.code ?? "");
+
+    if (dbError.code === "42703") {
+      return {
+        ok: false,
+        error: {
+          kind: "server-error",
+          message:
+            "The database is missing the site_content column. Apply the latest migration (npm run db:setup) and try again.",
+        },
+      };
+    }
+
+    if (dbError.code === "23514") {
+      return {
+        ok: false,
+        error: { kind: "invalid-input", message: "The database refused this content. Keep it under the lengths shown." },
+      };
+    }
+
+    return {
+      ok: false,
+      error: { kind: "server-error", message: "The site content could not be saved right now." },
     };
   }
 }

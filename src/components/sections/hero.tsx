@@ -149,6 +149,14 @@ function MobileEventDetails({ bundle, dateRange, timeRange, location }: LayoutSh
           </div>
         </div>
 
+        {/* Book Now directly below the artwork. */}
+        <div className="flex flex-col gap-2">
+          <Button href="/book" size="lg" className="w-full">
+            Book Now
+          </Button>
+          <CheapestPassNote bundle={bundle} className="text-center" />
+        </div>
+
         {/* Title + interest pill. */}
         <div className="flex items-start justify-between gap-4">
           <div className="flex min-w-0 flex-col gap-1.5">
@@ -188,8 +196,6 @@ function MobileEventDetails({ bundle, dateRange, timeRange, location }: LayoutSh
             <p className="text-muted text-sm/7">{event.description}</p>
           </div>
         ) : null}
-
-        <CheapestPassNote bundle={bundle} />
       </Container>
 
       <MobileBookingBar bundle={bundle} nightCount={nights.length} />
@@ -236,7 +242,7 @@ function MobileBookingBar({ bundle, nightCount }: { bundle: EventBundle; nightCo
   );
 }
 
-function CheapestPassNote({ bundle }: { bundle: EventBundle }) {
+function CheapestPassNote({ bundle, className }: { bundle: EventBundle; className?: string }) {
   const { event, passes } = bundle;
   const bookablePasses = passes.filter((pass) => pass.availability.enabled);
   const cheapest = bookablePasses.length ? Math.min(...bookablePasses.map((pass) => pass.priceInr)) : null;
@@ -246,7 +252,7 @@ function CheapestPassNote({ bundle }: { bundle: EventBundle }) {
   }
 
   return (
-    <p className="text-muted text-sm">
+    <p className={`text-muted text-sm ${className ?? ""}`}>
       Passes from{" "}
       <span className="text-marigold-soft font-semibold">{formatInr(cheapest, event.currency)}</span> per pass
     </p>

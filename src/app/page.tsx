@@ -85,9 +85,14 @@ export default async function HomePage() {
     <>
       <Hero bundle={bundle} />
       <FeatureStrip features={bundle.features} />
-      <AboutSection event={bundle.event} highlights={bundle.highlights} />
+      <AboutSection
+        event={bundle.event}
+        highlights={bundle.highlights}
+        passes={bundle.passes}
+        fallbackImage={result.gallery[0] ?? null}
+      />
       <PassesPreview passes={bundle.passes} />
-      <GalleryPreview items={result.gallery} />
+      <GalleryPreview items={result.gallery} content={bundle.content} />
       <ContactSection variant="preview" event={bundle.event} />
       <CtaBand contact={buildSiteContact(bundle.event)} />
       {/* Keeps the mobile booking bar from ever covering the last content. */}

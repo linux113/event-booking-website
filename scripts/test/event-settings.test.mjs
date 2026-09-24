@@ -3,10 +3,16 @@ import { readFileSync } from "node:fs";
 import { register } from "node:module";
 
 register("./ts-alias-loader.mjs", import.meta.url);
-const { isCleanEventContactSettings, parseEventContactSettings } = await import(
-  "../../src/lib/admin/event-settings.ts"
-);
+const {
+  isCleanEventBasicsSettings,
+  isCleanEventContactSettings,
+  isCleanSiteContentSettings,
+  parseEventBasicsSettings,
+  parseEventContactSettings,
+  parseSiteContentSettings,
+} = await import("../../src/lib/admin/event-settings.ts");
 const { buildContactChannels, buildSiteContact } = await import("../../src/lib/contact.ts");
+const { parseSiteContentJson } = await import("../../src/lib/site-content.ts");
 
 let passed = 0;
 function check(label, assertion) {
@@ -121,6 +127,77 @@ check("maps links require HTTPS and support hours are capped at six lines", () =
   });
   assert.ok(invalid.errors.mapsUrl);
   assert.ok(invalid.errors.supportHours);
+});
+
+check("event basics validate: name, venue and city are required and lengths are capped", () => {
+  const real = parseEventBasicsSettings({
+    name: "Garba Night ×9",
+    tagline: "Jaipur's largest Navratri celebration",
+    description: "Nine nights of garba, dandiya raas and live music.",
+    venueName: "My Village Garden",
+    city: "Jaipur",
+    state: "Rajasthan",
+  });
+  assert.equal(isCleanEventBasicsSettings(real.errors), true);
+  assert.equal(real.values.state, "Rajasthan");
+
+  const missing = parseEventBasicsSettings({ name: "  ", venueName: "", city: "" });
+  assert.ok(missing.errors.name);
+  assert.ok(missing.errors.venueName);
+  assert.ok(missing.errors.city);
+
+  const optionalBlank = parseEventBasicsSettings({ name: "Garba Night ×9", venueName: "MV Garden", city: "Jaipur" });
+  assert.equal(optionalBlank.values.tagline, null);
+  assert.equal(optionalBlank.values.description, null);
+  assert.equal(optionalBlank.values.state, null);
+});
+
+check("site content validates lengths, splits one checklist point per line and keeps filled FAQs", () => {
+  const parsed = parseSiteContentSettings({
+    aboutTitle: "Our festival",
+    aboutBody: "Nine nights with live dhol.",
+    aboutPoints: "Family zone\nMedical desk\n\nQR entry",
+    galleryTitle: "Our dance floor",
+    galleryIntro: "Photos from every night.",
+    faqs: [
+      { question: "Can children join?", answer: "Yes, with a family pass." },
+      { question: "", answer: "" },
+    ],
+  });
+  assert.equal(isCleanSiteContentSettings(parsed.errors), true);
+  assert.deepEqual(parsed.values.aboutPoints, ["Family zone", "Medical desk", "QR entry"]);
+  assert.deepEqual(parsed.values.faqs, [{ question: "Can children join?", answer: "Yes, with a family pass." }]);
+
+  const invalid = parseSiteContentSettings({ faqs: [{ question: "Only a question", answer: "" }] });
+  assert.ok(invalid.errors.faqs);
+
+  const tooLong = parseSiteContentSettings({ faqs: Array.from({ length: 7 }, (_, i) => ({ question: `Q${i}`, answer: "A" })) });
+  assert.ok(tooLong.errors.faqs);
+
+  const tooManyPoints = parseSiteContentSettings({ aboutPoints: "1\n2\n3\n4\n5\n6\n7" });
+  assert.ok(tooManyPoints.errors.aboutPoints);
+});
+
+check("site content reading is tolerant: bad jsonb collapses to page defaults", () => {
+  assert.deepEqual(parseSiteContentJson(null), {
+    aboutTitle: null,
+    aboutBody: null,
+    aboutPoints: [],
+    galleryTitle: null,
+    galleryIntro: null,
+    faqs: [],
+  });
+
+  const mixed = parseSiteContentJson({
+    aboutTitle: "Saved title",
+    aboutPoints: [" A ", 42, "B"],
+    faqs: [{ question: "Q", answer: "A" }, { question: "only" }, "junk"],
+    galleryIntro: 12,
+  });
+  assert.equal(mixed.aboutTitle, "Saved title");
+  assert.deepEqual(mixed.aboutPoints, ["A", "B"]);
+  assert.deepEqual(mixed.faqs, [{ question: "Q", answer: "A" }]);
+  assert.equal(mixed.galleryIntro, null);
 });
 
 check("the WhatsApp button uses the recognizable filled brand mark", () => {
