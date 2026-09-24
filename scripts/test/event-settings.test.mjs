@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { register } from "node:module";
 
 register("./ts-alias-loader.mjs", import.meta.url);
@@ -120,6 +121,11 @@ check("maps links require HTTPS and support hours are capped at six lines", () =
   });
   assert.ok(invalid.errors.mapsUrl);
   assert.ok(invalid.errors.supportHours);
+});
+
+check("the WhatsApp button uses the recognizable filled brand mark", () => {
+  const icons = readFileSync(new URL("../../src/components/icons/index.tsx", import.meta.url), "utf8");
+  assert.match(icons, /export function WhatsAppIcon[\s\S]*?viewBox="0 0 448 512"[\s\S]*?fill="currentColor"[\s\S]*?M380\.9 97\.1/);
 });
 
 console.log(`\n${passed} passed, 0 failed`);

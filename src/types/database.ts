@@ -38,6 +38,10 @@ export interface EventRow {
   state: string | null;
   maps_url: string | null;
   hero_image_url: string | null;
+  /** Selected as a boolean only; public event queries never fetch the bytea payload. */
+  hero_image_data_present?: boolean;
+  /** Cast to text in reads so a PostgreSQL bigint is safe to put in URLs/JSON. */
+  hero_image_version?: string | null;
   logo_url: string | null;
   contact_phone: string | null;
   contact_email: string | null;

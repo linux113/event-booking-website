@@ -50,17 +50,24 @@ What that does:
 4. Asserts the end state (tables, public-read policies, stranger refused on bookings).
 
 **Alternative — one paste:** open Neon’s SQL editor and run
-[`docs/one-shot-schema.sql`](./one-shot-schema.sql) (generated; includes seed only if
-built with `--seed`).
+[`docs/one-shot-schema.sql`](./one-shot-schema.sql) for a new database. It is generated
+and includes the full schema (and seed only if built with `--seed`). Do not paste the
+full one-shot file into an existing database.
 
-The last two migrations are the migration brief itself:
+For an existing database, use `npm run db:setup` with the **direct** URL to apply pending
+migrations, or run only the new migration in Neon SQL Editor:
+`supabase/migrations/20260924090000_database_hero_image.sql`.
+
+The latest migrations are:
 
 | File | Effect |
 | ---- | ------ |
 | `20260923090000_single_admin.sql` | Drops roles / `admin_users` / staff check-in attribution; keeps capacity, payment, pass and check-in guarantees |
 | `20260923091000_no_customer_email.sql` | Drops `bookings.customer_email`; restates booking/admin functions without email |
+| `20260924090000_database_hero_image.sql` | Adds optimized WebP `bytea` storage and a cache revision for the homepage hero; Gallery storage is unchanged |
 
-Organiser `events.contact_email` is untouched.
+Organiser `events.contact_email` is untouched. The homepage hero image is stored in
+Neon; `BLOB_READ_WRITE_TOKEN` remains a Gallery-only requirement.
 
 ---
 
@@ -69,7 +76,8 @@ Organiser `events.contact_email` is untouched.
 ```bash
 cp .env.example .env.local
 # DATABASE_URL = pooled string (sslmode=require, no channel_binding)
-# plus Razorpay, ADMIN_*, AUTH_SECRET, BLOB_READ_WRITE_TOKEN, NEXT_PUBLIC_SITE_URL
+# plus Razorpay, ADMIN_*, AUTH_SECRET, NEXT_PUBLIC_SITE_URL
+# BLOB_READ_WRITE_TOKEN is only needed for Gallery uploads (the homepage hero is in Neon)
 ```
 
 ```bash
@@ -114,7 +122,9 @@ in Vercel). Sign in at `/admin/login`.
 npm run typecheck   # 0 errors expected
 npm run lint        # 0 errors
 npm run build       # exit 0
-npm run test:prisma # 18/18 against a throwaway Postgres
+npm run test:prisma # 25/25 against a throwaway Postgres
+npm run test:hero-image # 7/7 image validation/optimization checks
+npm run test:settings # 9/9 settings and WhatsApp icon checks
 npm run db:setup:test # 20/20 setup tooling checks
 ```
 

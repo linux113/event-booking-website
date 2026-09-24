@@ -1,5 +1,6 @@
-/** Shared event settings shapes used by the admin form and its server endpoint. */
+/** Shared event settings shapes used by the admin form and its server endpoints. */
 export interface EventSettings {
+  id: string;
   name: string;
   slug: string;
   status: string;
@@ -17,6 +18,18 @@ export interface EventSettings {
   youtubeUrl: string | null;
   supportHours: string[];
   currency: string;
+  /** Authenticated preview URL when the database-backed WebP exists (legacy URL otherwise). */
+  heroImageUrl: string | null;
+  hasHeroImage: boolean;
+  heroImageByteSize: number | null;
+  heroImageVersion: string;
+}
+
+export interface HeroImageSettingsState {
+  hasImage: boolean;
+  byteSize: number | null;
+  version: string;
+  previewUrl: string | null;
 }
 
 /** Raw string values held by the contact settings form. */

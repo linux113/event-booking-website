@@ -22,7 +22,7 @@ name: Set up database
 # Runs on a manual dispatch from the Actions tab, or on a push that touches supabase/ —
 # a migration that lands in the repository is a migration the database should have.
 #
-# What a first run against an empty database does: prelude → 18 migrations → seed, in
+# What a first run against an empty database does: prelude → 19 migrations → seed, in
 # per-file transactions, recorded in setup.applied_migrations. Running it again applies
 # only what is new (or nothing), which is why a push is a safe trigger.
 
@@ -122,6 +122,6 @@ jobs:
             echo "| policies (public reads only) | 6 |"
             echo "| tables with RLS on | 10 |"
             echo "| security-definer functions | 40 |"
-            echo "| recorded sections | 20 (prelude + 18 migrations + seed) |"
+            echo "| recorded sections | 21 (prelude + 19 migrations + seed) |"
             echo "| seed | 1 event, 9 nights, 5 passes, 6 highlights, 6 features |"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -4,7 +4,8 @@ A production-oriented booking platform for Navratri / Dandiya events: browse nig
 reserve passes and pay online. Built with **Next.js (App Router) + React + TypeScript +
 Tailwind CSS**, backed by **Neon PostgreSQL** through **Prisma** (single client,
 `@prisma/adapter-neon`, serverless-safe), **Razorpay** for payments, **Vercel Blob** for
-gallery files, deployed on **Vercel**, versioned on **GitHub**.
+gallery files, and **Neon bytea** for the separate homepage hero image; deployed on
+**Vercel**, versioned on **GitHub**.
 
 There is **no Supabase** in the runtime: no `@supabase/*` packages, no
 `NEXT_PUBLIC_SUPABASE_*` / `SUPABASE_SERVICE_ROLE_KEY`, no Supabase Auth session, and no
@@ -32,7 +33,7 @@ and Quantity only.
 | Data access | Prisma 7 + `@prisma/adapter-neon` (`src/lib/db/client.ts`) — `sql` tagged templates and `rpc`/`rpcScalar` for SQL functions |
 | Schema DDL | `prisma/schema.prisma` for the typed client; `npm run db:setup` applies `supabase/migrations/*.sql` + `supabase/prelude.sql` as standard PostgreSQL (no `prisma migrate`) |
 | Payments | Razorpay test mode — existing `/api/payment/*` order create, signature verify, webhook verify and idempotency unchanged |
-| Gallery files | Vercel Blob — keys stored in `gallery.storage_path` / `thumbnail_path`; **no binaries in Neon** |
+| Images | Gallery photos stay in Vercel Blob (`gallery.storage_path` / `thumbnail_path`); the single homepage hero is optimized WebP bytes in `events.hero_image_data` on Neon |
 | Admin auth | `ADMIN_EMAIL` + `ADMIN_PASSWORD_HASH` (scrypt) + `AUTH_SECRET`-signed HTTP-only `gn_admin` cookie |
 | Hosting | Vercel (`vercel.json` → region `bom1`) |
 
@@ -43,7 +44,8 @@ and Quantity only.
 | 1–14 | Public UI, booking wizard, Razorpay, passes/QR, scanner, admin, gallery, contact | ✅ done (from prior work) |
 | M | Migration: Neon + Prisma, no Supabase runtime, single admin, no customer email | ✅ done |
 | 15 | Event settings — edit public contact, venue address, maps/social links and support hours | ✅ done |
-| 16 | Hardening — rate limiting, analytics, perf budget | ⏳ |
+| 16 | Homepage hero — upload, replace and remove its Neon-stored WebP from Event settings | ✅ done |
+| 17 | Hardening — rate limiting, analytics, perf budget | ⏳ |
 
 **Nothing is mocked.** Prices, nights, gallery, bookings, payments and gate entries all
 come from PostgreSQL through `src/lib/services`. Payments run in Razorpay test mode; a
@@ -69,7 +71,7 @@ booking is only marked paid after a server-verified signature — never by the b
 | `/admin/passes` | Door list + CSV export (no QR tokens in lists) |
 | `/admin/dates` | Nights, capacity, hold seats, open/close booking |
 | `/admin/gallery` | Upload (WebP via Blob), caption/alt, reorder, publish/unpublish, delete |
-| `/admin/settings` | Event, venue and deployment values |
+| `/admin/settings` | Homepage hero artwork, event, venue, contact and deployment values |
 | `/admin/scanner` | Camera QR scanner + CHECK IN (server-side compare-and-swap) |
 | `/events`, `/gallery`, `/contact` | Public catalogue, published gallery, organiser contact |
 
@@ -114,10 +116,11 @@ Vercel). Sign in at `/admin/login`.
 | `npm run check` | typecheck → lint → build |
 | `npm run db:generate` | Generate the Prisma Client into `src/generated/prisma` |
 | `npm run db:setup` | Apply `supabase/prelude.sql` + every migration (then optional `--seed`) to a **hosted** PostgreSQL. Uses the **direct** connection string; safe to re-run (bookkeeping in `setup.applied_migrations`). `--verify-only` checks without changing anything; `--mark-all-applied` records a pre-existing database |
-| `npm run db:setup:test` | Prove the setup tooling against a throwaway PostgreSQL: fresh run, re-run, resume, edited file, one-shot paste — **20/20 passed** |
-| `npm run test:prisma` | Exercise the generated Prisma client, gallery draft/publish/delete lifecycle and key SQL functions against throwaway PostgreSQL |
-| `npm run test:settings` | Validate public event contact settings and URL rules |
+| `npm run db:setup:test` | Prove the setup tooling against throwaway PostgreSQL: fresh run, re-run, resume, edited file, one-shot paste — **20/20 passed** |
+| `npm run test:prisma` | Exercise the generated Prisma client, Neon hero bytea lifecycle, gallery CRUD and key SQL functions — **25/25 passed** |
+| `npm run test:settings` | Validate event contact rules and the WhatsApp brand icon — **9/9 passed** |
 | `npm run test:gallery-upload` | Verify gallery batches stay within request and file-count budgets |
+| `npm run test:hero-image` | Verify image validation, WebP optimization, size limits and versioned routes — **7/7 passed** |
 | `npm run db:verify` / `npm run verify:web` | **Historical** Supabase-era harnesses (RLS/role/storage doubles). Not part of the post-migration acceptance path |
 | [`docs/one-shot-schema.sql`](./docs/one-shot-schema.sql) | Whole schema as one transactional batch for a provider SQL editor; regenerated with `node scripts/build-one-shot-schema.mjs --seed` |
 
@@ -333,7 +336,8 @@ region (e.g. `ap-south-1`) so queries stay cheap. Build is Node 22.
 - [ ] Strong `ADMIN_PASSWORD_HASH` + `AUTH_SECRET`; never commit them
 - [ ] Razorpay test keys + webhook registered
 - [ ] `NEXT_PUBLIC_SITE_URL` = final origin **before** printing QR codes
-- [ ] Blob token set if gallery is used
+- [ ] Hero-image migration applied; optionally upload artwork in Admin → Event settings
+- [ ] Blob token set only if Gallery uploads are used
 - [ ] Test scanner on real phones over HTTPS
 
 ## Verification (this migration)
@@ -345,13 +349,14 @@ region (e.g. `ap-south-1`) so queries stay cheap. Build is Node 22.
 | `npm run typecheck` | **0 errors** (Prisma engine binary stubbed because the sandbox cannot download it over TLS) |
 | `npm run lint` | **0 errors** (warnings only) |
 | `npm run build` | **exit 0** |
-| `npm run test:prisma` | **18/18 passed**, including gallery draft/publish/delete row lifecycle |
+| `npm run test:prisma` | **25/25 passed**, including Neon hero bytea lifecycle and gallery draft/publish/delete |
 | `npm run test:normalise` | **21/21 passed** |
-| `npm run test:settings` | **8/8 passed** |
+| `npm run test:settings` | **9/9 passed**, including the WhatsApp brand icon |
 | `npm run test:gallery-upload` | **8/8 passed** |
+| `npm run test:hero-image` | **7/7 passed**, covering image validation and WebP optimization |
 | `npm run db:setup:test` | **20/20 passed** |
 | `npm run db:verify` / `verify:web` | **Not run** — historical Supabase-era harnesses (auth/storage doubles); incompatible without a full rewrite |
-| Live Neon update / Vercel Blob operations | Not run — live credentials are not available in this environment; see `docs/update-live-contact.sql` and `docs/gallery-upload-troubleshooting.md` |
+| Live Neon migration/image upload / Vercel Blob operations | Not run — no live database or Blob operation was performed; apply the hero migration before deploying, as documented in `docs/deploy-vercel.md` and `docs/neon-setup.md` |
 
 ## Search audit (forbidden terms)
 

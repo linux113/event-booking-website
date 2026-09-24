@@ -2,8 +2,9 @@
 
 > **Update after the Neon/Prisma migration:** database access is Prisma over the Neon
 > pooler (not Supabase REST), admin sign-in is `ADMIN_EMAIL`/`ADMIN_PASSWORD_HASH`
-> with an HTTP-only session cookie (not Supabase Auth / roles), and gallery files live
-> in Vercel Blob (not Supabase Storage). The flow narrative below is still useful for
+> with an HTTP-only session cookie (not Supabase Auth / roles), gallery files live in
+> Vercel Blob (not Supabase Storage), and the separate homepage hero is stored as WebP
+> bytes in Neon. The flow narrative below is still useful for
 > URLs and product behaviour; treat Supabase-specific configuration steps as historical.
 
 
@@ -45,7 +46,7 @@ Postgres**, never in the browser and never from a form field.
 | 5 | `/admin/dates` | Add/edit nights, capacity, seats held back from online sale, open/close booking. Capacity can never go below what is already paid for |
 | 6 | `/admin/passes` | Pass types: price, description, how many people, max per booking, minimum age, on/off sale |
 | 7 | `/admin/gallery` | The browser shrinks large photos to WebP and sends sequential batches; the server decodes/re-encodes with `sharp` (metadata dropped) and stores full/thumbnail objects in Vercel Blob. Uploads start as drafts; a staff preview uses the authenticated route; **Publish** changes the row status, and only published rows appear on the public gallery. The project uses a public Blob store, so draft URLs are unlisted rather than access-controlled. |
-| 8 | `/admin/settings` | The validated contact form edits the selected event row's phone, email, WhatsApp, street address, map/social links and support hours. Saving revalidates the public layout; the event's database values win over `siteConfig` fallbacks. |
+| 8 | `/admin/settings` | Upload, replace or remove the homepage hero as an optimized WebP stored in Neon (separate from Gallery); removing it restores the built-in diya. The validated contact form also edits phone, email, WhatsApp, venue and social details. |
 
 ---
 
@@ -64,33 +65,26 @@ Postgres**, never in the browser and never from a form field.
 ## 4 · The pieces, and what each one is for
 
 ```
-        Visitor's phone / laptop
-                 │  HTTPS
-                 ▼
-   ┌─────────────────────────────────────┐
-   │  Vercel — Next.js 16                │   pages (SSR + ISR), API routes,
-   │  Mumbai region (bom1, vercel.json)  │   the request hook (src/proxy.ts)
-   └──────┬───────────────────┬──────────┘
-          │ server-side       │ server-side (order create, verify, webhook)
-          ▼                   ▼
-   ┌──────────────┐    ┌─────────────────┐
-   │  Supabase    │    │   Razorpay      │
-   │  Postgres    │    │   Checkout      │
-   │  Auth        │    └─────────────────┘
-   │  Storage     │
-   └──────────────┘
+Visitor's phone / laptop
+          │ HTTPS
+          ▼
+Vercel — Next.js 16
+├── SQL / image routes ───────► Neon PostgreSQL (event data + hero WebP)
+├── Gallery file operations ──► Vercel Blob (Gallery files only)
+└── Payment API calls ────────► Razorpay Checkout
 ```
 
-| Piece | Free tier | Holds | Reaches the browser? |
-| ----- | --------- | ----- | -------------------- |
-| Vercel | Hobby ($0, personal/non-commercial) | the code, the deployment | the HTML/CSS/JS |
-| Supabase Postgres | 500 MB | every row: events, nights, passes, bookings, passes, check-ins | never directly — only through the server + RLS |
-| Supabase Auth | 50k MAU | staff logins | a session cookie |
-| Supabase Storage | 1 GB | gallery images (2 buckets) | public images only, once published |
-| Razorpay | test mode free | payments | the Checkout script + the public key **id** only |
+| Piece | What it holds | Reaches the browser? |
+| ----- | ------------- | -------------------- |
+| Vercel | The code, deployment, server-rendered pages and API routes | HTML/CSS/JS and public routes |
+| Neon PostgreSQL | Events, bookings, passes and the optimized homepage hero WebP (`events.hero_image_data`) | Only through the app's server; published hero bytes stream through a read-only image route |
+| Vercel Blob | Gallery photos and thumbnails only | Published gallery images |
+| App admin session | The single admin's signed HTTP-only session | Cookie only; password/hash and signing secret stay server-side |
+| Razorpay | Payment processing | Checkout script and public key ID; secrets stay server-side |
 
-Secrets (`SUPABASE_SERVICE_ROLE_KEY`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`) exist
-only in Vercel's server environment. Nothing privileged is ever inlined into the browser.
+`DATABASE_URL`, `ADMIN_PASSWORD_HASH`, `AUTH_SECRET`, Razorpay secrets and the optional
+Gallery-only `BLOB_READ_WRITE_TOKEN` exist only in the server environment. Nothing
+privileged is inlined into the browser.
 
 ---
 
@@ -125,8 +119,8 @@ which region it is in; I still will not be able to query it, and that is deliber
 | 7 | `http://localhost:3000` | `.env.local` on your machine | local development | falls back to `localhost:3000` anyway |
 
 Nothing else needs a URL: Razorpay Checkout is opened as a modal (there is no
-`callback_url` to configure), and no external image host is used — maps, socials and the
-WhatsApp link are plain links, and gallery images are served from Supabase Storage.
+`callback_url` to configure); maps, socials and WhatsApp are plain links. Gallery images
+are served from Vercel Blob, while the homepage hero WebP is streamed from Neon.
 
 ### Decide the domain **before you print passes**
 

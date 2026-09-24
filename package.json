@@ -17,6 +17,7 @@
     "test:normalise": "node scripts/test/db-normalise.test.mjs",
     "test:settings": "node scripts/test/event-settings.test.mjs",
     "test:gallery-upload": "node scripts/test/gallery-upload.test.mjs",
+    "test:hero-image": "node scripts/test/hero-image.test.mjs",
     "verify:web": "node scripts/verify-web.mjs"
   },
   "dependencies": {

@@ -27,6 +27,19 @@ import type {
  * touch published/public content tables.
  */
 
+/** The public row deliberately selects only hero-image presence, never its bytea payload. */
+const EVENT_PUBLIC_SELECT = `
+  select
+    id, slug, name, name_hindi, tagline, description, description_hindi,
+    venue_name, venue_hindi, venue_address, city, state, maps_url, hero_image_url,
+    (hero_image_data is not null) as hero_image_data_present,
+    hero_image_version::text as hero_image_version,
+    logo_url, contact_phone, contact_email, whatsapp_number,
+    instagram_url, facebook_url, youtube_url, support_hours, currency,
+    status, start_date, end_date, created_at, updated_at
+  from public.events
+`;
+
 const NOT_CONFIGURED_MESSAGE =
   "The database is not connected yet. Add DATABASE_URL to the environment (see .env.example).";
 
@@ -52,12 +65,12 @@ export async function listPublishedEvents(): Promise<Result<EventSummary[]>> {
   }
 
   try {
-    const rows = await sql<EventDbRow[]>`
-      select * from public.events
+    const rows = await sql<EventDbRow[]>(`
+      ${EVENT_PUBLIC_SELECT}
       where status = 'published'
       order by created_at desc
       limit 12
-    `;
+    `);
     return ok(rows.map((row) => toEventSummary(row)));
   } catch (error) {
     return queryFailure(error, "listPublishedEvents");
@@ -109,12 +122,12 @@ export async function getFeaturedEvent(): Promise<Result<EventSummary | null>> {
   }
 
   try {
-    const rows = await sql<EventDbRow[]>`
-      select * from public.events
+    const rows = await sql<EventDbRow[]>(`
+      ${EVENT_PUBLIC_SELECT}
       where status = 'published'
       order by created_at asc
       limit 1
-    `;
+    `);
     const [row] = rows;
     if (!row) {
       return ok(null);
