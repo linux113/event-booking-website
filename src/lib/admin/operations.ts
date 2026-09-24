@@ -385,9 +385,51 @@ export function outcomeTone(outcome: string): "go" | "warn" | "stop" {
   return "stop";
 }
 
-/** Rupees from the gateway's paise, for display. Null stays null. */
-export function paiseToRupees(paise: number | null): number | null {
-  return paise === null ? null : Math.round(paise / 100);
+/** Amounts returned by Postgres `integer` / `bigint` columns and the Neon drivers. */
+export type PaiseAmount = number | bigint | string | null;
+
+/** Rupees from the gateway's paise, for display. Null or an unusable amount stays null. */
+export function paiseToRupees(paise: PaiseAmount): number | null {
+  if (paise === null) {
+    return null;
+  }
+
+  if (typeof paise === "number") {
+    return Number.isFinite(paise) ? Math.round(paise / 100) : null;
+  }
+
+  // Postgres SUM(bigint) is bigint; Prisma adapters can surface that as a JS bigint
+  // (or a decimal string, depending on the driver). Do the rounding as an integer so
+  // large totals are not first rounded through an imprecise floating-point conversion.
+  let amount: bigint;
+
+  if (typeof paise === "bigint") {
+    amount = paise;
+  } else {
+    if (!/^-?\d+$/.test(paise)) {
+      return null;
+    }
+
+    try {
+      amount = BigInt(paise);
+    } catch {
+      return null;
+    }
+  }
+
+  const hundred = BigInt(100);
+  const half = BigInt(50);
+  const wholeRupees = amount / hundred;
+  const remainder = amount % hundred;
+  const rounded =
+    remainder >= half
+      ? wholeRupees + BigInt(1)
+      : remainder < -half
+        ? wholeRupees - BigInt(1)
+        : wholeRupees;
+  const result = Number(rounded);
+
+  return Number.isSafeInteger(result) ? result : null;
 }
 
 /**
