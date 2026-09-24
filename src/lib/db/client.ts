@@ -126,6 +126,21 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
+/**
+ * True when the failure is PostgreSQL's "column … does not exist" (SQLSTATE
+ * 42703), regardless of how the driver adapter dressed the error. Optional
+ * `column` narrows the message check so one migration's rollout window can
+ * degrade specific reads (e.g. `site_content`) without hiding real errors.
+ */
+export function isMissingColumnError(error: unknown, column?: string): boolean {
+  const dbError = toDatabaseError(error);
+  if (dbError.code === "42703") return true;
+  if (!column) return false;
+
+  const haystack = [dbError.message, dbError.details].filter(Boolean).join(" · ");
+  return new RegExp(`column .+${column}.+ does not exist`, "i").test(haystack);
+}
+
 /** The client, created on first use. Throws when DATABASE_URL is missing. */
 export function getDb(): PrismaClient {
   if (globalForPrisma.prisma) return globalForPrisma.prisma;
@@ -172,7 +187,15 @@ export function sql<T = unknown>(
           getDb().$queryRawUnsafe<T>(strings, ...(values as never[]))
         : getDb().$queryRaw<T>(strings, ...values);
 
-    return result.then((rows) => normaliseRows(rows));
+    // Errors from the query itself are asynchronous, so the try/catch alone
+    // never sees them: rejections must be normalised too, or the service
+    // layer reads the driver's raw error (undefined `code`) — which is how a
+    // missing column once broke every bundled page in production while admins
+    // still thought the 42703 fallback covered it.
+    return result.then(
+      (rows) => normaliseRows(rows),
+      (error: unknown) => Promise.reject(toDatabaseError(error)),
+    );
   } catch (error) {
     return Promise.reject(toDatabaseError(error));
   }
