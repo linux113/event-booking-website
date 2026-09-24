@@ -90,6 +90,8 @@ export default async function HomePage() {
       <GalleryPreview items={result.gallery} />
       <ContactSection variant="preview" event={bundle.event} />
       <CtaBand contact={buildSiteContact(bundle.event)} />
+      {/* Keeps the mobile booking bar from ever covering the last content. */}
+      <div aria-hidden="true" className="h-[4.5rem] sm:h-[4.75rem] lg:hidden" />
     </>
   );
 }

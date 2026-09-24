@@ -8614,7 +8614,7 @@ comment on column public.events.hero_image_url is
 -- ===========================================================================
 
 -- =============================================================================
--- Savriya Seth Events — initial seed data
+-- Sanwariya Seth Events — initial seed data
 --
 -- Idempotent: every row has a hard-coded uuid and an `on conflict ... do update`
 -- branch, so re-running this file never duplicates or orphans anything.
@@ -8881,7 +8881,7 @@ insert into setup.applied_migrations (filename, checksum) values
   ('20260923090000_single_admin.sql', '39eb9be4766a01abc2fea59b249ae3584803f398ff4451a86e78d66658d57d24'),
   ('20260923091000_no_customer_email.sql', '6550d98addf020667541d107bd63bbf5089d3b6a77cf85c67f03bd886fc8ce2c'),
   ('20260924090000_database_hero_image.sql', 'c04ace668c28e3ce3548ea97234280d6e7de74edda1c81a6c6d14bd00eef22f4'),
-  ('seed.sql', 'a2eb0571ac59ed79e00e955891d8097c72c15437d9217abe08987bbb6fbf91a2')
+  ('seed.sql', '9717659b60c912e765416abde1b88da957f0e5632f1cd121f49f8acb82689fc9')
 on conflict (filename) do nothing;
 
 

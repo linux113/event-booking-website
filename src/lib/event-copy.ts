@@ -93,3 +93,58 @@ export function passAgeCopy(pass: Pick<PassOption, "minAge">): string | null {
 
   return `${pass.minAge}+ only`;
 }
+
+// -----------------------------------------------------------------------------
+// Availability tiers — the legend on the date & time screen
+// -----------------------------------------------------------------------------
+
+/**
+ * Coarse availability state of a night, for the coloured dots on the date
+ * picker and the legend above it. `nightStateLabel` stays the *word* a badge
+ * uses; the tier is the *colour*, so a night says the same thing on both.
+ */
+export type NightAvailabilityTier = "available" | "filling-fast" | "sold-out" | "closed";
+
+export const NIGHT_AVAILABILITY_TIER_ORDER: readonly NightAvailabilityTier[] = [
+  "available",
+  "filling-fast",
+  "sold-out",
+  "closed",
+] as const;
+
+/** Label shown in the legend next to each tier's dot. */
+export function nightAvailabilityTierLabel(tier: NightAvailabilityTier): string {
+  switch (tier) {
+    case "available":
+      return "Available";
+    case "filling-fast":
+      return "Filling fast";
+    case "sold-out":
+      return "Sold out";
+    case "closed":
+      return "Booking closed";
+  }
+}
+
+/**
+ * A hint of urgency. A night is "filling fast" once at most a fifth of its
+ * online-sale seats remain — drawn from the same `remaining` count the rest of
+ * the site shows, so the dot and the numbers never disagree.
+ */
+export function nightAvailabilityTier(night: EventNight): NightAvailabilityTier {
+  if (night.isFullyBooked) {
+    return "sold-out";
+  }
+
+  if (!night.isBookable) {
+    return "closed";
+  }
+
+  const onSale = seatsOnSale(night);
+
+  if (onSale > 0 && night.remaining <= Math.max(1, Math.floor(onSale / 5))) {
+    return "filling-fast";
+  }
+
+  return "available";
+}
