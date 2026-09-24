@@ -1,28 +1,18 @@
 -- =============================================================================
 -- Garba Nights — gallery management
 --
--- The first step that owns *files* rather than rows. Two ideas carry it:
+-- Gallery files are managed by the server in Vercel Blob; PostgreSQL stores the
+-- rows, Blob object keys, URLs and image metadata. Publication controls which
+-- rows appear on the public site. Draft files in the public Blob store are
+-- unlisted, not private, so do not upload sensitive material.
 --
---   1. **The bucket a file lives in is decided by the row's status, not by the
---      upload.** Photos are uploaded into a private bucket (`gallery-inbox`) and
---      only move into the public one (`gallery`) when the organiser publishes
---      them; unpublishing moves them back. So an unpublished photograph is not
---      merely unlisted — it is not publicly reachable at all, and no URL that
---      leaks can serve it. Nothing but the service role can read the inbox, and
---      nothing but the service role can write either bucket: the browser never
---      holds a key that could put a file anywhere.
---
---   2. **The database still owns the rules.** The bucket move is a file
---      operation the app performs, so the row and the file can disagree for a
---      moment; every rule that must never disagree (alt text, dimensions, one
---      row per object, ordering) is enforced here, and the app's job is to
---      report what the database decided.
+-- The database enforces the rules that must never drift (alt text, dimensions,
+-- one row per object and ordering). The app reports the database decision and
+-- performs the corresponding Blob operation.
 --
 -- Object keys are `<event or "festival">/<item uuid>/full.webp` and
--- `…/thumb.webp`: deterministic from the row, which means the app never has to
--- store a URL that can drift from the file it points at. `gallery.url` and
--- `gallery.thumbnail_url` remain for externally hosted media (a video on a CDN),
--- and the public site prefers them when they are set.
+-- `…/thumb.webp`: deterministic from the row. `gallery.url` and
+-- `gallery.thumbnail_url` remain for externally hosted media.
 --
 -- Error codes (the app maps these to a field, not to prose):
 --
@@ -35,92 +25,11 @@
 -- =============================================================================
 
 
--- -----------------------------------------------------------------------------
--- 1. The two buckets
---
--- Created in SQL rather than in a dashboard so a fresh project is reproducible.
--- The block is guarded: `storage` belongs to Supabase's own roles, some
--- deployments run these migrations without rights on it, and a gallery
--- migration must not break the chain of migrations that follow. When it cannot
--- create the buckets it says so, loudly, and the README says how to make them by
--- hand — see supabase/README.md.
--- -----------------------------------------------------------------------------
-do $$
-begin
-  if exists (
-    select 1 from information_schema.tables
-     where table_schema = 'storage' and table_name = 'buckets'
-  ) then
-    -- Public: the site's <img> tags point straight at these objects, which is what
-    -- makes browser caching and a CDN work without a signed URL per view.
-    execute $sql$
-      insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-      values ('gallery', 'gallery', true, 8388608,
-              array['image/webp', 'image/jpeg', 'image/png', 'image/avif'])
-      on conflict (id) do update
-        set public             = true,
-            file_size_limit    = 8388608,
-            allowed_mime_types = array['image/webp', 'image/jpeg', 'image/png', 'image/avif']
-    $sql$;
-
-    -- Private: where an upload waits until it is published. No policy below
-    -- grants anybody access to it, so the service role is the only key that can
-    -- read or write here.
-    execute $sql$
-      insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-      values ('gallery-inbox', 'gallery-inbox', false, 8388608,
-              array['image/webp', 'image/jpeg', 'image/png', 'image/avif'])
-      on conflict (id) do update
-        set public             = false,
-            file_size_limit    = 8388608,
-            allowed_mime_types = array['image/webp', 'image/jpeg', 'image/png', 'image/avif']
-    $sql$;
-
-    raise notice 'gallery: buckets "gallery" (public) and "gallery-inbox" (private) are in place';
-  else
-    raise notice 'gallery: no storage schema here — create the buckets by hand (see supabase/README.md)';
-  end if;
-end
-$$;
-
+-- Gallery file bytes live in Vercel Blob. This schema creates no provider storage
+-- objects; the migration only owns the metadata and database-side rules.
 
 -- -----------------------------------------------------------------------------
--- 2. Storage policies: nobody but the service role
---
--- There is deliberately no `select` policy on storage.objects. A public bucket
--- is served through /object/public/<bucket>/<key>, which does not consult these
--- policies; what the API *does* consult them for is listing and enumerating —
--- so with none, the anon key cannot discover a single object in either bucket,
--- and cannot write one either. Everything the app does with storage happens
--- server-side with the service-role key, which bypasses RLS.
---
--- If your deployment wants per-object reads through the authenticated API, add a
--- `select` policy scoped to `bucket_id = 'gallery'` — and read the note in
--- supabase/README.md about what that would expose.
--- -----------------------------------------------------------------------------
-do $$
-begin
-  if exists (
-    select 1 from information_schema.tables
-     where table_schema = 'storage' and table_name = 'objects'
-  ) then
-    execute 'alter table storage.objects enable row level security';
-
-    -- Anything left over from an earlier attempt at this step is removed, so the
-    -- end state is "no anon/authenticated policy on either bucket" rather than
-    -- "no policy except the one somebody added".
-    execute 'drop policy if exists gallery_objects_anon_read on storage.objects';
-    execute 'drop policy if exists gallery_objects_public_read on storage.objects';
-    execute 'drop policy if exists gallery_objects_anon_write on storage.objects';
-
-    raise notice 'gallery: storage.objects has no anon/authenticated policy — service role only';
-  end if;
-end
-$$;
-
-
--- -----------------------------------------------------------------------------
--- 3. gallery: the facts about a file
+-- 1. gallery: the facts about a file
 --
 -- `storage_path` is the object key; `thumbnail_path` is the small version of the
 -- same picture; width/height let the grid reserve the right space before the
@@ -134,7 +43,7 @@ alter table public.gallery
   add column if not exists byte_size      integer;
 
 comment on column public.gallery.storage_path is
-  'Object key inside the gallery buckets: <event or festival>/<item uuid>/full.webp. The bucket is chosen by status, so the key never changes when a photo is published.';
+  'Vercel Blob object key for the full gallery image: <event or festival>/<item uuid>/full.webp.';
 comment on column public.gallery.thumbnail_path is
   'The grid-sized version of the same object (…/thumb.webp). Null for externally hosted media.';
 comment on column public.gallery.width is
@@ -163,7 +72,7 @@ create unique index if not exists gallery_thumbnail_path_unique
 
 
 -- -----------------------------------------------------------------------------
--- 4. Reading the gallery, for the screen that manages it
+-- 2. Reading the gallery, for the screen that manages it
 -- -----------------------------------------------------------------------------
 create or replace function public.admin_gallery_items(p_event_id uuid default null)
 returns table (
@@ -235,7 +144,7 @@ grant execute on function public.admin_gallery_items(uuid) to service_role;
 
 
 -- -----------------------------------------------------------------------------
--- 5. Sharing the validation between the two write paths
+-- 3. Sharing the validation between the two write paths
 -- -----------------------------------------------------------------------------
 create or replace function public.gallery_check_metadata(
   p_title        text,
@@ -287,7 +196,7 @@ grant execute on function public.gallery_check_metadata(text, text, text, text, 
 
 
 -- -----------------------------------------------------------------------------
--- 6. Adding a row — after the file exists
+-- 4. Adding a row — after the file exists
 --
 -- The id is supplied by the caller because the object key contains it: the app
 -- uploads to `<event>/<id>/full.webp`, so it has to know the id before the row
@@ -408,7 +317,7 @@ grant execute on function public.admin_add_gallery_item(uuid, uuid, text, text, 
 
 
 -- -----------------------------------------------------------------------------
--- 7. Editing the words, and the running order
+-- 5. Editing the words, and the running order
 -- -----------------------------------------------------------------------------
 create or replace function public.admin_update_gallery_item(
   p_id          uuid,
@@ -560,12 +469,10 @@ grant execute on function public.admin_move_gallery_item(uuid, text) to service_
 
 
 -- -----------------------------------------------------------------------------
--- 8. Publishing, unpublishing, deleting
+-- 6. Publishing, unpublishing, deleting
 --
--- Publishing is a row change here and a bucket move in the app; the app asks for
--- the row first and moves the file to match, because a row that says "published"
--- with no public file is a broken image, while a file in the public bucket with
--- no published row is merely a file nobody links to.
+-- Publishing changes the database row and the public gallery listing. The app
+-- keeps the corresponding Vercel Blob objects in sync with that row.
 -- -----------------------------------------------------------------------------
 create or replace function public.admin_set_gallery_status(p_id uuid, p_status text)
 returns table (
@@ -608,7 +515,7 @@ end;
 $$;
 
 comment on function public.admin_set_gallery_status(uuid, text) is
-  'Enables (published), disables (draft) or retires (archived) one gallery item, and reports where the file was and where it now belongs so the app can move it between the public and private buckets. Locks the row so two administrators publishing and unpublishing cannot interleave.';
+  'Publishes, drafts or archives one gallery item and returns its file keys so the app can keep Vercel Blob in sync. Locks the row so concurrent status changes cannot interleave.';
 
 revoke all on function public.admin_set_gallery_status(uuid, text) from public;
 revoke all on function public.admin_set_gallery_status(uuid, text) from anon, authenticated;

@@ -15,7 +15,6 @@
 
 # next.js
 /.next/
-/.next-verify/
 /out/
 
 # production
@@ -41,10 +40,6 @@ yarn-error.log*
 # local secret overrides kept outside the git flow
 *.local.env
 secrets.json
-
-# supabase CLI local state (local stack config + secrets)
-/supabase/.temp/
-/supabase/.branches/
 
 # vercel
 .vercel

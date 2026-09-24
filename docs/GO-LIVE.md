@@ -23,7 +23,7 @@ Each phase has a **Gate** you must pass before the next phase. Do not skip gates
 
 ### 0.1 Merge the feature branch → `main`
 
-Keep the migration work on your current feature branch. Review `MIGRATION-REPORT.md`,
+Keep the work on your current feature branch, review the changes and passing checks,
 then push that branch and open a pull request to `main`:
 
 ```bash
@@ -46,7 +46,7 @@ npm run build        # must exit 0
 npm run test:prisma     # 25/25
 npm run test:hero-image # 7/7
 npm run test:settings   # 9/9
-npm run db:setup:test  # 20/20
+npm run db:setup:test  # 21/21
 ```
 
 **Gate 0 — every command above exits 0.** Do not create cloud resources on a red tree.
@@ -195,7 +195,7 @@ For local-only testing before domain exists you can create a webhook later; Chec
 
 ### 3.2 Environment variables (Production **and** Preview)
 
-Exact names from `.env.example` — no Supabase variables exist:
+Exact names from `.env.example`:
 
 | Key | Scope | Value source | Notes |
 | --- | ----- | ------------ | ----- |
@@ -240,7 +240,7 @@ Open `https://<domain>/`:
 | 5 | `/admin/login` | Env credentials work → `/admin` dashboard numbers |
 | 6 | `/admin/bookings` | Empty or seeded list, no 500 |
 | 7 | `/gallery` | Renders (empty OK) |
-| 8 | View source | No `SUPABASE`, no `service_role` strings |
+| 8 | View source | No database URLs, admin secrets, or payment secrets |
 | 9 | Response headers on `/admin/*` | Site not open to anonymous admin HTML |
 | 10 | Neon → Queries | Hits when you load pages (proves pooled URL from Vercel) |
 
@@ -347,7 +347,7 @@ Failure text will name `BLOB_READ_WRITE_TOKEN` if unset.
 ## What this environment could not do for you
 
 - No Neon/Vercel/Razorpay credentials in this sandbox — **you** run Phases 1–5.
-- Local automated proof: typecheck, lint, build, `test:prisma` 25/25, `test:normalise` 21/21, `test:settings` 9/9, `test:gallery-upload` 8/8, `test:hero-image` 7/7 and `db:setup:test` 20/20.
+- Local automated proof: typecheck, lint, build, `test:prisma` 25/25, `test:normalise` 21/21, `test:settings` 9/9, `test:gallery-upload` 8/8, `test:hero-image` 7/7 and `db:setup:test` 21/21.
 - Live E2E (real Neon + real Vercel + real Razorpay) starts at Gate 1.
 
 **Recommended order (one line):** merge → local green → Neon create + `db:setup --seed` → SQL verify → local `.env.local` smoke → Vercel import + env + domain → deploy smoke (Gate 4) → webhook + full booking E2E (Gate 5) → harden → only then live keys.

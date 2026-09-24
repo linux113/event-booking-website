@@ -8,9 +8,8 @@
 -- How to use it: open your database provider's SQL editor, paste this entire file,
 -- and run it. That is the whole installation — no CLI, no driver, no local install.
 --
--- Expected notices (not errors): the gallery section reports that it cannot create
--- storage buckets on a plain Postgres, which is correct — Supabase Storage does not
--- exist here.
+-- Gallery files are stored in Vercel Blob; PostgreSQL stores their metadata only.
+-- The separate homepage hero image is stored as a size-limited WebP bytea on Neon.
 --
 -- Afterwards, check it landed:
 --   select (select count(*) from information_schema.tables
@@ -28,31 +27,21 @@ begin;
 -- ===========================================================================
 
 -- -----------------------------------------------------------------------------
--- supabase/prelude.sql — what a bare PostgreSQL is missing from the Supabase platform
+-- database/prelude.sql — PostgreSQL compatibility objects used by the schema
 --
--- Run this ONCE, before the migrations, against a database that is not Supabase
--- (Neon, or any bare PostgreSQL). It creates only the two things the schema
--- actually assumes from the Supabase platform:
+-- Run this once before the migrations on Neon or bare PostgreSQL. The historical
+-- schema includes a minimal `auth.users` table and uses `auth.uid()` in a few
+-- residual public-read policies. These objects keep that SQL valid without any
+-- hosted-authentication dependency.
 --
---   1. an `auth` schema holding a minimal `auth.users` (kept so historical FKs in
---      early migrations can apply cleanly before later migrations drop them);
---   2. `auth.uid()` — still referenced by the six residual public read policies.
---
--- Nothing else in the migration chain is Supabase-specific. Gallery files live in
--- Vercel Blob (keys on the row), not in a `storage` schema; every table, constraint,
--- trigger, function and policy is plain PostgreSQL and behaves identically on Neon.
---
--- `auth.uid()` reads the same PostgREST-compatible claims Supabase reads, so it
--- works under PostgREST (including Neon's Data API, which is PostgREST), under a
--- direct connection that sets the claims itself, and under this project's local
--- verification harness. When Neon's Data API installs `pg_session_jwt` it defines
--- `auth.user_id()`; this function is the same idea under the name this schema uses.
+-- Gallery files live in Vercel Blob; this database contains their metadata and
+-- the separate homepage hero WebP. All schema objects are standard PostgreSQL.
 -- -----------------------------------------------------------------------------
 
 create schema if not exists auth;
 
 comment on schema auth is
-  'Holds the identity shim the schema expects: auth.users (the staff account foreign key) and auth.uid() (what the RLS policies read). On Supabase this schema belongs to the platform.';
+  'Compatibility schema for auth.users foreign keys retained by the migration history and auth.uid() used by residual row-level policies.';
 
 create table if not exists auth.users (
   id    uuid primary key,
@@ -61,7 +50,7 @@ create table if not exists auth.users (
 );
 
 comment on table auth.users is
-  'Minimal stand-in for Supabase''s auth.users: id + email are all the schema needs. On Supabase, rows here are created by Supabase Auth; elsewhere, insert them yourself (or point them at whichever auth provider you use).';
+  'Minimal compatibility table retained for historical foreign keys; the application uses its own signed administrator session.';
 
 create or replace function auth.uid()
 returns uuid
@@ -70,10 +59,7 @@ stable
 as $$
   select nullif(
     coalesce(
-      -- PostgREST sets `request.jwt.claim.sub` (Supabase's own helper reads it this way)…
       current_setting('request.jwt.claim.sub', true),
-      -- …and always sets the whole claim set as JSON. Reading both means one
-      -- definition works on Supabase, on Neon's Data API, and in the harness.
       (current_setting('request.jwt.claims', true)::jsonb ->> 'sub')
     ),
     ''
@@ -81,17 +67,15 @@ as $$
 $$;
 
 comment on function auth.uid() is
-  'The caller''s user id from the request JWT claims, or null when unauthenticated. Anonymous requests see null, which is why every policy that asks is_staff()/is_admin() denies them.';
+  'Returns the caller id from request JWT claims, or null when unauthenticated.';
 
--- The roles the migrations create if missing (anon / authenticated / service_role)
--- stay owned by whoever runs this. On Neon that is `neondb_owner`, which may create
--- roles and set BYPASSRLS on them; on a locked-down instance, create them yourself
--- beforehand as a superuser.
+-- Roles are created by the migration chain when absent and remain owned by the
+-- database owner. A locked-down instance may require an administrator to create
+-- the roles before applying the schema.
 
--- Doing the rows above is not optional: without `auth.uid()` the migrations still
--- apply (it is only referenced inside function bodies and policies), but every
--- policy would fail at query time with "function auth.uid() does not exist".
--- Without `auth.users` the migration 20260922090000_init_schema.sql fails outright.
+-- These objects are required: without auth.uid(), residual row-level policies
+-- fail at query time; without auth.users, the first migration cannot create its
+-- historical foreign key before a later migration removes it.
 
 
 -- ===========================================================================
@@ -101,9 +85,8 @@ comment on function auth.uid() is
 -- =============================================================================
 -- Garba Nights — initial schema
 --
--- Target: Supabase (PostgreSQL 15+). Managed with the Supabase CLI
--- (`supabase db push` / `supabase migration up`) or by pasting into the
--- Supabase SQL editor. See supabase/README.md.
+-- Target: PostgreSQL 15+ on Neon. Apply with `npm run db:setup` or the
+-- generated `docs/one-shot-schema.sql`; see `docs/neon-setup.md`.
 --
 -- Conventions used throughout:
 --   * uuid primary keys with `gen_random_uuid()` (built into PG13+, no extension)
@@ -118,9 +101,8 @@ comment on function auth.uid() is
 -- -----------------------------------------------------------------------------
 -- Roles
 --
--- Supabase already defines anon / authenticated / service_role, so this block is
--- a no-op there. It exists so the migration can also be applied to a bare
--- PostgreSQL instance (CI, local testing) without edits.
+-- Create the app's database roles when they are missing, so the migration works
+-- on a fresh Neon or bare PostgreSQL instance without manual preparation.
 -- -----------------------------------------------------------------------------
 do $$
 begin
@@ -447,7 +429,7 @@ create table if not exists public.admin_users (
   updated_at     timestamptz not null default now()
 );
 
-comment on table public.admin_users is 'Allow-list mapping Supabase Auth users to an admin role. No public access whatsoever.';
+comment on table public.admin_users is 'Legacy allow-list mapping auth users to admin roles. No public access whatsoever.';
 comment on column public.admin_users.user_id is 'References auth.users(id); rows are created after the user signs up.';
 
 create index if not exists admin_users_active_idx on public.admin_users (is_active);
@@ -502,7 +484,7 @@ create table if not exists public.gallery (
   constraint gallery_alt_text_not_blank check (length(btrim(alt_text)) > 0)
 );
 
-comment on table public.gallery is 'Event photos and videos. Files live in Supabase Storage; this table holds the metadata.';
+comment on table public.gallery is 'Event photos and videos. Gallery files are stored in Vercel Blob; this table holds their metadata.';
 comment on column public.gallery.alt_text is 'Required: every published image needs descriptive alternative text for accessibility.';
 comment on column public.gallery.event_id is 'Nullable so festival-wide media can exist outside a single event.';
 
@@ -518,10 +500,8 @@ create trigger gallery_set_updated_at
 -- -----------------------------------------------------------------------------
 -- Table privileges
 --
--- Supabase grants broad privileges to anon/authenticated by default; stating them
--- explicitly keeps the intent readable and makes the migration portable to a bare
--- PostgreSQL instance. Row Level Security (see the next migration) is what
--- actually restricts which rows each role can see.
+-- State these role grants explicitly so the intended public read surface is clear.
+-- Row Level Security (see the next migration) restricts which rows each role can see.
 -- -----------------------------------------------------------------------------
 grant select on public.events, public.event_dates, public.pass_categories, public.gallery
   to anon, authenticated;
@@ -555,7 +535,7 @@ grant usage, select on all sequences in schema public to service_role;
 --                    user is present in admin_users with an active role.
 --   service_role   → bypasses RLS. Used only in server code for writing
 --                    bookings/passes and for Razorpay webhooks. Never shipped
---                    to the browser (see src/lib/supabase/admin.ts).
+--                    to the browser; all privileged queries stay server-side.
 --
 -- Helper functions are SECURITY DEFINER so an admin check on admin_users does not
 -- recurse through that table's own policies.
@@ -6432,28 +6412,18 @@ grant execute on function public.admin_set_event_date_booking(uuid, boolean) to 
 -- =============================================================================
 -- Garba Nights — gallery management
 --
--- The first step that owns *files* rather than rows. Two ideas carry it:
+-- Gallery files are managed by the server in Vercel Blob; PostgreSQL stores the
+-- rows, Blob object keys, URLs and image metadata. Publication controls which
+-- rows appear on the public site. Draft files in the public Blob store are
+-- unlisted, not private, so do not upload sensitive material.
 --
---   1. **The bucket a file lives in is decided by the row's status, not by the
---      upload.** Photos are uploaded into a private bucket (`gallery-inbox`) and
---      only move into the public one (`gallery`) when the organiser publishes
---      them; unpublishing moves them back. So an unpublished photograph is not
---      merely unlisted — it is not publicly reachable at all, and no URL that
---      leaks can serve it. Nothing but the service role can read the inbox, and
---      nothing but the service role can write either bucket: the browser never
---      holds a key that could put a file anywhere.
---
---   2. **The database still owns the rules.** The bucket move is a file
---      operation the app performs, so the row and the file can disagree for a
---      moment; every rule that must never disagree (alt text, dimensions, one
---      row per object, ordering) is enforced here, and the app's job is to
---      report what the database decided.
+-- The database enforces the rules that must never drift (alt text, dimensions,
+-- one row per object and ordering). The app reports the database decision and
+-- performs the corresponding Blob operation.
 --
 -- Object keys are `<event or "festival">/<item uuid>/full.webp` and
--- `…/thumb.webp`: deterministic from the row, which means the app never has to
--- store a URL that can drift from the file it points at. `gallery.url` and
--- `gallery.thumbnail_url` remain for externally hosted media (a video on a CDN),
--- and the public site prefers them when they are set.
+-- `…/thumb.webp`: deterministic from the row. `gallery.url` and
+-- `gallery.thumbnail_url` remain for externally hosted media.
 --
 -- Error codes (the app maps these to a field, not to prose):
 --
@@ -6466,92 +6436,11 @@ grant execute on function public.admin_set_event_date_booking(uuid, boolean) to 
 -- =============================================================================
 
 
--- -----------------------------------------------------------------------------
--- 1. The two buckets
---
--- Created in SQL rather than in a dashboard so a fresh project is reproducible.
--- The block is guarded: `storage` belongs to Supabase's own roles, some
--- deployments run these migrations without rights on it, and a gallery
--- migration must not break the chain of migrations that follow. When it cannot
--- create the buckets it says so, loudly, and the README says how to make them by
--- hand — see supabase/README.md.
--- -----------------------------------------------------------------------------
-do $$
-begin
-  if exists (
-    select 1 from information_schema.tables
-     where table_schema = 'storage' and table_name = 'buckets'
-  ) then
-    -- Public: the site's <img> tags point straight at these objects, which is what
-    -- makes browser caching and a CDN work without a signed URL per view.
-    execute $sql$
-      insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-      values ('gallery', 'gallery', true, 8388608,
-              array['image/webp', 'image/jpeg', 'image/png', 'image/avif'])
-      on conflict (id) do update
-        set public             = true,
-            file_size_limit    = 8388608,
-            allowed_mime_types = array['image/webp', 'image/jpeg', 'image/png', 'image/avif']
-    $sql$;
-
-    -- Private: where an upload waits until it is published. No policy below
-    -- grants anybody access to it, so the service role is the only key that can
-    -- read or write here.
-    execute $sql$
-      insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-      values ('gallery-inbox', 'gallery-inbox', false, 8388608,
-              array['image/webp', 'image/jpeg', 'image/png', 'image/avif'])
-      on conflict (id) do update
-        set public             = false,
-            file_size_limit    = 8388608,
-            allowed_mime_types = array['image/webp', 'image/jpeg', 'image/png', 'image/avif']
-    $sql$;
-
-    raise notice 'gallery: buckets "gallery" (public) and "gallery-inbox" (private) are in place';
-  else
-    raise notice 'gallery: no storage schema here — create the buckets by hand (see supabase/README.md)';
-  end if;
-end
-$$;
-
+-- Gallery file bytes live in Vercel Blob. This schema creates no provider storage
+-- objects; the migration only owns the metadata and database-side rules.
 
 -- -----------------------------------------------------------------------------
--- 2. Storage policies: nobody but the service role
---
--- There is deliberately no `select` policy on storage.objects. A public bucket
--- is served through /object/public/<bucket>/<key>, which does not consult these
--- policies; what the API *does* consult them for is listing and enumerating —
--- so with none, the anon key cannot discover a single object in either bucket,
--- and cannot write one either. Everything the app does with storage happens
--- server-side with the service-role key, which bypasses RLS.
---
--- If your deployment wants per-object reads through the authenticated API, add a
--- `select` policy scoped to `bucket_id = 'gallery'` — and read the note in
--- supabase/README.md about what that would expose.
--- -----------------------------------------------------------------------------
-do $$
-begin
-  if exists (
-    select 1 from information_schema.tables
-     where table_schema = 'storage' and table_name = 'objects'
-  ) then
-    execute 'alter table storage.objects enable row level security';
-
-    -- Anything left over from an earlier attempt at this step is removed, so the
-    -- end state is "no anon/authenticated policy on either bucket" rather than
-    -- "no policy except the one somebody added".
-    execute 'drop policy if exists gallery_objects_anon_read on storage.objects';
-    execute 'drop policy if exists gallery_objects_public_read on storage.objects';
-    execute 'drop policy if exists gallery_objects_anon_write on storage.objects';
-
-    raise notice 'gallery: storage.objects has no anon/authenticated policy — service role only';
-  end if;
-end
-$$;
-
-
--- -----------------------------------------------------------------------------
--- 3. gallery: the facts about a file
+-- 1. gallery: the facts about a file
 --
 -- `storage_path` is the object key; `thumbnail_path` is the small version of the
 -- same picture; width/height let the grid reserve the right space before the
@@ -6565,7 +6454,7 @@ alter table public.gallery
   add column if not exists byte_size      integer;
 
 comment on column public.gallery.storage_path is
-  'Object key inside the gallery buckets: <event or festival>/<item uuid>/full.webp. The bucket is chosen by status, so the key never changes when a photo is published.';
+  'Vercel Blob object key for the full gallery image: <event or festival>/<item uuid>/full.webp.';
 comment on column public.gallery.thumbnail_path is
   'The grid-sized version of the same object (…/thumb.webp). Null for externally hosted media.';
 comment on column public.gallery.width is
@@ -6594,7 +6483,7 @@ create unique index if not exists gallery_thumbnail_path_unique
 
 
 -- -----------------------------------------------------------------------------
--- 4. Reading the gallery, for the screen that manages it
+-- 2. Reading the gallery, for the screen that manages it
 -- -----------------------------------------------------------------------------
 create or replace function public.admin_gallery_items(p_event_id uuid default null)
 returns table (
@@ -6666,7 +6555,7 @@ grant execute on function public.admin_gallery_items(uuid) to service_role;
 
 
 -- -----------------------------------------------------------------------------
--- 5. Sharing the validation between the two write paths
+-- 3. Sharing the validation between the two write paths
 -- -----------------------------------------------------------------------------
 create or replace function public.gallery_check_metadata(
   p_title        text,
@@ -6718,7 +6607,7 @@ grant execute on function public.gallery_check_metadata(text, text, text, text, 
 
 
 -- -----------------------------------------------------------------------------
--- 6. Adding a row — after the file exists
+-- 4. Adding a row — after the file exists
 --
 -- The id is supplied by the caller because the object key contains it: the app
 -- uploads to `<event>/<id>/full.webp`, so it has to know the id before the row
@@ -6839,7 +6728,7 @@ grant execute on function public.admin_add_gallery_item(uuid, uuid, text, text, 
 
 
 -- -----------------------------------------------------------------------------
--- 7. Editing the words, and the running order
+-- 5. Editing the words, and the running order
 -- -----------------------------------------------------------------------------
 create or replace function public.admin_update_gallery_item(
   p_id          uuid,
@@ -6991,12 +6880,10 @@ grant execute on function public.admin_move_gallery_item(uuid, text) to service_
 
 
 -- -----------------------------------------------------------------------------
--- 8. Publishing, unpublishing, deleting
+-- 6. Publishing, unpublishing, deleting
 --
--- Publishing is a row change here and a bucket move in the app; the app asks for
--- the row first and moves the file to match, because a row that says "published"
--- with no public file is a broken image, while a file in the public bucket with
--- no published row is merely a file nobody links to.
+-- Publishing changes the database row and the public gallery listing. The app
+-- keeps the corresponding Vercel Blob objects in sync with that row.
 -- -----------------------------------------------------------------------------
 create or replace function public.admin_set_gallery_status(p_id uuid, p_status text)
 returns table (
@@ -7039,7 +6926,7 @@ end;
 $$;
 
 comment on function public.admin_set_gallery_status(uuid, text) is
-  'Enables (published), disables (draft) or retires (archived) one gallery item, and reports where the file was and where it now belongs so the app can move it between the public and private buckets. Locks the row so two administrators publishing and unpublishing cannot interleave.';
+  'Publishes, drafts or archives one gallery item and returns its file keys so the app can keep Vercel Blob in sync. Locks the row so concurrent status changes cannot interleave.';
 
 revoke all on function public.admin_set_gallery_status(uuid, text) from public;
 revoke all on function public.admin_set_gallery_status(uuid, text) from anon, authenticated;
@@ -7291,14 +7178,13 @@ comment on policy check_ins_staff_read on public.check_ins is
 -- 17 · One admin, no roles — plus the columns the new brief asks for
 --
 -- Why this exists
---   The application is moving off Supabase onto Neon through a single trusted
---   server-side connection, and off the staff/role model onto one admin account
+--   The application uses Neon through a single trusted server-side connection,
+--   and the staff/role model has been replaced by one admin account
 --   authenticated by the app itself. In that world the database does not need to
 --   know who is asking:
 --
 --     * there is one admin, so there is no staff table, no roles and no
---       permissions matrix — and nothing left that references the Supabase auth
---       schema;
+--       permissions matrix — and no dependency on the legacy auth provider;
 --     * the gate verdict (pass_entry) no longer resolves a staff row: the session
 --       was already proven before the call, and the audit row records the booking
 --       instead of the staff member;
@@ -7415,7 +7301,7 @@ drop function if exists public.is_super_admin(uuid);
 drop function if exists public.current_staff_role();
 
 -- The allow-list itself. It referenced auth.users, so this also removes the last
--- database object that knew about Supabase Auth.
+-- database object that knew about the previous hosted authentication system.
 drop table if exists public.admin_users;
 
 -- ---------------------------------------------------------------------------
@@ -8738,7 +8624,7 @@ comment on column public.events.hero_image_url is
 --     will edit them directly. Replace the venue/city/prices here (or in the
 --     dashboard) rather than anywhere in the frontend.
 --
--- Apply with: supabase db reset (local) or paste into the Supabase SQL editor.
+-- Apply with: npm run db:setup -- --seed, or paste into Neon SQL Editor.
 -- =============================================================================
 
 
@@ -8975,9 +8861,9 @@ create table if not exists setup.applied_migrations (
 );
 
 insert into setup.applied_migrations (filename, checksum) values
-  ('prelude.sql', 'db1109e26adfb63763615ee6c0565160b441c42c0d608dca34a123f034d7563c'),
-  ('20260922090000_init_schema.sql', 'd47ccf2a2b8f8d91cf318a97a2d0f88a57fda03ea617694a0ffc37539acd9ea6'),
-  ('20260922090100_rls_policies.sql', '8fb100de19bff85c9a3c452e139c7cc02677a01b9e86bb1fa6dbbe8325e32bde'),
+  ('prelude.sql', '85b35897c4b9f3a6f040ddc1b33c77ca19178bb8c40e8853dc3d1e177810f67d'),
+  ('20260922090000_init_schema.sql', '5e39852066bec9e8fa5ee0395ed2dc6d0cfdbc378440ad73bde3e38b1c7cee50'),
+  ('20260922090100_rls_policies.sql', '67e817ca2e0a8cafc06acb17a3c3cdbb846a836105ee60a27af73814077bc16b'),
   ('20260922090200_public_data_api.sql', 'e690a83eca99b58f17491f738d400002d1ecdec996d220676eb950ffdc0adf31'),
   ('20260922090300_pass_catalogue_visibility.sql', 'c863b742e48df2f30d2d9733247d92e80f899f1d39037083f370ced8dd4232c1'),
   ('20260922090400_booking_flow.sql', '90d6da22427c1f6e99211888d7efc0da8eeaaa2bd0508009a502535d10a04941'),
@@ -8989,13 +8875,13 @@ insert into setup.applied_migrations (filename, checksum) values
   ('20260922091000_admin_booking_management.sql', 'a53caba1c5e9127fe1409fb5a59deb9a54e2847ed73f310894395b7f98ab72a5'),
   ('20260922091100_admin_payments_and_passes.sql', '1d48a4afbd8679ea69b9cd9d2b3e0f83373596e354bafa03d1746afe32f0952f'),
   ('20260922091200_admin_pass_and_date_management.sql', '5c392093a25a3b274dc9694f05001e900e4e7b128d538066e5836bc796aa4921'),
-  ('20260922091300_gallery_management.sql', '8bf09913f53486ac6e3053c49233eddaebc6652b9bb40a3ad111b29d5a228dc2'),
+  ('20260922091300_gallery_management.sql', '68a229b0d98c988b7b4be4967cca835ea85e088fc0a2ed0a9b3f1175b102510b'),
   ('20260922091400_contact_and_social_links.sql', 'c4d197272f465ce212e1071e39c5e24fe1c47361cc027ea497672bbb09271d24'),
   ('20260922091500_security_hardening.sql', '7aafacc9c3374b2b85ba9b2d1ee2d8a25f849c7da36c6ec812dea287ffb83fe4'),
-  ('20260923090000_single_admin.sql', 'baafb2d8dd0549da33a4b37e303064e435c88b0ac796f04af0e586135c32950b'),
+  ('20260923090000_single_admin.sql', '39eb9be4766a01abc2fea59b249ae3584803f398ff4451a86e78d66658d57d24'),
   ('20260923091000_no_customer_email.sql', '6550d98addf020667541d107bd63bbf5089d3b6a77cf85c67f03bd886fc8ce2c'),
   ('20260924090000_database_hero_image.sql', 'c04ace668c28e3ce3548ea97234280d6e7de74edda1c81a6c6d14bd00eef22f4'),
-  ('seed.sql', '18005aa51a76513af83d5a8063bcae9cbc7dabd83bbe5f8d41c46604023342f7')
+  ('seed.sql', 'a2eb0571ac59ed79e00e955891d8097c72c15437d9217abe08987bbb6fbf91a2')
 on conflict (filename) do nothing;
 
 

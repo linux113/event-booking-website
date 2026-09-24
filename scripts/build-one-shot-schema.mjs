@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
  * Builds `docs/one-shot-schema.sql` — the whole schema as one statement batch, for a
- * hosted SQL editor that takes a paste instead of a file (Neon, Supabase, RDS…).
+ * hosted SQL editor that takes a paste instead of a file (Neon or any PostgreSQL host).
  *
  *   node scripts/build-one-shot-schema.mjs
  *
  * Order: the prelude (auth.users + auth.uid()), every migration in filename order,
- * and — with `--seed` — supabase/seed.sql. The batch is wrapped in a single
+ * and — with `--seed` — database/seed.sql. The batch is wrapped in a single
  * transaction, so a failure anywhere leaves the database exactly as it was, not
  * half-migrated. Nothing in the migrations needs to run outside a transaction
  * (`create index concurrently`, `vacuum`, `create database` are all absent — the
@@ -32,12 +32,12 @@ const withSeed = process.argv.includes("--seed");
 const NOT_TRANSACTIONAL = /^\s*(create\s+(unique\s+)?index\s+concurrently|vacuum|create\s+database|alter\s+system|drop\s+database)\b/im;
 
 const files = [
-  ["prelude.sql", join(ROOT, "supabase/prelude.sql")],
-  ...readdirSync(join(ROOT, "supabase/migrations"))
+  ["prelude.sql", join(ROOT, "database/prelude.sql")],
+  ...readdirSync(join(ROOT, "database/migrations"))
     .filter((name) => name.endsWith(".sql"))
     .sort()
-    .map((name) => [name, join(ROOT, "supabase/migrations", name)]),
-  ...(withSeed ? [["seed.sql", join(ROOT, "supabase/seed.sql")]] : []),
+    .map((name) => [name, join(ROOT, "database/migrations", name)]),
+  ...(withSeed ? [["seed.sql", join(ROOT, "database/seed.sql")]] : []),
 ];
 
 const parts = [
@@ -51,9 +51,8 @@ const parts = [
   "-- How to use it: open your database provider's SQL editor, paste this entire file,",
   "-- and run it. That is the whole installation — no CLI, no driver, no local install.",
   "--",
-  "-- Expected notices (not errors): the gallery section reports that it cannot create",
-  "-- storage buckets on a plain Postgres, which is correct — Supabase Storage does not",
-  "-- exist here.",
+  "-- Gallery files are stored in Vercel Blob; PostgreSQL stores their metadata only.",
+  "-- The separate homepage hero image is stored as a size-limited WebP bytea on Neon.",
   "--",
   "-- Afterwards, check it landed:",
   "--   select (select count(*) from information_schema.tables",

@@ -1,14 +1,13 @@
 /**
- * PGlite configured to behave like the real Supabase PostgREST API.
+ * PGlite configured with PostgreSQL date values matching the app's raw-row contract.
  *
- * PostgREST returns `date` columns as plain `YYYY-MM-DD` strings. PGlite's
- * default parser turns them into JavaScript `Date`s, which JSON-serialise as
- * ISO timestamps — a difference that would make local renders disagree with
- * production. The parser for `date` (OID 1082) is therefore overridden to hand
- * the value through untouched.
+ * Its default parser turns `date` columns into JavaScript `Date` objects, which JSON
+ * serializes as ISO timestamps. PostgreSQL drivers used by the application expose
+ * those values as `YYYY-MM-DD` strings, so the parser for date (OID 1082) passes the
+ * value through unchanged.
  *
- * Used by both verification scripts, so the checks always run against the same
- * database behaviour the deployed site will see.
+ * The database setup tests use this in-process PostgreSQL instance to exercise the
+ * real migration chain and constraints without connecting to a hosted database.
  */
 import { PGlite, types } from "@electric-sql/pglite";
 

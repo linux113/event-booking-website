@@ -1,7 +1,7 @@
 # Deploy this project on Vercel
 
 **Stack:** Next.js on Vercel · Neon PostgreSQL · Razorpay (test mode) · Vercel Blob.
-There are **no Supabase environment variables**.
+Runtime database access uses the Neon `DATABASE_URL` only.
 
 **Time:** about 10–15 minutes if Neon and Razorpay already exist.
 
@@ -24,7 +24,7 @@ There are **no Supabase environment variables**.
 
 ## Apply the homepage hero migration before deploying
 
-For an **existing** Neon database, apply `supabase/migrations/20260924090000_database_hero_image.sql`
+For an **existing** Neon database, apply `database/migrations/20260924090000_database_hero_image.sql`
 first. From this repository, `npm run db:setup` with the **direct** (non-pooler)
 `DATABASE_URL` applies any pending migrations and records them in `setup.applied_migrations`:
 

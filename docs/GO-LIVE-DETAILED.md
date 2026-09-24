@@ -66,7 +66,7 @@ npm run test:normalise   # expect: 21 passed, 0 failed
 npm run test:settings    # expect: 9 passed, 0 failed (includes the WhatsApp icon)
 npm run test:gallery-upload # expect: 8 passed, 0 failed
 npm run test:hero-image  # expect: 7 passed, 0 failed
-npm run db:setup:test    # expect: 20 passed, 0 failed
+npm run db:setup:test    # expect: 21 passed, 0 failed
 ```
 
 **CHECK A3:** all tests report zero failures.
@@ -84,7 +84,7 @@ On GitHub, choose **Pull requests → New pull request**, set base to `main` and
 to your feature branch, review the diff and checks, then merge the pull request.
 
 **CHECK A4:** On GitHub, `main` includes
-`supabase/migrations/20260924090000_database_hero_image.sql` and the Event settings
+`database/migrations/20260924090000_database_hero_image.sql` and the Event settings
 hero-image feature.
 
 ---
@@ -179,12 +179,12 @@ Replace `粘贴DIRECT…` with your **direct** (non-pooler) URL from B2, includi
 What this does in plain words:
 
 1. Creates a small helper schema (`auth.uid`) the SQL expects on a bare Postgres.  
-2. Runs every file in `supabase/migrations/` in order (including the homepage hero-image `bytea` migration).
-3. Runs `supabase/seed.sql` (demo event, 9 nights, 5 pass types) because you passed `--seed`.  
+2. Runs every file in `database/migrations/` in order (including the homepage hero-image `bytea` migration).
+3. Runs `database/seed.sql` (demo event, 9 nights, 5 pass types) because you passed `--seed`.
 4. Checks the end state and prints success / failure.
 
 For an existing Neon database, this safe re-run applies the new pending migration only.
-You may instead run `supabase/migrations/20260924090000_database_hero_image.sql` by
+You may instead run `database/migrations/20260924090000_database_hero_image.sql` by
 itself in Neon SQL Editor. Do not paste the full one-shot schema into an existing database.
 
 **Re-running is safe.** It remembers what it already applied.
@@ -377,7 +377,7 @@ Add each key for **Production** (and again for **Preview** if you want previews 
 
 **How to paste a multi-line / special URL:** Vercel sometimes wraps values — paste on one line.
 
-**Never add:** `NEXT_PUBLIC_DATABASE_URL`, `NEXT_PUBLIC_AUTH_SECRET`, anything `SUPABASE_*`.
+**Never add:** `NEXT_PUBLIC_DATABASE_URL`, `NEXT_PUBLIC_AUTH_SECRET`, or any other secret with a `NEXT_PUBLIC_` prefix.
 
 **CHECK E:** Environment Variables list shows **all required names** with values (webhook secret may be pending until F). Red badge / empty value = not saved.
 
@@ -413,7 +413,7 @@ Open `https://your-domain-or-vercel.app/`:
 | 6 | Login with admin user + **your password** | Dashboard opens; stats not all zero if seed exists |
 | 7 | `/admin/bookings` | Page opens (may be empty) |
 | 8 | `/gallery` | Opens (may be empty) |
-| 9 | View Page Source → search `supabase` | No matches |
+| 9 | View Page Source | No database URLs, admin secrets, or payment secrets |
 | 10 | Neon query history | New queries when you reload (proves Vercel → Neon) |
 
 **CHECK F (Gate before payments):** **all 10 pass.**

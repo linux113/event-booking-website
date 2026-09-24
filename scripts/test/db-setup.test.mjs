@@ -27,6 +27,9 @@ const { createVerificationDb } = await import(join(REPO, "scripts/test/pglite.mj
 const { applySchema, listSections, verifySchema, TRACKING_SCHEMA, TRACKING_TABLE } = await import(
   join(REPO, "scripts/lib/apply-schema.mjs")
 );
+const { LEGACY_MIGRATION_CHECKSUMS } = await import(
+  join(REPO, "scripts/lib/legacy-migration-checksums.mjs")
+);
 
 const results = [];
 const check = (label, ok, detail = "") => {
@@ -88,6 +91,19 @@ check("no failures on the second run", second.failures.length === 0, JSON.string
 check(`all ${total} sections skipped`, second.skipped.length === total, `skipped ${second.skipped.length}`);
 check("nothing applied twice", second.applied.length === 0, JSON.stringify(second.applied));
 check("no file reported as changed", second.changed.length === 0, JSON.stringify(second.changed));
+
+await db.query(
+  `update ${TRACKING_SCHEMA}.${TRACKING_TABLE} set checksum = $1 where filename = $2`,
+  [LEGACY_MIGRATION_CHECKSUMS["prelude.sql"][0], "prelude.sql"],
+);
+const afterCommentCleanup = await applySchema({ db, root: REPO, seed: true });
+check(
+  "existing Neon checksum records remain valid after provider-neutral comment cleanup",
+  afterCommentCleanup.changed.length === 0 &&
+    afterCommentCleanup.applied.length === 0 &&
+    afterCommentCleanup.skipped.length === total,
+  JSON.stringify(afterCommentCleanup),
+);
 
 const [afterRerun] = (
   await pg.query(`

@@ -97,9 +97,7 @@ export function getRazorpayWebhookSecret(): string {
 /**
  * Base URL of the Razorpay API.
  *
- * Not part of `.env.example`: nothing in production sets this. It exists so
- * `npm run verify:web` can point the server at scripts/test/razorpay-stub.mjs and
- * exercise the payment flow without a Razorpay account.
+ * Not part of `.env.example`: production always uses Razorpay's official API.
  */
 export function getRazorpayApiBaseUrl(): string {
   const configured = process.env.RAZORPAY_API_BASE_URL?.trim();

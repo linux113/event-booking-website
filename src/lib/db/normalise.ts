@@ -3,7 +3,7 @@
  *
  * Every row interface (`src/types/database.ts`, the service layer's row shapes)
  * and every mapper declares date-like columns as plain `string`, because the
- * Supabase/PostgREST client this code replaced returned plain strings:
+ * previous HTTP data layer returned plain strings:
  * `2026-10-11`, `19:00:00`, ISO timestamps. Prisma 7 does not: its client
  * turns `date`, `time` and `timestamptz` columns into JS `Date` objects
  * (`date` at UTC midnight, `time` anchored at the 1970-01-01 UTC epoch day,
