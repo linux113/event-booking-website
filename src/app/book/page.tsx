@@ -17,7 +17,7 @@ import { getFeaturedEventBundle } from "@/lib/services/events";
 export const metadata: Metadata = {
   title: "Book Now",
   description:
-    "Reserve passes for the Navratri and Dandiya festival in four steps: choose your night, choose your pass, add your details and pay securely with Razorpay.",
+    "Reserve passes for the Navratri and Dandiya festival in four steps: pick your date and time, choose your tickets, add your details and pay securely with Razorpay.",
 };
 
 // Availability must be current on every request.
@@ -90,7 +90,7 @@ export default async function BookPage() {
       <PageHero
         eyebrow="Book now"
         title="Reserve your pass"
-        description="Four steps: night, pass, your details, review. Availability and prices are read from the database, and the amount you pay is calculated on the server before Checkout opens."
+        description="Four steps: date & time, tickets, your details, review. Availability and prices are read from the database, and the amount you pay is calculated on the server before Checkout opens."
       >
         <div className="flex flex-col gap-3 sm:flex-row">
           <Button href="#checkout" size="lg" className="w-full sm:w-auto">

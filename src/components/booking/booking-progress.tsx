@@ -38,7 +38,7 @@ export function BookingProgress({ steps, current }: BookingProgressProps) {
               <span
                 aria-current={isCurrent ? "step" : undefined}
                 className={cn(
-                  "border-border flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold tracking-wide",
+                  "border-border flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold tracking-wide whitespace-nowrap",
                   isCurrent
                     ? "border-marigold/50 bg-marigold/10 text-marigold-soft"
                     : isDone

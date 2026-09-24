@@ -4,6 +4,7 @@ import type { Route } from "next";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
+import { BookingBottomBar, BookingBottomBarSpacer } from "@/components/booking/booking-bottom-bar";
 import { BookingProgress, type BookingStepDefinition } from "@/components/booking/booking-progress";
 import { StepDates } from "@/components/booking/step-dates";
 import { StepDetails } from "@/components/booking/step-details";
@@ -11,7 +12,9 @@ import { StepPass } from "@/components/booking/step-pass";
 import { StepSummary } from "@/components/booking/step-summary";
 import { Button } from "@/components/ui/button";
 import { createIdempotencyKey } from "@/lib/booking/idempotency";
+import { formatEventDate, formatInr, formatTimeRange } from "@/lib/format";
 import { loadRazorpayCheckout, openRazorpayCheckout } from "@/lib/payments/checkout";
+import { cn } from "@/lib/utils";
 import {
   parsePositiveInteger,
   validateMobile,
@@ -38,15 +41,15 @@ import type {
 const STEPS: readonly BookingStepDefinition[] = [
   {
     id: 1,
-    label: "Night",
-    title: "Choose your night",
+    label: "Date & Time",
+    title: "Pick your date & time",
     description:
-      "Availability is read live from the database. Nights that are fully booked, cancelled or finished cannot be selected.",
+      "Date and time are chosen together. Availability is read live from the database — nights that are fully booked, cancelled or finished cannot be selected.",
   },
   {
     id: 2,
-    label: "Pass",
-    title: "Choose your pass",
+    label: "Tickets",
+    title: "Choose your tickets",
     description:
       "Prices come from the database. A pass admits a fixed group and the price is per pass, not per person.",
   },
@@ -91,7 +94,7 @@ const DETAIL_FIELDS: readonly (keyof BookingFieldErrors)[] = [
 ];
 
 /**
- * Four-step checkout: night, pass, details, review — then payment.
+ * Four-step checkout: date & time, tickets, details, review — then payment.
  *
  * The browser validates for instant feedback and the server validates again on
  * every request it receives, including the price and the remaining capacity,
@@ -161,14 +164,33 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
     const nextPass = passes.find((item) => item.id === nextPassId) ?? null;
     setPassId(nextPassId);
     setPeopleEdited(false);
-    setErrors((current) => ({ ...current, passCategoryId: undefined, numberOfPeople: undefined }));
+    setErrors((current) => ({ ...current, passCategoryId: undefined, numberOfPeople: undefined, quantity: undefined }));
     setApiError(null);
     setNotice(null);
-    // A pass admits a fixed group, so the head count follows the composition.
-    setDetails((current) => ({
-      ...current,
-      numberOfPeople: String((parsePositiveInteger(current.quantity) ?? 1) * (nextPass?.numberOfPeople ?? 1)),
-    }));
+    // A pass admits a fixed group, so the head count follows the composition,
+    // and the quantity already chosen never exceeds the new pass's own limit.
+    setDetails((current) => {
+      const quantity = Math.min(
+        parsePositiveInteger(current.quantity) ?? 1,
+        nextPass?.maxPerBooking ?? 1,
+      );
+
+      return {
+        ...current,
+        quantity: String(quantity),
+        numberOfPeople: String(quantity * (nextPass?.numberOfPeople ?? 1)),
+      };
+    });
+  }
+
+  /** The ± stepper on the Tickets step: always 1 … maxPerBooking of the selected pass. */
+  function handleQuantityStep(nextQuantity: number) {
+    if (!pass) {
+      return;
+    }
+
+    const clamped = Math.min(Math.max(1, nextQuantity), pass.maxPerBooking);
+    handleDetailChange("quantity", String(clamped));
   }
 
   function handleDetailChange(field: keyof BookingDetailsDraft, value: string) {
@@ -229,7 +251,7 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
   function goNext() {
     if (step === 1) {
       if (!night || !night.isBookable) {
-        setErrors({ eventDateId: "Choose a night to continue." });
+        setErrors({ eventDateId: "Choose a date to continue." });
         return;
       }
 
@@ -240,7 +262,14 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
 
     if (step === 2) {
       if (!pass || !pass.availability.enabled) {
-        setErrors({ passCategoryId: "Choose a pass to continue." });
+        setErrors({ passCategoryId: "Add a ticket to continue." });
+        return;
+      }
+
+      const quantityError = validateQuantity(details.quantity, pass.maxPerBooking);
+
+      if (quantityError) {
+        setErrors({ quantity: quantityError });
         return;
       }
 
@@ -533,6 +562,7 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
   }
 
   const current = STEPS[step - 1];
+  const nightTimeRange = night ? formatTimeRange(night.startTime, night.endTime) : null;
   const canContinue =
     step === 1 ? night !== null && night.isBookable : step === 2 ? Boolean(pass?.availability.enabled) : true;
 
@@ -557,6 +587,8 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
             nights={nights}
             value={nightId}
             onChange={handleNightChange}
+            venueName={event.venueName}
+            city={event.city}
             error={errors.eventDateId}
             disabled={isBusy}
           />
@@ -567,7 +599,12 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
             passes={passes}
             value={passId}
             onChange={handlePassChange}
-            error={errors.passCategoryId}
+            quantity={quantity ?? 1}
+            onQuantityChange={handleQuantityStep}
+            night={night}
+            currency={event.currency}
+            onEditDate={() => setStep(1)}
+            error={errors.passCategoryId ?? errors.quantity}
             disabled={isBusy}
           />
         ) : null}
@@ -575,6 +612,7 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
         {step === 3 ? (
           <StepDetails
             pass={pass}
+            night={night}
             details={details}
             onChange={handleDetailChange}
             errors={errors}
@@ -602,7 +640,14 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
           />
         ) : null}
 
-        <div className="border-border/70 flex flex-wrap items-center justify-between gap-3 border-t pt-5">
+        {/* On the first two steps the footer steps aside for the pinned Proceed
+            bar on small screens; from `lg` up this row always stays. */}
+        <div
+          className={cn(
+            "border-border/70 border-t pt-5",
+            step <= 2 ? "hidden flex-wrap items-center justify-between gap-3 lg:flex" : "flex flex-wrap items-center justify-between gap-3",
+          )}
+        >
           <Button onClick={goBack} variant="secondary" size="sm" disabled={step === 1 || isBusy}>
             Back
           </Button>
@@ -620,6 +665,27 @@ export function BookingWizard({ event, nights, passes, paymentsReady, paymentMod
           )}
         </div>
       </div>
+
+      {step <= 2 ? (
+        <>
+          <BookingBottomBar
+            eyebrow={step === 1 ? "Selected date & time" : "Total"}
+            value={
+              step === 1 ? (
+                night ? `${formatEventDate(night.date)}${nightTimeRange ? ` · ${nightTimeRange}` : ""}` : "Pick a date"
+              ) : estimate ? (
+                `${formatInr(estimate.total, event.currency)} · ${quantity ?? 1} ${quantity === 1 ? "ticket" : "tickets"}`
+              ) : (
+                "Add tickets to your booking"
+              )
+            }
+            onBack={step === 2 ? goBack : undefined}
+            onProceed={goNext}
+            proceedDisabled={!canContinue}
+          />
+          <BookingBottomBarSpacer />
+        </>
+      ) : null}
     </div>
   );
 }

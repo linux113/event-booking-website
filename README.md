@@ -1,4 +1,4 @@
-# Savriya Seth Events — Navratri & Dandiya event booking
+# Sanwariya Seth Events — Navratri & Dandiya event booking
 
 A production-oriented booking platform for Navratri / Dandiya events: browse nights,
 reserve passes and pay online. Built with **Next.js (App Router) + React + TypeScript +

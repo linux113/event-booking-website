@@ -11,9 +11,10 @@ type LogoProps = {
 };
 
 /**
- * Brand lockup: circular "Savariya Event" mark (black/gold Krishna emblem)
- * plus the site wordmark. The mark is a static import so it is fingerprinted
- * by the bundler; the alt text names the brand even when the wordmark is hidden.
+ * Brand lockup: circular "Sanwariya Seth Event" mark (black/gold Krishna
+ * emblem with the Devanagari wordmark) plus the site wordmark. The mark is a
+ * static import so it is fingerprinted by the bundler; the alt text names the
+ * brand even when the wordmark is hidden.
  */
 export function Logo({ className, showWordmark = true }: LogoProps) {
   return (

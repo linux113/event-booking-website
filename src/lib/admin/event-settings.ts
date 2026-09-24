@@ -1,7 +1,14 @@
+import { SITE_CONTENT_LIMITS } from "@/lib/site-content";
+import type { SiteContent } from "@/types";
 import type {
+  EventBasicsSettingsErrors,
+  EventBasicsSettingsInput,
+  EventBasicsSettingsValues,
   EventContactSettingsErrors,
   EventContactSettingsInput,
   EventContactSettingsValues,
+  SiteContentSettingsErrors,
+  SiteContentSettingsInput,
 } from "@/types/event-settings";
 
 const LIMITS = {
@@ -13,6 +20,19 @@ const LIMITS = {
   supportHours: 6,
   supportHourLine: 160,
 } as const;
+
+const BASICS_LIMITS = {
+  name: 120,
+  slug: 80,
+  tagline: 240,
+  description: 2000,
+  venueName: 120,
+  city: 120,
+  state: 120,
+  currency: 3,
+} as const;
+
+export const EVENT_STATUSES = ["draft", "published", "archived"] as const;
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -154,5 +174,175 @@ export function parseEventContactSettings(
 }
 
 export function isCleanEventContactSettings(errors: EventContactSettingsErrors): boolean {
+  return Object.keys(errors).length === 0;
+}
+
+// -----------------------------------------------------------------------------
+// About the event (name, tagline, description, venue names)
+// -----------------------------------------------------------------------------
+
+/**
+ * Parse and validate the event basics. Name, venue name and city are required:
+ * the public pages have no fallback for them. Empty optional fields are stored
+ * as null so the built-in copy (e.g. the section headings) reappears.
+ */
+export function parseEventBasicsSettings(
+  input: unknown,
+): { values: EventBasicsSettingsValues; errors: EventBasicsSettingsErrors } {
+  const source = (typeof input === "object" && input !== null ? input : {}) as Record<string, unknown>;
+  const raw: EventBasicsSettingsInput = {
+    name: asString(source.name),
+    slug: asString(source.slug),
+    status: asString(source.status),
+    tagline: asString(source.tagline),
+    description: asString(source.description),
+    venueName: asString(source.venueName),
+    city: asString(source.city),
+    state: asString(source.state),
+    currency: asString(source.currency).toUpperCase(),
+  };
+  const errors: EventBasicsSettingsErrors = {};
+
+  if (!raw.name) {
+    errors.name = "Enter the event name.";
+  } else if (hasTooManyCharacters(raw.name, BASICS_LIMITS.name)) {
+    errors.name = `Keep the event name under ${BASICS_LIMITS.name} characters.`;
+  }
+
+  if (!raw.slug) {
+    errors.slug = "Enter the event slug.";
+  } else if (hasTooManyCharacters(raw.slug, BASICS_LIMITS.slug)) {
+    errors.slug = `Keep the slug under ${BASICS_LIMITS.slug} characters.`;
+  } else if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(raw.slug)) {
+    errors.slug = "Use lowercase letters, numbers and single hyphens, e.g. navratri-2026-jaipur.";
+  }
+
+  if (!EVENT_STATUSES.includes(raw.status as (typeof EVENT_STATUSES)[number])) {
+    errors.status = "Choose draft, published or archived.";
+  }
+
+  if (hasTooManyCharacters(raw.tagline, BASICS_LIMITS.tagline)) {
+    errors.tagline = `Keep the tagline under ${BASICS_LIMITS.tagline} characters.`;
+  }
+
+  if (hasTooManyCharacters(raw.description, BASICS_LIMITS.description)) {
+    errors.description = `Keep the description under ${BASICS_LIMITS.description} characters.`;
+  }
+
+  if (!raw.venueName) {
+    errors.venueName = "Enter the venue name.";
+  } else if (hasTooManyCharacters(raw.venueName, BASICS_LIMITS.venueName)) {
+    errors.venueName = `Keep the venue name under ${BASICS_LIMITS.venueName} characters.`;
+  }
+
+  if (!raw.city) {
+    errors.city = "Enter the city.";
+  } else if (hasTooManyCharacters(raw.city, BASICS_LIMITS.city)) {
+    errors.city = `Keep the city under ${BASICS_LIMITS.city} characters.`;
+  }
+
+  if (hasTooManyCharacters(raw.state, BASICS_LIMITS.state)) {
+    errors.state = `Keep the state under ${BASICS_LIMITS.state} characters.`;
+  }
+
+  if (raw.currency.length !== BASICS_LIMITS.currency || !/^[A-Z]{3}$/.test(raw.currency)) {
+    errors.currency = `Use the 3-letter currency code, e.g. INR.`;
+  }
+
+  const values: EventBasicsSettingsValues = {
+    name: raw.name,
+    slug: raw.slug,
+    status: raw.status as EventBasicsSettingsValues["status"],
+    tagline: raw.tagline || null,
+    description: raw.description || null,
+    venueName: raw.venueName,
+    city: raw.city,
+    state: raw.state || null,
+    currency: raw.currency,
+  };
+
+  return { values, errors };
+}
+
+export function isCleanEventBasicsSettings(errors: EventBasicsSettingsErrors): boolean {
+  return Object.keys(errors).length === 0;
+}
+
+// -----------------------------------------------------------------------------
+// Site content (About Us, gallery heading, contact-page FAQs)
+// -----------------------------------------------------------------------------
+
+/**
+ * Parse and validate the organiser-edited public copy. Empty fields are
+ * stored as null/empty: the public pages then fall back to their built-in
+ * default copy, so clearing a field restores the original text.
+ */
+export function parseSiteContentSettings(
+  input: unknown,
+): { values: SiteContent; errors: SiteContentSettingsErrors } {
+  const source = (typeof input === "object" && input !== null ? input : {}) as Record<string, unknown>;
+  const rawFaqs = Array.isArray(source.faqs) ? source.faqs : [];
+  const raw: SiteContentSettingsInput = {
+    aboutTitle: asString(source.aboutTitle),
+    aboutBody: asString(source.aboutBody),
+    aboutPoints: asString(source.aboutPoints),
+    galleryTitle: asString(source.galleryTitle),
+    galleryIntro: asString(source.galleryIntro),
+    faqs: rawFaqs
+      .map((row) => {
+        const record = (typeof row === "object" && row !== null ? row : {}) as Record<string, unknown>;
+        return { question: asString(record.question), answer: asString(record.answer) };
+      })
+      .filter((row) => row.question || row.answer),
+  };
+  const errors: SiteContentSettingsErrors = {};
+
+  if (hasTooManyCharacters(raw.aboutTitle, SITE_CONTENT_LIMITS.aboutTitle)) {
+    errors.aboutTitle = `Keep the About Us title under ${SITE_CONTENT_LIMITS.aboutTitle} characters.`;
+  }
+  if (hasTooManyCharacters(raw.aboutBody, SITE_CONTENT_LIMITS.aboutBody)) {
+    errors.aboutBody = `Keep the About Us text under ${SITE_CONTENT_LIMITS.aboutBody} characters.`;
+  }
+  if (hasTooManyCharacters(raw.galleryTitle, SITE_CONTENT_LIMITS.galleryTitle)) {
+    errors.galleryTitle = `Keep the gallery title under ${SITE_CONTENT_LIMITS.galleryTitle} characters.`;
+  }
+  if (hasTooManyCharacters(raw.galleryIntro, SITE_CONTENT_LIMITS.galleryIntro)) {
+    errors.galleryIntro = `Keep the gallery intro under ${SITE_CONTENT_LIMITS.galleryIntro} characters.`;
+  }
+
+  const aboutPoints = raw.aboutPoints
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (aboutPoints.length > SITE_CONTENT_LIMITS.aboutPointsMax) {
+    errors.aboutPoints = `Use no more than ${SITE_CONTENT_LIMITS.aboutPointsMax} checklist points.`;
+  } else if (aboutPoints.some((line) => line.length > SITE_CONTENT_LIMITS.aboutPointLength)) {
+    errors.aboutPoints = `Keep each checklist point under ${SITE_CONTENT_LIMITS.aboutPointLength} characters.`;
+  }
+
+  if (raw.faqs.length > SITE_CONTENT_LIMITS.faqsMax) {
+    errors.faqs = `Use no more than ${SITE_CONTENT_LIMITS.faqsMax} questions.`;
+  } else if (raw.faqs.some((faq) => !(faq.question && faq.answer))) {
+    errors.faqs = "Every question needs both the question and its answer — or remove the empty row.";
+  } else if (raw.faqs.some((faq) => faq.question.length > SITE_CONTENT_LIMITS.faqQuestion)) {
+    errors.faqs = `Keep each question under ${SITE_CONTENT_LIMITS.faqQuestion} characters.`;
+  } else if (raw.faqs.some((faq) => faq.answer.length > SITE_CONTENT_LIMITS.faqAnswer)) {
+    errors.faqs = `Keep each answer under ${SITE_CONTENT_LIMITS.faqAnswer} characters.`;
+  }
+
+  const values: SiteContent = {
+    aboutTitle: raw.aboutTitle || null,
+    aboutBody: raw.aboutBody || null,
+    aboutPoints,
+    galleryTitle: raw.galleryTitle || null,
+    galleryIntro: raw.galleryIntro || null,
+    faqs: raw.faqs.slice(0, SITE_CONTENT_LIMITS.faqsMax),
+  };
+
+  return { values, errors };
+}
+
+export function isCleanSiteContentSettings(errors: SiteContentSettingsErrors): boolean {
   return Object.keys(errors).length === 0;
 }

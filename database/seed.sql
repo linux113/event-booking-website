@@ -1,5 +1,5 @@
 -- =============================================================================
--- Savriya Seth Events — initial seed data
+-- Sanwariya Seth Events — initial seed data
 --
 -- Idempotent: every row has a hard-coded uuid and an `on conflict ... do update`
 -- branch, so re-running this file never duplicates or orphans anything.

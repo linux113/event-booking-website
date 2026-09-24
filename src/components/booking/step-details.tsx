@@ -1,28 +1,33 @@
 import { TextField } from "@/components/ui/field";
-import { formatInr } from "@/lib/format";
-import type { PassOption } from "@/types";
+import { formatEventDate, formatInr, formatTimeRange } from "@/lib/format";
+import type { EventNight, PassOption } from "@/types";
 import type { BookingDetailsDraft, BookingFieldErrors } from "@/types/booking";
 
 type StepDetailsProps = {
   pass: PassOption | null;
+  /** The night from step 1, summarised so the details are never filled in blind. */
+  night: EventNight | null;
   details: BookingDetailsDraft;
   onChange: (field: keyof BookingDetailsDraft, value: string) => void;
   errors: BookingFieldErrors;
-  /** Live estimate for the copy under the quantity fields (display only). */
+  /** Live estimate for the summary strip (display only). */
   estimate: { subtotal: number; total: number } | null;
   currency: string;
   disabled?: boolean;
 };
 
 /**
- * Step 3 — who is booking and how many.
+ * Step 3 — who is booking.
  *
- * The head count is derived from the pass composition (`quantity x people per
- * pass`) and kept in sync while the visitor does not override it — a pass admits
- * a fixed group, so the server rejects a mismatched number.
+ * The ticket and the quantity were picked on the previous screens; what is left
+ * here is the lead guest's name and mobile, used for the entry register and the
+ * booking confirmation. The head count follows the ticket composition
+ * (quantity × people per pass) and stays editable while it matches — a pass
+ * admits a fixed group, so the server rejects a mismatched number.
  */
 export function StepDetails({
   pass,
+  night,
   details,
   onChange,
   errors,
@@ -31,10 +36,23 @@ export function StepDetails({
   disabled,
 }: StepDetailsProps) {
   const peoplePerPass = pass?.numberOfPeople ?? 1;
-  const maxPerBooking = pass?.maxPerBooking ?? 1;
+  const timeRange = night ? formatTimeRange(night.startTime, night.endTime) : null;
 
   return (
     <div className="flex flex-col gap-6">
+      {/* What is being booked, in one strip: slot, ticket, quantity and total. */}
+      {pass ? (
+        <dl className="border-border bg-surface/50 divide-border/60 grid grid-cols-2 divide-x rounded-2xl border sm:grid-cols-4">
+          <SummaryCell
+            label="Date & time"
+            value={night ? `${formatEventDate(night.date)}${timeRange ? ` · ${timeRange}` : ""}` : "—"}
+          />
+          <SummaryCell label="Ticket" value={pass.name} />
+          <SummaryCell label="Quantity" value={`${details.quantity || "1"} × ${formatInr(pass.priceInr, currency)}`} />
+          <SummaryCell label="Total" value={estimate ? formatInr(estimate.total, currency) : "—"} strong />
+        </dl>
+      ) : null}
+
       <div className="grid gap-5 sm:grid-cols-2">
         <TextField
           label="Full name"
@@ -64,66 +82,34 @@ export function StepDetails({
           required
           disabled={disabled}
         />
+
+        <TextField
+          label="Number of people"
+          name="numberOfPeople"
+          type="number"
+          inputMode="numeric"
+          value={details.numberOfPeople}
+          onChange={(value) => onChange("numberOfPeople", value)}
+          error={errors.numberOfPeople}
+          hint={
+            pass
+              ? `${peoplePerPass} ${peoplePerPass === 1 ? "person" : "people"} per pass × quantity — the group this booking admits.`
+              : "The group this booking admits."
+          }
+          min={peoplePerPass}
+          required
+          disabled={disabled}
+        />
       </div>
+    </div>
+  );
+}
 
-      <div className="border-border bg-surface/50 flex flex-col gap-5 rounded-2xl border p-5">
-        <div className="flex flex-col gap-1">
-          <h3 className="text-sm font-semibold tracking-tight">How many passes?</h3>
-          <p className="text-muted text-xs/5">
-            {pass
-              ? `A ${pass.name} admits ${peoplePerPass} ${peoplePerPass === 1 ? "person" : "people"}, and up to ${maxPerBooking} can be booked at a time.`
-              : "Choose a pass to see the group size it admits."}
-          </p>
-        </div>
-
-        <div className="grid gap-5 sm:grid-cols-2">
-          <TextField
-            label="Quantity (passes)"
-            name="quantity"
-            type="number"
-            inputMode="numeric"
-            value={details.quantity}
-            onChange={(value) => onChange("quantity", value)}
-            error={errors.quantity}
-            hint={pass ? `1 – ${maxPerBooking}` : undefined}
-            min={1}
-            max={maxPerBooking}
-            required
-            disabled={disabled}
-          />
-
-          <TextField
-            label="Number of people"
-            name="numberOfPeople"
-            type="number"
-            inputMode="numeric"
-            value={details.numberOfPeople}
-            onChange={(value) => onChange("numberOfPeople", value)}
-            error={errors.numberOfPeople}
-            hint={
-              pass
-                ? `Must be ${peoplePerPass} × quantity — the group this pass admits.`
-                : undefined
-            }
-            min={peoplePerPass}
-            required
-            disabled={disabled}
-          />
-        </div>
-
-        {estimate ? (
-          <p className="text-muted border-border/70 border-t pt-4 text-sm">
-            Estimated total{" "}
-            <span className="text-foreground font-semibold">
-              {formatInr(estimate.total, currency)}
-            </span>{" "}
-            <span className="text-muted/80">
-              ({details.quantity} × {formatInr(pass?.priceInr ?? 0, currency)}). The server
-              recalculates the final amount from the database price when you confirm.
-            </span>
-          </p>
-        ) : null}
-      </div>
+function SummaryCell({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) {
+  return (
+    <div className="flex flex-col gap-0.5 px-4 py-3">
+      <dt className="text-muted/80 text-[0.6875rem] font-semibold tracking-widest uppercase">{label}</dt>
+      <dd className={strong ? "text-marigold-soft text-sm font-bold" : "text-sm font-medium"}>{value}</dd>
     </div>
   );
 }

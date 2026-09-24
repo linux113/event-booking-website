@@ -63,6 +63,9 @@ model Event {
   instagramUrl     String?   @map("instagram_url")
   facebookUrl      String?   @map("facebook_url")
   youtubeUrl       String?   @map("youtube_url")
+  /// Organiser-edited public copy (About Us, gallery heading, contact FAQs).
+  /// An empty object means every page shows its built-in default text.
+  siteContent      Json      @default("{}") @map("site_content")
   createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 

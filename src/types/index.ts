@@ -109,6 +109,33 @@ export interface EventFeature {
   description: string | null;
 }
 
+/** A question/answer pair on the contact page's "Questions before booking" list. */
+export interface EventFaq {
+  question: string;
+  answer: string;
+}
+
+/**
+ * Organiser-edited public copy from the event row's `site_content`.
+ *
+ * Null/empty means "no override saved": the page falls back to its built-in
+ * default copy, so the site can never go blank over a malformed value.
+ */
+export interface SiteContent {
+  /** About-page heading; null → the page's default dynamic title. */
+  aboutTitle: string | null;
+  /** About-page body paragraph; null → the page's default text. */
+  aboutBody: string | null;
+  /** About-page checklist; empty → the page's default points. */
+  aboutPoints: string[];
+  /** Gallery heading (page and home preview); null → the default title. */
+  galleryTitle: string | null;
+  /** Gallery intro sentence; null → the default description. */
+  galleryIntro: string | null;
+  /** Contact-page FAQs; empty → the page's default questions. */
+  faqs: EventFaq[];
+}
+
 /** Everything the public pages need about the featured event, in one call. */
 export interface EventBundle {
   event: EventSummary;
@@ -116,6 +143,7 @@ export interface EventBundle {
   passes: PassOption[];
   highlights: EventHighlight[];
   features: EventFeature[];
+  content: SiteContent;
 }
 
 // -----------------------------------------------------------------------------

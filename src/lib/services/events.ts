@@ -9,6 +9,7 @@ import {
   type AvailabilityRow,
 } from "@/lib/services/mappers";
 import { fail, failFromPostgrest, ok, type Result } from "@/lib/services/result";
+import { parseSiteContentJson } from "@/lib/site-content";
 import type { EventRow as EventDbRow, EventHighlightRow as EventHighlightDbRow, EventFeatureRow as EventFeatureDbRow, PassCategoryRow as PassCategoryDbRow } from "@/types/database";
 import type {
   EventBundle,
@@ -17,6 +18,7 @@ import type {
   EventNight,
   EventSummary,
   PassOption,
+  SiteContent,
 } from "@/types";
 
 /**
@@ -138,6 +140,39 @@ export async function getFeaturedEvent(): Promise<Result<EventSummary | null>> {
   }
 }
 
+interface SiteContentRow {
+  site_content: unknown;
+}
+
+/**
+ * The organiser-edited page copy for the featured event.
+ *
+ * The copy is optional dressing: when the `site_content` column is missing
+ * — an installation that has not applied the latest migration yet — the
+ * pages simply render their built-in defaults instead of erroring.
+ */
+export async function getSiteContent(): Promise<Result<SiteContent>> {
+  if (!isDatabaseConfigured()) {
+    return notConfigured<SiteContent>();
+  }
+
+  try {
+    const rows = await sql<SiteContentRow[]>`
+      select site_content
+      from public.events
+      where status = 'published'
+      order by created_at asc
+      limit 1
+    `;
+    return ok(parseSiteContentJson(rows[0]?.site_content));
+  } catch (error) {
+    if (error instanceof DatabaseError && error.code === "42703") {
+      return ok(parseSiteContentJson(null));
+    }
+    return queryFailure(error, "getSiteContent");
+  }
+}
+
 /** Everything a public page needs about the featured event. */
 export async function getFeaturedEventBundle(): Promise<Result<EventBundle | null>> {
   const featured = await getFeaturedEvent();
@@ -152,14 +187,15 @@ export async function getFeaturedEventBundle(): Promise<Result<EventBundle | nul
 
   const event = featured.data;
 
-  const [nights, passes, highlights, features] = await Promise.all([
+  const [nights, passes, highlights, features, content] = await Promise.all([
     listEventNights(event.id),
     listEventPasses(event.id),
     listEventHighlights(event.id),
     listEventFeatures(event.id),
+    getSiteContent(),
   ]);
 
-  const failure = [nights, passes, highlights, features].find((result) => !result.ok);
+  const failure = [nights, passes, highlights, features, content].find((result) => !result.ok);
 
   if (failure && !failure.ok) {
     return fail(failure.error.kind, failure.error.message);
@@ -171,6 +207,7 @@ export async function getFeaturedEventBundle(): Promise<Result<EventBundle | nul
     passes: passes.ok ? passes.data : [],
     highlights: highlights.ok ? highlights.data : [],
     features: features.ok ? features.data : [],
+    content: content.ok ? content.data : parseSiteContentJson(null),
   });
 }
 
