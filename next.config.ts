@@ -10,7 +10,7 @@ const nextConfig: NextConfig = {
   // via `npm run lint` (or the combined `npm run check`).
   typescript: { ignoreBuildErrors: false },
 
-  // Type-safe <Link href> values across the app.
+  // Type-safe <Link href> values.
   typedRoutes: true,
 
   // Dev-server origins allowed to request internal dev assets. The sandbox
@@ -63,6 +63,12 @@ const nextConfig: NextConfig = {
         protocol: "https",
         hostname: "**.blob.vercel-storage.com",
       },
+    ],
+    // Local images served by our own API routes with a query string
+    // (`next/image` refuses query strings unless whitelisted here).
+    localPatterns: [
+      { pathname: "/api/gallery-image/**", search: "?variant=thumb" },
+      { pathname: "/api/gallery-image/**", search: "?variant=full" },
     ],
   },
 };
