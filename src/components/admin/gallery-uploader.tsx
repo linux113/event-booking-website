@@ -3,10 +3,12 @@
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 
+import { CloseIcon, CameraIcon } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { GALLERY_LIMITS, GALLERY_UPLOAD_ACCEPT, formatBytes } from "@/lib/admin/gallery";
 import {
   GALLERY_UPLOAD_BATCH_BYTES,
+  GALLERY_UPLOAD_FILES_PER_REQUEST,
   planGalleryUploadBatches,
 } from "@/lib/admin/gallery-upload";
 import type { AdminGalleryItem, GalleryUploadOutcome } from "@/types/gallery";
@@ -103,10 +105,32 @@ export function GalleryUploader({
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [album, setAlbum] = useState("");
+  const [staged, setStaged] = useState<File[]>([]);
   const [pending, setPending] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<GalleryUploadOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  /** Append the just-picked photos to the staged list (same file picked twice is kept once). */
+  function stage(picked: FileList | File[] | null) {
+    if (!picked || picked.length === 0) return;
+
+    setOutcome(null);
+    setError(null);
+    setStaged((current) => {
+      const next = [...current];
+      for (const file of Array.from(picked)) {
+        if (!next.some((staged) => staged.name === file.name && staged.size === file.size)) {
+          next.push(file);
+        }
+      }
+      return next.slice(0, GALLERY_UPLOAD_FILES_PER_REQUEST);
+    });
+  }
+
+  function unstage(index: number) {
+    setStaged((current) => current.filter((_, i) => i !== index));
+  }
 
   async function upload(files: File[]) {
     if (files.length === 0) return;
@@ -186,6 +210,7 @@ export function GalleryUploader({
       if (combined.uploaded.length > 0) router.refresh();
     } finally {
       if (inputRef.current) inputRef.current.value = "";
+      setStaged([]);
       setProgress(null);
       setPending(false);
     }
@@ -196,9 +221,10 @@ export function GalleryUploader({
       <div className="flex flex-col gap-1">
         <h2 className="text-lg font-bold tracking-tight">Add photos</h2>
         <p className="text-muted text-sm/6">
-          JPEG, PNG, WebP or AVIF up to {formatBytes(GALLERY_LIMITS.uploadBytes)} each. Photos over 800 KB are resized
-          to WebP in your browser and sent in small batches; the server makes a grid thumbnail. Every upload starts as
-          a <strong>draft</strong> — nothing shows on the public gallery until you publish it.
+          JPEG, PNG, WebP or AVIF up to {formatBytes(GALLERY_LIMITS.uploadBytes)} each. Choose your photos, check the
+          list, then press <strong>Upload</strong> — over-800 KB photos are resized to WebP first and sent in small
+          batches, and the server makes a grid thumbnail. Every upload starts as a <strong>draft</strong> — nothing
+          shows on the public gallery until you publish it.
         </p>
       </div>
 
@@ -225,15 +251,22 @@ export function GalleryUploader({
         </label>
 
         <div className="flex flex-wrap items-center gap-3">
+          {/* The native picker is hidden — the buttons drive it, and the
+              chosen photos stay visible in the staged list below until the
+              Upload button is pressed. */}
           <input
             ref={inputRef}
             type="file"
             multiple
             accept={GALLERY_UPLOAD_ACCEPT}
-            disabled={pending || !storageConfigured}
-            onChange={(event) => void upload(Array.from(event.target.files ?? []))}
+            tabIndex={-1}
+            onChange={(event) => {
+              stage(event.target.files);
+              // Re-picking the same set of photos must still fire onChange.
+              event.target.value = "";
+            }}
             aria-label="Choose photos to upload"
-            className="text-muted file:border-border file:bg-surface-raised file:text-foreground hover:file:border-marigold/50 w-full text-sm file:mr-3 file:h-10 file:cursor-pointer file:rounded-xl file:border file:px-4 file:text-sm file:font-semibold sm:w-auto"
+            className="sr-only"
           />
 
           <Button
@@ -244,10 +277,51 @@ export function GalleryUploader({
             onClick={() => inputRef.current?.click()}
             className="h-10"
           >
-            {pending ? "Working…" : "Choose files"}
+            {pending ? "Working…" : "Choose photos"}
+          </Button>
+
+          <Button
+            type="button"
+            size="sm"
+            disabled={pending || !storageConfigured || staged.length === 0}
+            onClick={() => void upload(staged)}
+            className="h-10"
+          >
+            <CameraIcon className="size-4" />
+            {pending ? "Uploading…" : staged.length > 0 ? `Upload ${staged.length} ${staged.length === 1 ? "photo" : "photos"}` : "Upload photos"}
           </Button>
         </div>
       </div>
+
+      {staged.length > 0 ? (
+        <div className="border-border/70 bg-surface/60 flex flex-col gap-2 rounded-xl border p-3.5">
+          <p className="text-muted/80 text-[0.6875rem] font-semibold tracking-widest uppercase">
+            Ready to upload ({staged.length})
+          </p>
+          <ul className="flex flex-col gap-1.5">
+            {staged.map((file, index) => (
+              <li key={`${file.name}-${file.size}`} className="flex items-center justify-between gap-3 text-sm">
+                <span className="min-w-0 truncate">
+                  {file.name}
+                  <span className="text-muted ml-2 text-xs">{formatBytes(file.size)}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => unstage(index)}
+                  disabled={pending}
+                  aria-label={`Remove ${file.name}`}
+                  className="text-muted hover:text-rani-soft shrink-0"
+                >
+                  <CloseIcon className="size-3.5" />
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="text-muted/80 text-xs">
+            Nothing has been uploaded yet — press Upload to send these to the gallery as drafts.
+          </p>
+        </div>
+      ) : null}
 
       {progress ? (
         <p role="status" className="text-muted text-sm">
