@@ -29,7 +29,8 @@ export const NIGHT_TIER_DOT_STYLES: Record<string, string> = {
  * to the server and keep it when the visitor steps back and forth. Fully booked,
  * cancelled and finished nights are disabled inputs with the reason attached —
  * they can never be selected, and the server checks availability again anyway.
- * The dates scroll sideways on a phone and settle into a grid on larger screens.
+ * The dates always wrap as a grid — two columns on a phone, three from small
+ * screens up, four on wide ones — never a sideways-scrolling single line.
  */
 export function NightSelector({ nights, value, onChange, disabled }: NightSelectorProps) {
   if (nights.length === 0) {
@@ -40,9 +41,9 @@ export function NightSelector({ nights, value, onChange, disabled }: NightSelect
     <fieldset disabled={disabled}>
       <legend className="sr-only">Choose your date</legend>
 
-      <ul className="snap-x snap-mandatory flex gap-3 overflow-x-auto pt-1 pb-2 sm:grid sm:grid-cols-3 sm:overflow-visible sm:pb-0 xl:grid-cols-4">
+      <ul className="grid grid-cols-2 gap-3 pt-1 sm:grid-cols-3 xl:grid-cols-4">
         {nights.map((night) => (
-          <li key={night.id} className="min-w-[8rem] shrink-0 snap-start sm:min-w-0">
+          <li key={night.id} className="min-w-0">
             <NightOption night={night} selected={night.id === value} onSelect={() => onChange(night.id)} />
           </li>
         ))}

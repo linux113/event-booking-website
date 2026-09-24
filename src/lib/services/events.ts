@@ -1,5 +1,5 @@
 import { isDatabaseConfigured } from "@/config/env";
-import { DatabaseError, rpc, sql } from "@/lib/db/client";
+import { DatabaseError, isMissingColumnError, rpc, sql } from "@/lib/db/client";
 import {
   toEventFeature,
   toEventHighlight,
@@ -166,7 +166,7 @@ export async function getSiteContent(): Promise<Result<SiteContent>> {
     `;
     return ok(parseSiteContentJson(rows[0]?.site_content));
   } catch (error) {
-    if (error instanceof DatabaseError && error.code === "42703") {
+    if (isMissingColumnError(error, "site_content")) {
       return ok(parseSiteContentJson(null));
     }
     return queryFailure(error, "getSiteContent");

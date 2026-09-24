@@ -13,7 +13,7 @@ import {
   type FilterOption,
 } from "@/lib/admin/bookings";
 import { isDatabaseConfigured } from "@/config/env";
-import { DatabaseError, rpc, sql } from "@/lib/db/client";
+import { DatabaseError, isMissingColumnError, rpc, sql } from "@/lib/db/client";
 import { adminHeroImagePreviewUrl } from "@/lib/admin/hero-image";
 import { gateNight } from "@/lib/gate/night";
 import { fail, ok, type Result } from "@/lib/services/result";
@@ -598,7 +598,7 @@ export async function getEventSettings(): Promise<Result<EventSettings | null>> 
     try {
       siteContent = await getEventSiteContentSoft();
     } catch (error) {
-      if (error instanceof DatabaseError && error.code === "42703") {
+      if (isMissingColumnError(error, "site_content")) {
         siteContent = parseSiteContentJson(null);
       } else {
         throw error;
@@ -664,7 +664,7 @@ export async function saveEventContactSettings(
     try {
       siteContent = await getEventSiteContentSoft();
     } catch (error) {
-      if (error instanceof DatabaseError && error.code === "42703") {
+      if (isMissingColumnError(error, "site_content")) {
         siteContent = parseSiteContentJson(null);
       } else {
         throw error;
@@ -750,7 +750,7 @@ export async function saveEventBasicsSettings(
     try {
       siteContent = await getEventSiteContentSoft();
     } catch (error) {
-      if (error instanceof DatabaseError && error.code === "42703") {
+      if (isMissingColumnError(error, "site_content")) {
         siteContent = parseSiteContentJson(null);
       } else {
         throw error;
@@ -835,7 +835,7 @@ export async function saveEventSiteContentSettings(
     try {
       siteContent = await getEventSiteContentSoft();
     } catch (error) {
-      if (error instanceof DatabaseError && error.code === "42703") {
+      if (isMissingColumnError(error, "site_content")) {
         siteContent = parseSiteContentJson(null);
       } else {
         throw error;
@@ -847,7 +847,7 @@ export async function saveEventSiteContentSettings(
     const dbError = error instanceof DatabaseError ? error : new DatabaseError(String(error));
     console.error("[admin] site content save failed:", dbError.message, dbError.code ?? "");
 
-    if (dbError.code === "42703") {
+    if (isMissingColumnError(dbError, "site_content")) {
       return {
         ok: false,
         error: {
