@@ -440,4 +440,32 @@ export async function setNightBookingOpen(
   }
 }
 
+/** Remove an empty night. Refuses if any bookings or passes are attached. */
+export async function removeNight(
+  id: string,
+): Promise<WriteOutcome<{ id: string }>> {
+  if (!isDatabaseConfigured()) {
+    return notConfigured();
+  }
+
+  try {
+    const data = await rpc<{ date_uuid: string }>("admin_delete_event_date", {
+      p_id: id,
+    });
+
+    const [row] = data ?? [];
+
+    if (!row) {
+      return {
+        ok: false,
+        error: { kind: "server-error", code: "PT007", field: "date", message: "That night no longer exists — reload the page." },
+      };
+    }
+
+    return saved({ id: row.date_uuid });
+  } catch (error) {
+    return refused("delete night", error);
+  }
+}
+
 export type { CatalogueError };

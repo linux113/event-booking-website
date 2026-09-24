@@ -363,6 +363,10 @@ export const CATALOGUE_REFUSALS: Record<string, RefusalCopy> = {
   PT009: { field: "date", message: "Pick the date of the night." },
   PT010: { field: "status", message: "Pick one of the four night states." },
   PT011: { field: "notes", message: "That note is too long." },
+  PT012: {
+    field: "date",
+    message: "This night has bookings and cannot be removed — close booking instead.",
+  },
 
   // --- passes -----------------------------------------------------------------
   PC001: { field: "name", message: "Give the pass a name guests will recognise." },

@@ -12,7 +12,7 @@ import {
 import { firstFieldError, isClean, parseNightForm } from "@/lib/admin/catalogue";
 import { can } from "@/lib/auth/permissions";
 import { getStaffMember } from "@/lib/auth/staff";
-import { saveNight, setNightBookingOpen, setNightCapacity } from "@/lib/services/admin-catalogue";
+import { removeNight, saveNight, setNightBookingOpen, setNightCapacity } from "@/lib/services/admin-catalogue";
 import type { AdminNight, CatalogueResult } from "@/types/catalogue";
 
 /**
@@ -121,6 +121,21 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
 
     const result = await setNightBookingOpen(id, bodyBoolean(read.body, "bookingOpen", true));
+
+    return catalogueJson(result);
+  }
+
+  // ---- delete night ----------------------------------------------------------
+  if (action === "delete") {
+    const id = bodyString(read.body, "id", 36);
+
+    if (!/^[0-9a-f-]{36}$/i.test(id)) {
+      return catalogueError<AdminNight>("invalid-input", "That night could not be identified.", {
+        field: "date",
+      });
+    }
+
+    const result = await removeNight(id);
 
     return catalogueJson(result);
   }
