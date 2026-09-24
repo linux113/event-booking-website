@@ -25,9 +25,9 @@ import type { AdminGalleryItem, GalleryStatus } from "@/types/gallery";
  * than only in colour, because "is this live?" is the question this screen exists to
  * answer.
  *
- * The picture itself is loaded from `/api/admin/gallery/preview`, through the staff
- * session: a draft's object lives in a private bucket, so there is no public URL to
- * point at, and `next/image`'s optimiser cannot reach an authorised route either —
+ * The picture itself is loaded from `/api/admin/gallery/preview` through the staff
+ * session. Drafts stay out of public gallery queries and their Blob URLs are not shown
+ * by the admin list; `next/image`'s optimiser cannot reach this authorised route either,
  * hence `unoptimized`, with the grid-sized thumbnail asked for directly.
  */
 
@@ -56,6 +56,7 @@ export function GalleryItemCard({
 }) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [previewError, setPreviewError] = useState(false);
   const [draft, setDraft] = useState({
     title: item.title ?? "",
     description: item.description ?? "",
@@ -69,7 +70,7 @@ export function GalleryItemCard({
   const save = useCatalogueSave<AdminGalleryItem>();
   const status = useCatalogueSave<{ id: string; status: GalleryStatus; moved: boolean }>();
   const move = useCatalogueSave<{ id: string; sortOrder: number; moved: boolean }>();
-  const remove = useCatalogueSave<{ id: string; filesDeleted: number }>();
+  const remove = useCatalogueSave<{ id: string; filesDeleted: number; filesToDelete: number }>();
 
   const pending = save.pending || status.pending || move.pending || remove.pending;
   const previewSrc = `/api/admin/gallery/preview?id=${item.id}&variant=thumb`;
@@ -133,10 +134,11 @@ export function GalleryItemCard({
 
     if (result.ok) {
       onRemoved(item.id);
+      const label = `“${item.title ?? item.altText}”`;
       onNotice(
-        `Deleted “${item.title ?? item.altText}”${
-          result.data.filesDeleted > 0 ? ` and its ${result.data.filesDeleted} stored files` : ""
-        }.`,
+        result.data.filesToDelete === 0 || result.data.filesDeleted === result.data.filesToDelete
+          ? `Deleted ${label} from the gallery${result.data.filesDeleted > 0 ? ` and removed its ${result.data.filesDeleted} stored files` : ""}.`
+          : `Removed ${label} from the public gallery, but Blob cleanup did not complete. Check the Vercel Blob connection and Function logs.`,
       );
     } else {
       setFieldError({ message: result.error.message });
@@ -160,8 +162,15 @@ export function GalleryItemCard({
           unoptimized
           loading="lazy"
           sizes="(max-width: 640px) 100vw, 224px"
+          onError={() => setPreviewError(true)}
           className="h-full w-full object-cover"
         />
+        {previewError ? (
+          <p role="alert" className="bg-night/90 text-marigold-soft absolute inset-x-2 bottom-2 rounded-lg px-2.5 py-2 text-xs/5">
+            Preview unavailable. Check the Neon connection and the Vercel Blob store/token for this environment, then reload.
+            Function logs and setup steps are in <code>docs/gallery-upload-troubleshooting.md</code>.
+          </p>
+        ) : null}
         <span className="bg-night/80 absolute top-2 left-2 rounded-full px-2 py-0.5 text-[0.625rem] font-semibold tracking-widest text-white uppercase tabular-nums">
           {index + 1} / {total}
         </span>

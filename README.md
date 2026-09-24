@@ -18,6 +18,7 @@ and Quantity only.
 | ----- | -------------- |
 | [`docs/neon-setup.md`](./docs/neon-setup.md) | Create a Neon project, apply the schema with `npm run db:setup` (or paste `docs/one-shot-schema.sql`), seed data, and set `DATABASE_URL` |
 | [`docs/deploy-vercel.md`](./docs/deploy-vercel.md) | Deploying to Vercel: environment variables, Razorpay webhook, Blob storage, admin credentials, post-deploy checks |
+| [`docs/gallery-upload-troubleshooting.md`](./docs/gallery-upload-troubleshooting.md) | Blob setup, upload size limits, draft publishing and preview failures |
 | [`docs/how-it-works.md`](./docs/how-it-works.md) | The whole flow — customer, organiser, gate — and the URLs that must be configured |
 | [`docs/connect-free-supabase.md`](./docs/connect-free-supabase.md) | **Historical only** (pre-migration Supabase guide). Do not follow for new setups |
 | [`supabase/README.md`](./supabase/README.md) | **Historical only** (roles, RLS and storage from the Supabase era). The SQL under `supabase/migrations/` is still how `db:setup` applies the schema to Neon as plain PostgreSQL |
@@ -41,7 +42,7 @@ and Quantity only.
 | ---- | ----- | ----- |
 | 1–14 | Public UI, booking wizard, Razorpay, passes/QR, scanner, admin, gallery, contact | ✅ done (from prior work) |
 | M | Migration: Neon + Prisma, no Supabase runtime, single admin, no customer email | ✅ done |
-| 15 | Operations screens — publishing events, event settings | ⏳ next |
+| 15 | Event settings — edit public contact, venue address, maps/social links and support hours | ✅ done |
 | 16 | Hardening — rate limiting, analytics, perf budget | ⏳ |
 
 **Nothing is mocked.** Prices, nights, gallery, bookings, payments and gate entries all
@@ -114,7 +115,9 @@ Vercel). Sign in at `/admin/login`.
 | `npm run db:generate` | Generate the Prisma Client into `src/generated/prisma` |
 | `npm run db:setup` | Apply `supabase/prelude.sql` + every migration (then optional `--seed`) to a **hosted** PostgreSQL. Uses the **direct** connection string; safe to re-run (bookkeeping in `setup.applied_migrations`). `--verify-only` checks without changing anything; `--mark-all-applied` records a pre-existing database |
 | `npm run db:setup:test` | Prove the setup tooling against a throwaway PostgreSQL: fresh run, re-run, resume, edited file, one-shot paste — **20/20 passed** |
-| `npm run test:prisma` | Exercise the generated Prisma client + key SQL functions against a throwaway PostgreSQL — **14/14 passed** |
+| `npm run test:prisma` | Exercise the generated Prisma client, gallery draft/publish/delete lifecycle and key SQL functions against throwaway PostgreSQL |
+| `npm run test:settings` | Validate public event contact settings and URL rules |
+| `npm run test:gallery-upload` | Verify gallery batches stay within request and file-count budgets |
 | `npm run db:verify` / `npm run verify:web` | **Historical** Supabase-era harnesses (RLS/role/storage doubles). Not part of the post-migration acceptance path |
 | [`docs/one-shot-schema.sql`](./docs/one-shot-schema.sql) | Whole schema as one transactional batch for a provider SQL editor; regenerated with `node scripts/build-one-shot-schema.mjs --seed` |
 
@@ -339,13 +342,16 @@ region (e.g. `ap-south-1`) so queries stay cheap. Build is Node 22.
 | ----- | ------ |
 | `npm install` | OK (no `@supabase/*` packages) |
 | `npm run db:generate` | OK — Prisma Client 7.10.0 |
-| `npm run typecheck` | **0 errors** |
+| `npm run typecheck` | **0 errors** (Prisma engine binary stubbed because the sandbox cannot download it over TLS) |
 | `npm run lint` | **0 errors** (warnings only) |
 | `npm run build` | **exit 0** |
-| `npm run test:prisma` | **14/14 passed** |
+| `npm run test:prisma` | **18/18 passed**, including gallery draft/publish/delete row lifecycle |
+| `npm run test:normalise` | **21/21 passed** |
+| `npm run test:settings` | **8/8 passed** |
+| `npm run test:gallery-upload` | **8/8 passed** |
 | `npm run db:setup:test` | **20/20 passed** |
 | `npm run db:verify` / `verify:web` | **Not run** — historical Supabase-era harnesses (auth/storage doubles); incompatible without a full rewrite |
-| Live Neon apply / Vercel deploy | Needs your credentials (not available in this environment) |
+| Live Neon update / Vercel Blob operations | Not run — live credentials are not available in this environment; see `docs/update-live-contact.sql` and `docs/gallery-upload-troubleshooting.md` |
 
 ## Search audit (forbidden terms)
 

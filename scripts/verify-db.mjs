@@ -5895,7 +5895,7 @@ async function main() {
 
   check(
     "a visitor can read the contact block of the published event",
-    ctsPublicRow.length === 1 && ctsPublicRow[0].whatsapp_number === "919000000000",
+    ctsPublicRow.length === 1 && ctsPublicRow[0].whatsapp_number === "919358535894",
     JSON.stringify(ctsPublicRow[0] ?? {}),
   );
   check(
@@ -5913,7 +5913,7 @@ async function main() {
   const ctsBadNumbers = [
     ["090000000012", "leading zero"],
     ["91900 0000 00", "spaces"],
-    ["+919000000000", "a plus sign"],
+    ["+919358535894", "a plus sign"],
     ["91123456789012345", "too many digits"],
     ["919000000", "too few digits"],
     ["", "an empty string instead of null"],
@@ -5930,7 +5930,7 @@ async function main() {
     "a plain international number in digits passes the format rule",
     (await q(`select whatsapp_number from public.events where id = '${EVENT}';`))[0].whatsapp_number === "919111122233",
   );
-  await run(`update public.events set whatsapp_number = '919000000000' where id = '${EVENT}';`);
+  await run(`update public.events set whatsapp_number = '919358535894' where id = '${EVENT}';`);
 
   // A social link in the wrong column sends guests to somewhere the organiser did not
   // intend, so each column only accepts its own platform, over https.
@@ -6021,7 +6021,7 @@ async function main() {
   check(
     "and the number in the row is untouched",
     (await q(`select whatsapp_number from public.events where id = '${EVENT}';`))[0].whatsapp_number ===
-      "919000000000",
+      "919358535894",
   );
 
   section("Result");

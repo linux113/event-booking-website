@@ -6619,9 +6619,9 @@ async function main() {
 
   check(
     "and the click-to-chat link is wa.me with it prefilled and encoded",
-    cts.whatsappChatUrl("919000000000") ===
-      `https://wa.me/919000000000?text=${encodeURIComponent("Hello, I need help with Navratri Dandiya booking.")}`,
-    cts.whatsappChatUrl("919000000000") ?? "",
+    cts.whatsappChatUrl("919358535894") ===
+      `https://wa.me/919358535894?text=${encodeURIComponent("Hello, I need help with Navratri Dandiya booking.")}`,
+    cts.whatsappChatUrl("919358535894") ?? "",
   );
 
   check(
@@ -6663,7 +6663,7 @@ async function main() {
   // The event's own columns win; the deployment's settings are the fallback.
   check(
     "an event's own WhatsApp number is the one the links open",
-    cts.whatsappNumberFor({ ...ctsEvent, whatsappNumber: "919111122233", contactPhone: "+91 90000 00000" }) ===
+    cts.whatsappNumberFor({ ...ctsEvent, whatsappNumber: "919111122233", contactPhone: "+91 9358535894" }) ===
       "919111122233",
   );
   check(
@@ -6677,11 +6677,11 @@ async function main() {
   );
   check(
     "the phone link is dialable — international, digits only",
-    cts.telHref("+91 90000 00000") === "tel:919000000000" && cts.telHref(null) === null,
+    cts.telHref("+91 9358535894") === "tel:919358535894" && cts.telHref(null) === null,
   );
   check(
     "the email link is only built from something that is an address",
-    cts.mailHref("hello@example.com") === "mailto:hello@example.com" &&
+    cts.mailHref("savriyasethevents@gmail.com") === "mailto:savriyasethevents@gmail.com" &&
       cts.mailHref("not an address") === null &&
       cts.mailHref(null) === null,
   );
@@ -6710,9 +6710,9 @@ async function main() {
   );
   check(
     "the channels omit what the organiser has not published, and keep the order WhatsApp → phone → email → venue",
-    cts.buildContactChannels({ ...ctsEvent, contactEmail: "hello@example.com" }).map((channel) => channel.id).join(",") ===
+    cts.buildContactChannels({ ...ctsEvent, contactEmail: "savriyasethevents@gmail.com" }).map((channel) => channel.id).join(",") ===
       "whatsapp,phone,email,venue",
-    cts.buildContactChannels({ ...ctsEvent, contactEmail: "hello@example.com" })
+    cts.buildContactChannels({ ...ctsEvent, contactEmail: "savriyasethevents@gmail.com" })
       .map((channel) => channel.id)
       .join(","),
   );
@@ -6757,7 +6757,7 @@ async function main() {
   // matched on the template, so prose about the link does not count as one.
   const ctsLinkPattern = /wa\.me\/\$\{/;
   const ctsHardcoded = ctsSurfaces.filter((file) =>
-    readFileSync(join(REPO_ROOT, file), "utf8").includes("919000000000"),
+    readFileSync(join(REPO_ROOT, file), "utf8").includes("919358535894"),
   );
   const ctsLinkSpellers = ctsSurfaces.filter((file) =>
     ctsLinkPattern.test(readFileSync(join(REPO_ROOT, file), "utf8")),
@@ -6779,7 +6779,7 @@ async function main() {
   );
   check(
     "the number's other home is the deployment fallback in site settings",
-    readFileSync(join(REPO_ROOT, "src/config/site.ts"), "utf8").includes("919000000000"),
+    readFileSync(join(REPO_ROOT, "src/config/site.ts"), "utf8").includes("919358535894"),
   );
 
   // What the visitor actually gets. /contact is statically rendered from the seeded
@@ -6787,7 +6787,7 @@ async function main() {
   const ctsContactRaw = await fetchPage("/contact");
   const ctsContactHtml = stripScripts(ctsContactRaw);
   const ctsContactText = visibleText(ctsContactRaw);
-  const ctsSeededLink = cts.whatsappChatUrl("919000000000");
+  const ctsSeededLink = cts.whatsappChatUrl("919358535894");
 
   check(
     "the contact page's WhatsApp button opens the event's number with the message prefilled",
@@ -6796,7 +6796,7 @@ async function main() {
   );
   check(
     "the same page offers a dialable phone link and a mailto link",
-    ctsContactHtml.includes("tel:919000000000") && ctsContactHtml.includes("mailto:hello@example.com"),
+    ctsContactHtml.includes("tel:919358535894") && ctsContactHtml.includes("mailto:savriyasethevents@gmail.com"),
   );
   check(
     "the venue, the address and a Google Maps link are on it",
@@ -6841,11 +6841,11 @@ async function main() {
 
   check(
     "changing the number in the database changes every link, without a deploy",
-    ctsPassesChanged.includes("wa.me/919888877766") && !ctsPassesChanged.includes("wa.me/919000000000"),
+    ctsPassesChanged.includes("wa.me/919888877766") && !ctsPassesChanged.includes("wa.me/919358535894"),
     contextAround(ctsPassesChanged, "wa.me"),
   );
 
-  await dbRun(`update public.events set whatsapp_number = '919000000000' where id = '${EVENT_ID}';`);
+  await dbRun(`update public.events set whatsapp_number = '919358535894' where id = '${EVENT_ID}';`);
 
   const ctsPassesRestored = stripScripts(await fetchPage("/passes"));
 
@@ -6857,7 +6857,7 @@ async function main() {
   check(
     "nothing was left behind in the events row",
     (await dbQuery(`select whatsapp_number from public.events where id = $1`, [EVENT_ID]))[0].whatsapp_number ===
-      "919000000000",
+      "919358535894",
   );
 
   // ---------------------------------------------------------------------------

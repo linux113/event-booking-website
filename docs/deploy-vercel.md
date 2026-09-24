@@ -76,10 +76,19 @@ not “simplify” it.
 
 ## Gallery storage (Vercel Blob)
 
-1. Vercel → **Storage → Blob → Create store**.
-2. Copy the token to `BLOB_READ_WRITE_TOKEN`.
-3. Gallery rows store **keys** only (`storage_path`, `thumbnail_path`); binaries never
-   go into Neon.
+1. Open **Vercel → Project → Storage → Create → Blob**.
+2. Create the Blob store and connect it to this project; enable **Production** and also
+   **Preview** if uploads will be made from preview deployments.
+3. In **Project → Settings → Environment Variables**, confirm `BLOB_READ_WRITE_TOKEN`
+   is available for each deployment environment that needs uploads. The app checks this
+   variable before accepting uploads.
+4. Redeploy after creating/connecting the store or changing its environment selection.
+
+Gallery rows store **keys** and URLs only (`storage_path`, `thumbnail_path`, `url`);
+image bytes stay in Blob, not Neon. Uploads are sent in small sequential batches under
+Vercel's request-body cap. New rows are drafts; the admin must select **Publish** to
+show a photo on `/gallery`. For setup errors and failed previews, see
+[`gallery-upload-troubleshooting.md`](./gallery-upload-troubleshooting.md).
 
 ---
 

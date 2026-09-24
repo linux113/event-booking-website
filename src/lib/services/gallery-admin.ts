@@ -1,9 +1,10 @@
 import "server-only";
 
 import { refusalFromDatabase } from "@/lib/admin/catalogue";
-import { titleFromFileName } from "@/lib/admin/gallery";
+import { GALLERY_STORAGE_SETUP_MESSAGE, titleFromFileName } from "@/lib/admin/gallery";
 import { prepareGalleryImage } from "@/lib/gallery/images";
 import { publicGalleryUrl } from "@/lib/gallery/paths";
+import { storageFailureMessage } from "@/lib/gallery/storage-errors";
 import {
   deleteObject,
   downloadObject,
@@ -132,7 +133,7 @@ export async function listGalleryItems(): Promise<Result<AdminGalleryItem[]>> {
         g.storage_path,
         g.thumbnail_path,
         g.url,
-        null::text as thumbnail_url,
+        g.thumbnail_url,
         g.width,
         g.height,
         g.byte_size,
@@ -192,7 +193,7 @@ export async function uploadGalleryItem(input: UploadGalleryInput): Promise<Writ
       ok: false,
       error: {
         kind: "not-configured",
-        message: "Gallery storage is not configured. Add BLOB_READ_WRITE_TOKEN (Vercel Blob).",
+        message: GALLERY_STORAGE_SETUP_MESSAGE,
       },
     };
   }
@@ -223,11 +224,14 @@ export async function uploadGalleryItem(input: UploadGalleryInput): Promise<Writ
     ]);
   } catch (error) {
     console.error("[gallery] upload to storage failed:", error);
+    // A paired upload can fail after the other object landed. Clean both known
+    // deterministic paths so a refused upload does not leave an orphan behind.
+    await Promise.allSettled([deleteObject(storagePath), deleteObject(thumbnailPath)]);
     return {
       ok: false,
       error: {
         kind: "server-error",
-        message: "The photo could not be stored. Nothing was saved — please try again.",
+        message: storageFailureMessage(error, "store"),
       },
     };
   }
@@ -235,7 +239,7 @@ export async function uploadGalleryItem(input: UploadGalleryInput): Promise<Writ
   try {
     await sql`
       insert into public.gallery (
-        id, event_id, media_type, storage_path, thumbnail_path, url,
+        id, event_id, media_type, storage_path, thumbnail_path, url, thumbnail_url,
         width, height, byte_size, title, description, alt_text, album,
         captured_on, sort_order, status
       ) values (
@@ -245,6 +249,7 @@ export async function uploadGalleryItem(input: UploadGalleryInput): Promise<Writ
         ${storagePath},
         ${thumbnailPath},
         ${fullUpload.url},
+        ${thumbUpload.url},
         ${image.full.width},
         ${image.full.height},
         ${image.full.byteSize},
@@ -253,7 +258,11 @@ export async function uploadGalleryItem(input: UploadGalleryInput): Promise<Writ
         ${input.altText?.trim() || input.title?.trim() || titleFromFileName(input.fileName)},
         ${input.album?.trim() || null},
         null::date,
-        0,
+        (
+          select coalesce(max(g.sort_order) + 1, 0)
+          from public.gallery g
+          where g.event_id is not distinct from ${eventId}::uuid
+        ),
         'draft'
       )
       returning id
@@ -321,16 +330,24 @@ export async function setGalleryItemStatus(
   }
 
   try {
-    await sql`
+    const rows = await sql<{ id: string; status: string }[]>`
       update public.gallery set status = ${status}, updated_at = now()
       where id = ${id}::uuid
-      returning id
+      returning id, status
     `;
+    const row = rows[0];
+
+    if (!row) {
+      return {
+        ok: false,
+        error: { kind: "server-error", message: "That photograph could not be found — reload the page." },
+      };
+    }
+
+    return saved({ id: row.id, status: row.status as GalleryStatus, moved: true });
   } catch (error) {
     return refused("status", error);
   }
-
-  return saved({ id, status, moved: true });
 }
 
 /** Move one photograph one place up or down the running order. */
@@ -363,7 +380,9 @@ export async function moveGalleryItem(
  * Delete one photograph: the row first, then the files it named.
  * A file that cannot be deleted is logged; the row is already gone.
  */
-export async function deleteGalleryItem(id: string): Promise<WriteOutcome<{ id: string; filesDeleted: number }>> {
+export async function deleteGalleryItem(
+  id: string,
+): Promise<WriteOutcome<{ id: string; filesDeleted: number; filesToDelete: number }>> {
   if (!isDatabaseConfigured()) {
     return notConfigured();
   }
@@ -372,7 +391,6 @@ export async function deleteGalleryItem(id: string): Promise<WriteOutcome<{ id: 
     item_id: string;
     storage_path: string | null;
     thumbnail_path: string | null;
-    is_public: boolean;
     removed_paths: string[] | null;
   };
 
@@ -383,13 +401,12 @@ export async function deleteGalleryItem(id: string): Promise<WriteOutcome<{ id: 
       with deleted as (
         delete from public.gallery
         where id = ${id}::uuid
-        returning id, storage_path, thumbnail_path, status
+        returning id, storage_path, thumbnail_path
       )
       select
         id as item_id,
         storage_path,
         thumbnail_path,
-        (status = 'published') as is_public,
         array_remove(array[storage_path, thumbnail_path], null) as removed_paths
       from deleted
     `;
@@ -404,19 +421,19 @@ export async function deleteGalleryItem(id: string): Promise<WriteOutcome<{ id: 
 
   const keys = (row.removed_paths ?? []).filter((key): key is string => Boolean(key));
   if (keys.length === 0) {
-    return saved({ id, filesDeleted: 0 });
+    return saved({ id, filesDeleted: 0, filesToDelete: 0 });
   }
 
   if (!isStorageConfigured()) {
-    return saved({ id, filesDeleted: 0 });
+    return saved({ id, filesDeleted: 0, filesToDelete: keys.length });
   }
 
   try {
     await Promise.all(keys.map((key) => deleteObject(key)));
-    return saved({ id, filesDeleted: keys.length });
+    return saved({ id, filesDeleted: keys.length, filesToDelete: keys.length });
   } catch (error) {
     console.error(`[gallery] object delete failed:`, error, keys.join(", "));
-    return saved({ id, filesDeleted: 0 });
+    return saved({ id, filesDeleted: 0, filesToDelete: keys.length });
   }
 }
 
@@ -441,19 +458,17 @@ export async function readGalleryPreview(
     return fail("not-configured", "The gallery needs the database: add DATABASE_URL.");
   }
 
-  let status: string;
   let storagePath: string | null;
   let thumbPath: string | null;
 
   try {
-    const rows = await sql<{ status: string; storage_path: string | null; thumbnail_path: string | null }[]>`
-      select status, storage_path, thumbnail_path from public.gallery where id = ${id}::uuid
+    const rows = await sql<{ storage_path: string | null; thumbnail_path: string | null }[]>`
+      select storage_path, thumbnail_path from public.gallery where id = ${id}::uuid
     `;
     const data = rows[0];
     if (!data) {
       return fail("not-found", "That photograph is no longer in the gallery.");
     }
-    status = data.status;
     storagePath = data.storage_path;
     thumbPath = data.thumbnail_path;
   } catch (error) {
@@ -469,7 +484,7 @@ export async function readGalleryPreview(
   }
 
   if (!isStorageConfigured()) {
-    return fail("not-configured", "Gallery storage is not configured yet.");
+    return fail("not-configured", GALLERY_STORAGE_SETUP_MESSAGE);
   }
 
   try {
@@ -481,6 +496,6 @@ export async function readGalleryPreview(
     });
   } catch (error) {
     console.error(`[gallery] preview download failed:`, error, path);
-    return fail("not-found", "That photograph's file could not be read.");
+    return fail("query-failed", storageFailureMessage(error, "read"));
   }
 }

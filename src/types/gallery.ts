@@ -41,7 +41,7 @@ export interface AdminGalleryItem {
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
-  /** True when this row's file belongs in the public bucket. */
+  /** True when the public site is allowed to list this row's media. */
   isPublic: boolean;
   /** Set when the media lives somewhere else (a video on a CDN). */
   url: string | null;
@@ -73,7 +73,12 @@ export type GalleryFormErrors = Partial<Record<keyof GalleryFormValues, string>>
 export interface GalleryUploadOutcome {
   uploaded: AdminGalleryItem[];
   /** One sentence per file that could not be taken, in the order they were chosen. */
-  refused: { fileName: string; message: string }[];
+  refused: {
+    fileName: string;
+    message: string;
+    /** Error class lets a wholly refused batch keep the right HTTP status. */
+    kind?: CatalogueError["kind"];
+  }[];
 }
 
 /** `POST /api/admin/gallery` with a JSON body speaks these three actions. */

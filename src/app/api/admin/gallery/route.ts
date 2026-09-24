@@ -1,3 +1,4 @@
+import { revalidatePath } from "next/cache";
 import { NextResponse } from "next/server";
 
 import {
@@ -8,7 +9,18 @@ import {
   readCatalogueBody,
   unauthorized,
 } from "@/lib/admin/api";
-import { firstGalleryError, isCleanGalleryForm, parseGalleryForm } from "@/lib/admin/gallery";
+import {
+  firstGalleryError,
+  GALLERY_STORAGE_SETUP_MESSAGE,
+  isCleanGalleryForm,
+  parseGalleryForm,
+} from "@/lib/admin/gallery";
+import {
+  GALLERY_UPLOAD_FILES_PER_REQUEST,
+  GALLERY_UPLOAD_REQUEST_BYTES,
+} from "@/lib/admin/gallery-upload";
+import { isDatabaseConfigured } from "@/config/env";
+import { isStorageConfigured } from "@/lib/gallery/storage";
 import { can } from "@/lib/auth/permissions";
 import { getStaffMember } from "@/lib/auth/staff";
 import {
@@ -47,19 +59,18 @@ export const dynamic = "force-dynamic";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** The upload's own ceiling: the same number the buckets and the form state. */
+/** The upload's own ceiling: the same number the storage schema and form state. */
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 
-/**
- * Ceiling for one request, checked before the body is read.
- *
- * `request.formData()` buffers the whole request in memory, so the per-file check
- * below it is too late to bound anything: without this, a client decides how much of
- * the server's memory to use. Three full-size photographs is a real batch, and a
- * ceiling is also honest about the platform: Vercel caps a function's request body
- * well below this, so in production the smaller limit applies first.
- */
-const MAX_UPLOAD_REQUEST_BYTES = 3 * MAX_UPLOAD_BYTES;
+/** Enforced before `request.formData()` buffers the multipart request. */
+const MAX_UPLOAD_REQUEST_BYTES = GALLERY_UPLOAD_REQUEST_BYTES;
+
+function revalidatePublicGallery(): void {
+  // The public gallery uses a short ISR interval; invalidate immediately when its
+  // rows or captions change so Publish has an immediate, visible effect.
+  revalidatePath("/gallery");
+  revalidatePath("/");
+}
 
 export async function POST(request: Request): Promise<NextResponse> {
   const staff = await getStaffMember();
@@ -101,7 +112,9 @@ export async function POST(request: Request): Promise<NextResponse> {
       });
     }
 
-    return catalogueJson(await saveGalleryItem(values));
+    const result = await saveGalleryItem(values);
+    if (result.ok) revalidatePublicGallery();
+    return catalogueJson(result);
   }
 
   if (action === "status") {
@@ -114,7 +127,9 @@ export async function POST(request: Request): Promise<NextResponse> {
       });
     }
 
-    return catalogueJson(await setGalleryItemStatus(id, status));
+    const result = await setGalleryItemStatus(id, status);
+    if (result.ok) revalidatePublicGallery();
+    return catalogueJson(result);
   }
 
   if (action === "move") {
@@ -127,7 +142,9 @@ export async function POST(request: Request): Promise<NextResponse> {
       });
     }
 
-    return catalogueJson(await moveGalleryItem(id, direction));
+    const result = await moveGalleryItem(id, direction);
+    if (result.ok) revalidatePublicGallery();
+    return catalogueJson(result);
   }
 
   if (action === "delete") {
@@ -139,7 +156,9 @@ export async function POST(request: Request): Promise<NextResponse> {
       });
     }
 
-    return catalogueJson(await deleteGalleryItem(id));
+    const result = await deleteGalleryItem(id);
+    if (result.ok) revalidatePublicGallery();
+    return catalogueJson(result);
   }
 
   return catalogueError("invalid-input", "Unknown action.", { field: "title" });
@@ -154,13 +173,27 @@ export async function POST(request: Request): Promise<NextResponse> {
  * would be the wrong behaviour, and silently skipping it would be worse.
  */
 async function uploadMany(request: Request): Promise<NextResponse> {
+  if (!isDatabaseConfigured()) {
+    return catalogueError("not-configured", "The gallery needs DATABASE_URL before photos can be uploaded.");
+  }
+
+  if (!isStorageConfigured()) {
+    return catalogueError("not-configured", GALLERY_STORAGE_SETUP_MESSAGE);
+  }
+
   const declared = Number(request.headers.get("content-length") ?? "");
 
   if (Number.isFinite(declared) && declared > MAX_UPLOAD_REQUEST_BYTES) {
-    return catalogueError(
-      "invalid-input",
-      "That upload is larger than 24 MB in one go. Send fewer photographs at a time.",
-      { field: "file" },
+    return catalogueJson(
+      {
+        ok: false,
+        error: {
+          kind: "invalid-input",
+          message: "This request exceeds the 4 MiB upload safety limit (Vercel Functions allow about 4.5 MiB). Choose fewer or smaller photos.",
+          field: "file",
+        },
+      },
+      413,
     );
   }
 
@@ -180,8 +213,12 @@ async function uploadMany(request: Request): Promise<NextResponse> {
     return catalogueError("invalid-input", "Choose at least one photo to upload.", { field: "file" });
   }
 
-  if (files.length > 40) {
-    return catalogueError("invalid-input", "Upload 40 photos at a time at most.", { field: "file" });
+  if (files.length > GALLERY_UPLOAD_FILES_PER_REQUEST) {
+    return catalogueError(
+      "invalid-input",
+      `Upload ${GALLERY_UPLOAD_FILES_PER_REQUEST} photos at a time at most.`,
+      { field: "file" },
+    );
   }
 
   // The words are optional on an upload: a title is taken from the file name and the
@@ -199,6 +236,7 @@ async function uploadMany(request: Request): Promise<NextResponse> {
       outcome.refused.push({
         fileName: file.name,
         message: "That photo is larger than 8 MB. Resize it and try again.",
+        kind: "invalid-input",
       });
 
       continue;
@@ -218,15 +256,18 @@ async function uploadMany(request: Request): Promise<NextResponse> {
       continue;
     }
 
-    outcome.refused.push({ fileName: file.name, message: result.error.message });
+    outcome.refused.push({ fileName: file.name, message: result.error.message, kind: result.error.kind });
   }
 
   if (outcome.uploaded.length === 0) {
-    // Nothing landed: answer with the reason for the first file, so the screen can
-    // point at the field rather than at a list.
-    return catalogueError("invalid-input", outcome.refused[0]?.message ?? "That upload was refused.", {
-      field: "file",
-    });
+    // Keep an all-invalid batch as a successful batch result so the caller can show
+    // each file's own refusal. Infrastructure/configuration failures still keep their
+    // HTTP error status instead of being mislabeled as bad images.
+    const operationalFailure = outcome.refused.find((refusal) => refusal.kind && refusal.kind !== "invalid-input");
+
+    if (operationalFailure?.kind) {
+      return catalogueError(operationalFailure.kind, operationalFailure.message, { field: "file" });
+    }
   }
 
   return catalogueJson({ ok: true, data: outcome });

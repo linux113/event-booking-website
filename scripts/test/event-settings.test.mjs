@@ -1,0 +1,125 @@
+import assert from "node:assert/strict";
+import { register } from "node:module";
+
+register("./ts-alias-loader.mjs", import.meta.url);
+const { isCleanEventContactSettings, parseEventContactSettings } = await import(
+  "../../src/lib/admin/event-settings.ts"
+);
+const { buildContactChannels, buildSiteContact } = await import("../../src/lib/contact.ts");
+
+let passed = 0;
+function check(label, assertion) {
+  assertion();
+  passed += 1;
+  console.log(`  ✓ ${label}`);
+}
+
+const valid = {
+  contactPhone: "+91 9358535894",
+  contactEmail: "savriyasethevents@gmail.com",
+  whatsappNumber: "+91 93585 35894",
+  venueAddress: "Ajmer Road",
+  mapsUrl: "https://maps.google.com/?q=My+Village+Garden+Jaipur",
+  instagramUrl: "https://www.instagram.com/savriyasethevents",
+  facebookUrl: "https://www.facebook.com/savriyasethevents",
+  youtubeUrl: "https://youtu.be/dQw4w9WgXcQ",
+  supportHours: "Monday – Saturday · 10:00 AM – 8:00 PM\nFestival days · 10:00 AM – 11:00 PM",
+};
+
+const parsed = parseEventContactSettings(valid);
+check("real public contact details validate and WhatsApp is stored as digits", () => {
+  assert.equal(isCleanEventContactSettings(parsed.errors), true);
+  assert.equal(parsed.values.contactPhone, "+91 9358535894");
+  assert.equal(parsed.values.contactEmail, "savriyasethevents@gmail.com");
+  assert.equal(parsed.values.whatsappNumber, "919358535894");
+});
+
+check("deployment fallbacks generate the requested phone, email and WhatsApp links", () => {
+  const contact = buildSiteContact(null);
+  assert.equal(contact.phone, "+91 9358535894");
+  assert.equal(contact.phoneHref, "tel:919358535894");
+  assert.equal(contact.email, "savriyasethevents@gmail.com");
+  assert.equal(contact.emailHref, "mailto:savriyasethevents@gmail.com");
+  assert.ok(contact.whatsappHref?.startsWith("https://wa.me/919358535894?text="));
+  const channels = buildContactChannels(null);
+  assert.equal(channels.find((channel) => channel.id === "phone")?.href, "tel:919358535894");
+  assert.equal(channels.find((channel) => channel.id === "email")?.href, "mailto:savriyasethevents@gmail.com");
+  assert.ok(channels.find((channel) => channel.id === "whatsapp")?.href.startsWith("https://wa.me/919358535894?text="));
+});
+
+check("the event row wins and venue lines do not repeat the venue name", () => {
+  const contact = buildSiteContact({
+    id: "event-id",
+    slug: "navratri-2026-jaipur",
+    name: "Garba Night",
+    tagline: null,
+    description: null,
+    venueName: "My Village Garden",
+    venueAddress: "Ajmer Road",
+    city: "Jaipur",
+    state: "Rajasthan",
+    mapsUrl: "https://maps.google.com/?q=My+Village+Garden+Jaipur",
+    heroImageUrl: null,
+    contactPhone: "+91 8000000000",
+    contactEmail: "live@example.in",
+    whatsappNumber: "918000000000",
+    instagramUrl: null,
+    facebookUrl: null,
+    youtubeUrl: null,
+    supportHours: [],
+    currency: "INR",
+  });
+  assert.equal(contact.phone, "+91 8000000000");
+  assert.equal(contact.email, "live@example.in");
+  assert.ok(contact.whatsappHref?.startsWith("https://wa.me/918000000000?text="));
+  assert.deepEqual(contact.addressLines, ["My Village Garden", "Ajmer Road", "Jaipur, Rajasthan"]);
+});
+
+check("optional links and hours can be cleared", () => {
+  const empty = parseEventContactSettings({
+    ...valid,
+    mapsUrl: "",
+    instagramUrl: "",
+    facebookUrl: "",
+    youtubeUrl: "",
+    supportHours: "",
+  });
+  assert.equal(isCleanEventContactSettings(empty.errors), true);
+  assert.equal(empty.values.mapsUrl, null);
+  assert.deepEqual(empty.values.supportHours, []);
+});
+
+check("email and phone shapes are validated", () => {
+  const invalid = parseEventContactSettings({ ...valid, contactEmail: "not-an-email", contactPhone: "call me" });
+  assert.ok(invalid.errors.contactEmail);
+  assert.ok(invalid.errors.contactPhone);
+
+  const misplacedPlus = parseEventContactSettings({ ...valid, contactPhone: "91+9358535894" });
+  assert.ok(misplacedPlus.errors.contactPhone);
+});
+
+check("WhatsApp accepts formatted input but refuses an invalid international number", () => {
+  const invalid = parseEventContactSettings({ ...valid, whatsappNumber: "+0 123" });
+  assert.ok(invalid.errors.whatsappNumber);
+});
+
+check("social links must use their own HTTPS platform and are canonicalized", () => {
+  const invalid = parseEventContactSettings({ ...valid, instagramUrl: "https://instagram.com.evil.example/" });
+  assert.ok(invalid.errors.instagramUrl);
+
+  const normalized = parseEventContactSettings({ ...valid, instagramUrl: "HTTPS://WWW.Instagram.com/savriya" });
+  assert.equal(normalized.errors.instagramUrl, undefined);
+  assert.equal(normalized.values.instagramUrl, "https://www.instagram.com/savriya");
+});
+
+check("maps links require HTTPS and support hours are capped at six lines", () => {
+  const invalid = parseEventContactSettings({
+    ...valid,
+    mapsUrl: "javascript:alert(1)",
+    supportHours: "1\n2\n3\n4\n5\n6\n7",
+  });
+  assert.ok(invalid.errors.mapsUrl);
+  assert.ok(invalid.errors.supportHours);
+});
+
+console.log(`\n${passed} passed, 0 failed`);

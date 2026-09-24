@@ -132,23 +132,15 @@ export function toEventFeature(row: EventFeatureRow): EventFeature {
 }
 
 /**
- * Gallery rows → tiles. Rows with neither a public URL nor a storage path are
- * skipped (the database forbids them, but storage_path is not publicly readable
- * without a signed URL, which needs the service role — so such rows are omitted
- * until the organiser supplies a public URL).
- */
-/**
- * One gallery row, as the public site needs it.
+ * One published gallery row, as the public site needs it.
  *
- * The URL is **derived, not stored**: an uploaded photograph's row holds the object
- * key inside the gallery bucket, and the public address is the Blob URL stored in `url`.
- * Only externally hosted media (a video on a
- * CDN, a photo added straight from a URL) carries its own `url`, and that wins when
- * it is set.
+ * Uploads record their full and thumbnail Blob URLs in `url` and `thumbnail_url`,
+ * while object keys remain in `storage_path` and `thumbnail_path` for authenticated
+ * preview and deletion. External media may also carry its own `url`.
  *
- * A row with neither is dropped rather than rendered as a broken image — which is
- * also what keeps a draft honest: a draft's file lives in the private bucket, so
- * there is no public address for it even if somebody published the row by hand.
+ * A row with no resolvable public URL is dropped rather than rendered as a broken
+ * image. The public query selects only `status = 'published'` rows, so drafts never
+ * reach this mapper.
  */
 export function toGalleryItem(row: GalleryRow): GalleryItem | null {
   const src = row.url ?? (row.storage_path ? publicGalleryUrl(row.storage_path) : null);
@@ -157,8 +149,8 @@ export function toGalleryItem(row: GalleryRow): GalleryItem | null {
     return null;
   }
 
-  // Vercel Blob stores one absolute URL per object in `url`; thumbnails share the
-  // item path (`.../full.webp` ↔ `.../thumb.webp`).
+  // New uploads store the thumbnail's exact Blob URL; retain key/path derivation
+  // only as a compatibility fallback for legacy rows.
   const thumbnailSrc =
     row.thumbnail_url ??
     (row.thumbnail_path ? publicGalleryUrl(row.thumbnail_path) : null) ??

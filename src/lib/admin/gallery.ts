@@ -5,8 +5,8 @@
  * so the form, the route handler and the verification harness all read the same
  * rules. What lives here:
  *
- *   1. **Limits, stated once** — the same numbers the SQL functions and the buckets
- *      enforce, so a form that passes here is not going to be refused for length.
+ *   1. **Limits, stated once** — shared form/server rules for metadata and image size,
+ *      so the browser and API report the same constraints.
  *   2. **Parsing a submitted form** into typed values, with a message per field.
  *   3. **The words** the screen uses: what "draft" means, what a file size looks
  *      like, what the upload will accept.
@@ -22,6 +22,9 @@ import type { GalleryFormErrors, GalleryFormValues, GalleryStatus } from "@/type
 // Limits
 // -----------------------------------------------------------------------------
 
+export const GALLERY_STORAGE_SETUP_MESSAGE =
+  "Gallery storage is not configured. In Vercel, open Project → Storage → create a Blob store and connect it to this project, enable Production (and Preview if used), confirm BLOB_READ_WRITE_TOKEN is available in that environment, then redeploy.";
+
 export const GALLERY_LIMITS = {
   /** Longest title the column holds. */
   titleMax: 120,
@@ -29,7 +32,7 @@ export const GALLERY_LIMITS = {
   altTextMax: 200,
   albumMax: 60,
   sortOrderMax: 9999,
-  /** Bytes: the same `file_size_limit` the buckets carry. */
+  /** Bytes: the server-side per-file ceiling, before image processing. */
   uploadBytes: 8 * 1024 * 1024,
   /** Smaller than this is a screenshot or a logo, not a photograph of the night. */
   minEdge: 400,
@@ -39,7 +42,7 @@ export const GALLERY_LIMITS = {
   thumbEdge: 640,
 } as const;
 
-/** The image types both the browser and the buckets accept. */
+/** Image types allowed by the file picker and accepted by the server image processor. */
 export const GALLERY_UPLOAD_TYPES = ["image/jpeg", "image/png", "image/webp", "image/avif"] as const;
 
 /** A file input's `accept` attribute, built from the list above. */

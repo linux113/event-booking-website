@@ -84,7 +84,7 @@ The contact details the site publishes are columns on `events`, not configuratio
 
 | Column | Holds | Rule |
 | ------ | ----- | ---- |
-| `contact_phone` | the number to ring, as printed (`+91 90000 00000`) | free text — it is a label as much as a number |
+| `contact_phone` | the number to ring, as printed (`+91 9358535894`) | free text — it is a label as much as a number |
 | `contact_email` | the address enquiries go to | free text; the app only builds a `mailto:` for something that looks like an address |
 | `whatsapp_number` | the number the click-to-chat links open | international format, **digits only** — `^[1-9][0-9]{9,14}$`. Empty means the app falls back to `contact_phone`'s digits, then to the deployment's setting |
 | `venue_name`, `venue_address`, `city`, `state`, `maps_url` | the address block and the map link | `maps_url` is the organiser's own pin; without it the app searches the address |

@@ -61,7 +61,10 @@ If `typecheck` or `build` fails, fix code first — cloud setup will only waste 
 ### A3. Run the project’s own tests
 
 ```bash
-npm run test:prisma      # expect: 14 passed, 0 failed
+npm run test:prisma      # expect: 18 passed, 0 failed (includes gallery draft/publish/delete)
+npm run test:normalise   # expect: 21 passed, 0 failed
+npm run test:settings    # expect: 8 passed, 0 failed
+npm run test:gallery-upload # expect: 8 passed, 0 failed
 npm run db:setup:test    # expect: 20 passed, 0 failed
 ```
 

@@ -66,6 +66,39 @@ const checked = await prisma.digitalPass.update({ where: { id: passes[0].id }, d
 check("update through the client works", checked.checkedIn === true);
 const ins = await prisma.checkIn.create({ data: { digitalPassId: passes[0].id, eventDateId: night.id, bookingId: row.booking_uuid, gate: "Gate 1" } });
 check("check_ins insert through the client works", Boolean(ins.id));
+// 4 · gallery rows retain both Blob URLs, stay private as drafts, publish and delete
+const galleryId = crypto.randomUUID();
+const fullUrl = `https://store.public.blob.vercel-storage.com/gallery/${galleryId}/full.webp`;
+const thumbnailUrl = `https://store.public.blob.vercel-storage.com/gallery/${galleryId}/thumb.webp`;
+const galleryItem = await prisma.galleryItem.create({
+  data: {
+    id: galleryId,
+    eventId: event.id,
+    mediaType: "image",
+    storagePath: `gallery/${galleryId}/full.webp`,
+    thumbnailPath: `gallery/${galleryId}/thumb.webp`,
+    url: fullUrl,
+    thumbnailUrl,
+    title: "Test gallery image",
+    altText: "A festival stage with lights",
+    width: 2400,
+    height: 1600,
+    byteSize: 123456,
+    sortOrder: 0,
+    status: "draft",
+  },
+});
+check("gallery upload metadata stores both full and thumbnail Blob URLs", galleryItem.url === fullUrl && galleryItem.thumbnailUrl === thumbnailUrl);
+const draftPublicRows = await prisma.$queryRaw`select id from public.gallery where status = 'published'`;
+check("draft gallery rows are excluded from the public status query", !draftPublicRows.some((item) => item.id === galleryId));
+await prisma.galleryItem.update({ where: { id: galleryId }, data: { status: "published" } });
+const publicGalleryItem = await prisma.$queryRaw`
+  select url, thumbnail_url from public.gallery where id = ${galleryId}::uuid and status = 'published'
+`;
+check("publishing exposes the image and thumbnail URLs", publicGalleryItem[0]?.url === fullUrl && publicGalleryItem[0]?.thumbnail_url === thumbnailUrl);
+await prisma.galleryItem.delete({ where: { id: galleryId } });
+check("deleting removes the gallery row", await prisma.galleryItem.findUnique({ where: { id: galleryId } }) === null);
+
 try {
   await prisma.checkIn.create({ data: { digitalPassId: passes[0].id, eventDateId: night.id, bookingId: row.booking_uuid } });
   check("a second check-in is refused by unique(digital_pass_id)", false, "ALLOWED — the guarantee is gone");
@@ -73,7 +106,7 @@ try {
   check("a second check-in is refused by unique(digital_pass_id)", String(e.code) === "P2002" || /unique/i.test(String(e.message)), String(e.code ?? e.message).slice(0, 60));
 }
 
-// 4 · the database refuses to write a generated column
+// 5 · the database refuses to write a generated column
 //
 // Run on the in-process handle rather than through Prisma: this is a property of
 // the schema, and a failed statement is allowed to take Prisma's single pooled

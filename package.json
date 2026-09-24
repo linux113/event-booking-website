@@ -15,6 +15,8 @@
     "db:setup:test": "node scripts/test/db-setup.test.mjs",
     "test:prisma": "node scripts/test/prisma-client.test.mjs",
     "test:normalise": "node scripts/test/db-normalise.test.mjs",
+    "test:settings": "node scripts/test/event-settings.test.mjs",
+    "test:gallery-upload": "node scripts/test/gallery-upload.test.mjs",
     "verify:web": "node scripts/verify-web.mjs"
   },
   "dependencies": {

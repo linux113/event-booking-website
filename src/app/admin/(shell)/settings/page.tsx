@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
 
+import { EventContactSettingsForm } from "@/components/admin/event-contact-settings-form";
 import { ErrorState } from "@/components/ui/error-state";
-import { requirePermission } from "@/lib/auth/guard";
-import { can, permissionsFor, ROLE_LABELS } from "@/lib/auth/permissions";
 import { siteConfig } from "@/config/site";
 import { siteUrl } from "@/config/env";
+import { requirePermission } from "@/lib/auth/guard";
+import { can, permissionsFor, ROLE_LABELS } from "@/lib/auth/permissions";
 import { getEventSettings } from "@/lib/services/admin";
 
 export const metadata: Metadata = {
@@ -16,16 +17,11 @@ export const metadata: Metadata = {
 export const dynamic = "force-dynamic";
 
 /**
- * Event settings — what the public site is actually built from.
+ * Event settings — the selected event row that supplies the public contact block.
  *
- * Read-only in this step, and honest about it: the values shown are the live rows
- * from the database, and editing them (publishing an event, changing a price, taking
- * a night off sale) is the admin dashboard work that follows. Showing the values
- * first is deliberate — it is how an organiser checks what customers are seeing
- * right now, and it can be verified against the public pages.
- *
- * Guarded by `settings:view`: admins and super admins. A staff member who types this
- * URL is redirected to the dashboard with an explanation rather than a blank page.
+ * The contact form is intentionally narrow: it edits the phone, email, WhatsApp,
+ * street address, map/social URLs and support hours without exposing unrelated event
+ * publishing or booking settings.
  */
 export default async function SettingsPage() {
   const staff = await requirePermission("settings:view");
@@ -44,14 +40,15 @@ export default async function SettingsPage() {
   }
 
   const event = result.data;
+  const canEdit = can(staff.role, "settings:edit");
 
   return (
     <>
       <div className="flex flex-col gap-1">
         <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Event settings</h1>
         <p className="text-muted text-sm/6">
-          The rows the public pages read. Editing arrives in the next step — changing a value here means changing the
-          database, which is why it is not a text box on a web form yet.
+          Check the event the site is using, then update its public contact and venue details below. Saved changes take
+          effect without a deployment.
         </p>
       </div>
 
@@ -64,32 +61,18 @@ export default async function SettingsPage() {
             <Field label="Slug" value={event.slug} />
             <Field label="Status" value={event.status.toUpperCase()} hint={statusHint(event.status)} />
             <Field label="Tagline" value={event.tagline ?? "—"} />
-            <Field label="Venue" value={[event.venueName, event.venueAddress].filter(Boolean).join(", ")} />
+            <Field label="Venue name" value={event.venueName} />
             <Field label="City" value={[event.city, event.state].filter(Boolean).join(", ")} />
-            <Field label="Contact phone" value={event.contactPhone ?? "—"} />
-            <Field label="Contact email" value={event.contactEmail ?? "—"} />
-            <Field
-              label="WhatsApp number"
-              value={event.whatsappNumber ?? "—"}
-              hint="Digits only, no plus — the site's click-to-chat links. Falls back to the phone number."
-            />
-            <Field label="Instagram" value={event.instagramUrl ?? "—"} />
-            <Field label="Facebook" value={event.facebookUrl ?? "—"} />
-            <Field label="YouTube" value={event.youtubeUrl ?? "—"} />
-            <Field
-              label="Support hours"
-              value={event.supportHours.length > 0 ? event.supportHours.join(" · ") : "—"}
-              hint="Shown on /contact and in the footer"
-            />
             <Field label="Currency" value={event.currency} />
           </dl>
         ) : (
           <p className="text-muted text-sm/6">
-            No event row exists yet. Apply the schema seed (see docs) or create one
-            before the site can show anything.
+            No event row exists yet. Apply the schema seed (see docs) or create one before the site can show anything.
           </p>
         )}
       </section>
+
+      {event ? <EventContactSettingsForm event={event} canEdit={canEdit} /> : null}
 
       <section className="border-border bg-surface/50 flex flex-col gap-4 rounded-2xl border p-5">
         <h2 className="text-sm font-semibold tracking-tight">Deployment</h2>
@@ -123,7 +106,7 @@ export default async function SettingsPage() {
 function statusHint(status: string): string {
   switch (status) {
     case "published":
-      return "Live: every page can read it.";
+      return "Live: every public page can read it.";
     case "draft":
       return "Hidden from the public site.";
     case "archived":

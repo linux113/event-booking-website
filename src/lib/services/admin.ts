@@ -16,6 +16,8 @@ import { isDatabaseConfigured } from "@/config/env";
 import { DatabaseError, rpc, sql } from "@/lib/db/client";
 import { gateNight } from "@/lib/gate/night";
 import { fail, ok, type Result } from "@/lib/services/result";
+import type { EventContactSettingsValues, EventSettings } from "@/types/event-settings";
+import type { CatalogueResult } from "@/types/catalogue";
 
 /**
  * Reads for the admin area — server side only.
@@ -486,82 +488,139 @@ export async function listBookingPassOptions(): Promise<Result<FilterOption[]>> 
 // Event settings
 // -----------------------------------------------------------------------------
 
-export interface EventSettings {
+interface EventSettingsRow {
   name: string;
   slug: string;
   status: string;
   tagline: string | null;
-  venueName: string;
-  venueAddress: string | null;
+  venue_name: string;
+  venue_address: string | null;
   city: string;
   state: string | null;
-  contactPhone: string | null;
-  contactEmail: string | null;
-  whatsappNumber: string | null;
-  instagramUrl: string | null;
-  facebookUrl: string | null;
-  youtubeUrl: string | null;
-  supportHours: string[];
+  contact_phone: string | null;
+  contact_email: string | null;
+  whatsapp_number: string | null;
+  maps_url: string | null;
+  instagram_url: string | null;
+  facebook_url: string | null;
+  youtube_url: string | null;
+  support_hours: string[] | null;
   currency: string;
 }
 
-/** The event row the public site reads — what "settings" means today. */
+function toEventSettings(row: EventSettingsRow): EventSettings {
+  return {
+    name: row.name,
+    slug: row.slug,
+    status: row.status,
+    tagline: row.tagline,
+    venueName: row.venue_name,
+    venueAddress: row.venue_address,
+    city: row.city,
+    state: row.state,
+    contactPhone: row.contact_phone,
+    contactEmail: row.contact_email,
+    whatsappNumber: row.whatsapp_number,
+    mapsUrl: row.maps_url,
+    instagramUrl: row.instagram_url,
+    facebookUrl: row.facebook_url,
+    youtubeUrl: row.youtube_url,
+    supportHours: row.support_hours ?? [],
+    currency: row.currency,
+  };
+}
+
+
+/**
+ * The event settings operate on the same row the admin catalogue uses: the oldest
+ * published event, falling back to the oldest row when no event is published.
+ * The public site itself reads the oldest published event.
+ */
 export async function getEventSettings(): Promise<Result<EventSettings | null>> {
   const notReady = ensureDb();
   if (notReady) return notReady as Result<EventSettings | null>;
 
   try {
-    const data = await sql<{
-      name: string;
-      slug: string;
-      status: string;
-      tagline: string | null;
-      venue_name: string;
-      venue_address: string | null;
-      city: string;
-      state: string | null;
-      contact_phone: string | null;
-      contact_email: string | null;
-      whatsapp_number: string | null;
-      instagram_url: string | null;
-      facebook_url: string | null;
-      youtube_url: string | null;
-      support_hours: string[] | null;
-      currency: string;
-    }[]>`
+    const data = await sql<EventSettingsRow[]>`
       select
         name, slug, status, tagline, venue_name, venue_address, city, state,
-        contact_phone, contact_email, whatsapp_number, instagram_url,
+        contact_phone, contact_email, whatsapp_number, maps_url, instagram_url,
         facebook_url, youtube_url, support_hours, currency
       from public.events
-      order by created_at asc
+      order by (status = 'published') desc, created_at asc
       limit 1
     `;
 
-    const row = data[0];
-    if (!row) {
-      return ok(null);
-    }
-
-    return ok({
-      name: row.name,
-      slug: row.slug,
-      status: row.status,
-      tagline: row.tagline,
-      venueName: row.venue_name,
-      venueAddress: row.venue_address,
-      city: row.city,
-      state: row.state,
-      contactPhone: row.contact_phone,
-      contactEmail: row.contact_email,
-      whatsappNumber: row.whatsapp_number,
-      instagramUrl: row.instagram_url,
-      facebookUrl: row.facebook_url,
-      youtubeUrl: row.youtube_url,
-      supportHours: row.support_hours ?? [],
-      currency: row.currency,
-    });
+    return ok(data[0] ? toEventSettings(data[0]) : null);
   } catch (error) {
     return dbFailure("event settings", error) as Result<EventSettings | null>;
+  }
+}
+
+/** Save the public contact and venue columns for the event selected above. */
+export async function saveEventContactSettings(
+  values: EventContactSettingsValues,
+): Promise<CatalogueResult<EventSettings>> {
+  if (!isDatabaseConfigured()) {
+    return {
+      ok: false,
+      error: {
+        kind: "not-configured",
+        message: "Event settings need the database connection. Add DATABASE_URL and try again.",
+      },
+    };
+  }
+
+  try {
+    const rows = await sql<EventSettingsRow[]>`
+      update public.events
+      set
+        contact_phone = ${values.contactPhone},
+        contact_email = ${values.contactEmail},
+        whatsapp_number = ${values.whatsappNumber},
+        venue_address = ${values.venueAddress},
+        maps_url = ${values.mapsUrl},
+        instagram_url = ${values.instagramUrl},
+        facebook_url = ${values.facebookUrl},
+        youtube_url = ${values.youtubeUrl},
+        support_hours = ${values.supportHours},
+        updated_at = now()
+      where id = (
+        select id from public.events
+        order by (status = 'published') desc, created_at asc
+        limit 1
+      )
+      returning
+        name, slug, status, tagline, venue_name, venue_address, city, state,
+        contact_phone, contact_email, whatsapp_number, maps_url, instagram_url,
+        facebook_url, youtube_url, support_hours, currency
+    `;
+
+    if (!rows[0]) {
+      return {
+        ok: false,
+        error: { kind: "server-error", message: "There is no event row available to update." },
+      };
+    }
+
+    return { ok: true, data: toEventSettings(rows[0]) };
+  } catch (error) {
+    const dbError = error instanceof DatabaseError ? error : new DatabaseError(String(error));
+    console.error("[admin] event settings save failed:", dbError.message, dbError.code ?? "");
+
+    if (dbError.code === "23514") {
+      return {
+        ok: false,
+        error: {
+          kind: "invalid-input",
+          message: "The database refused one of these values. Check the WhatsApp number, social links and support hours.",
+        },
+      };
+    }
+
+    return {
+      ok: false,
+      error: { kind: "server-error", message: "The event settings could not be saved right now." },
+    };
   }
 }
