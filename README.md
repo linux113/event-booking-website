@@ -20,6 +20,7 @@ Pass and Quantity only.
 | [`docs/deploy-vercel.md`](./docs/deploy-vercel.md) | Deploying to Vercel: environment variables, Razorpay webhook, Blob storage, admin credentials, post-deploy checks |
 | [`docs/gallery-upload-troubleshooting.md`](./docs/gallery-upload-troubleshooting.md) | Blob setup, upload size limits, draft publishing and preview failures |
 | [`docs/how-it-works.md`](./docs/how-it-works.md) | The whole flow — customer, organiser, gate — and the URLs that must be configured |
+| [`docs/gate-testing.md`](./docs/gate-testing.md) | Testing the gate: `npm run test:gate`, the phone checklist, the date/time rules and the SQL to inspect one pass |
 
 ## Stack
 
@@ -119,6 +120,7 @@ Vercel). Sign in at `/admin/login`.
 | `npm run test:gallery-upload` | Verify gallery batches stay within request and file-count budgets |
 | `npm run test:hero-image` | Verify image validation, WebP optimization, size limits and versioned routes — **7/7 passed** |
 | `npm run test:db-types` | Check every SQL function the app calls (and every public table/view column) returns a type the Prisma driver adapter can deserialize — catches `UnsupportedNativeDataType` failures such as `timestamptz[]` before deploy — **33/33 passed** |
+| `npm run test:gate` | Exercise the gate end to end against real SQL: the venue's clock, token shape, `valid` / `not_yet_valid` / `expired` on the right nights, single admission, no double entry, cancelled nights and invalid codes — **16/16 passed** (see `docs/gate-testing.md`) |
 | [`docs/one-shot-schema.sql`](./docs/one-shot-schema.sql) | Whole schema as one transactional batch for a provider SQL editor; regenerated with `node scripts/build-one-shot-schema.mjs --seed` |
 
 > **Prisma engine downloads:** if `binaries.prisma.sh` is blocked in your environment,
@@ -199,6 +201,10 @@ Read from the published `events` row: WhatsApp deep link, phone, **organiser**
 2. Camera scan (HTTPS required for camera access).
 3. Server returns a verdict (VALID / ALREADY CHECKED IN / …); CHECK IN button calls
    `/api/staff/check-in` → `check_in_pass` (unique `check_ins.digital_pass_id`).
+
+Testing the gate — the automated suite, the phone checklist and the date rules
+(including the **no grace window after midnight** rule) — is in
+[`docs/gate-testing.md`](./docs/gate-testing.md). In short: `npm run test:gate`.
 
 ## Where the data comes from
 
