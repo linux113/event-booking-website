@@ -73,9 +73,30 @@ export interface AdminNight {
   capacityHeld: number;
   bookingOpen: boolean;
   notes: string | null;
+  /** People who have **paid** for this night. */
   bookedPeople: number;
+  /** Bookings that have been **paid** for on this night. */
   bookedBookings: number;
+  /** Passes issued against **paid** bookings on this night. */
   passesIssued: number;
+  /**
+   * Bookings on this night in **any** state — paid, pending, expired, cancelled.
+   *
+   * This is what `admin_delete_event_date` counts, not `bookedBookings`: an
+   * unpaid booking can still become a paid one, so a night is only removable
+   * while it has nothing attached at all.
+   */
+  attachedBookings: number;
+  /** Digital passes on this night, whatever the booking's payment state. */
+  attachedPasses: number;
+  /** Gate check-ins recorded against this night. */
+  attachedCheckIns: number;
+  /**
+   * True when `admin_delete_event_date` would delete this night: nothing at all
+   * is attached to it. Computed in SQL, so the "Remove night" control can never
+   * offer a removal the database will refuse.
+   */
+  removable: boolean;
   /** `capacity - capacityHeld` — what the organiser put on sale. */
   seatsOnSale: number;
   /** `capacity - capacityHeld - bookedPeople`, floored at zero. */
