@@ -6,7 +6,7 @@ import { NightForm } from "@/components/admin/night-form";
 import { StatusPill, type StatusTone } from "@/components/admin/status-pill";
 import { useCatalogueSave } from "@/components/admin/use-catalogue-save";
 import { Button, buttonClasses } from "@/components/ui/button";
-import { capacityCopy, capacityPercent, nightState } from "@/lib/admin/catalogue";
+import { capacityCopy, capacityPercent, nightRemovalBlock, nightState } from "@/lib/admin/catalogue";
 import { formatEventDate, formatTimeRange } from "@/lib/format";
 import type { AdminNight } from "@/types/catalogue";
 
@@ -42,6 +42,7 @@ export function NightsPanel({
   const [capacityDraft, setCapacityDraft] = useState<Record<string, string>>({});
   const [capacityError, setCapacityError] = useState<Record<string, string>>({});
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [removeError, setRemoveError] = useState<{ id: string; message: string } | null>(null);
   const capacity = useCatalogueSave<{ id: string; capacity: number; capacityHeld: number; seatsAvailable: number }>();
   const booking = useCatalogueSave<{ id: string; bookingOpen: boolean; seatsAvailable: number }>();
   const remove = useCatalogueSave<{ id: string }>();
@@ -50,8 +51,21 @@ export function NightsPanel({
 
   function applySaved(saved: AdminNight) {
     setRows((current) => {
-      const exists = current.some((row) => row.id === saved.id);
-      const next = exists ? current.map((row) => (row.id === saved.id ? saved : row)) : [...current, saved];
+      const existing = current.find((row) => row.id === saved.id);
+      // A save can change the night, never what is attached to it, so an edited
+      // night keeps the figures the list already had for it.
+      const merged = existing
+        ? {
+            ...saved,
+            attachedBookings: existing.attachedBookings,
+            attachedPasses: existing.attachedPasses,
+            attachedCheckIns: existing.attachedCheckIns,
+            removable: existing.removable,
+          }
+        : saved;
+      const next = current.some((row) => row.id === saved.id)
+        ? current.map((row) => (row.id === saved.id ? merged : row))
+        : [...current, merged];
 
       return next.sort((a, b) => a.date.localeCompare(b.date));
     });
@@ -129,6 +143,7 @@ export function NightsPanel({
 
   async function deleteNight(row: AdminNight) {
     setNotice(null);
+    setRemoveError(null);
     const result = await remove.send("/api/admin/dates", {
       action: "delete",
       id: row.id,
@@ -140,6 +155,9 @@ export function NightsPanel({
       setEditing(null);
       setNotice(`${formatEventDate(row.date)} removed.`);
     } else {
+      // The refusal belongs to this night, so it is shown here — under the control
+      // that was pressed — rather than only at the top of the screen.
+      setRemoveError({ id: row.id, message: result.error.message });
       setConfirmDelete(null);
     }
   }
@@ -170,9 +188,9 @@ export function NightsPanel({
         </p>
       ) : null}
 
-      {(capacity.error ?? booking.error ?? remove.error) ? (
+      {(capacity.error ?? booking.error) ? (
         <p role="alert" className="border-rani/40 bg-rani/5 text-rani-soft rounded-xl border px-3.5 py-2.5 text-sm">
-          {(capacity.error ?? booking.error ?? remove.error)?.message}
+          {(capacity.error ?? booking.error)?.message}
         </p>
       ) : null}
 
@@ -190,6 +208,9 @@ export function NightsPanel({
         {rows.map((row) => {
           const percent = capacityPercent(row);
           const state = nightState(row);
+          // The same rule the database enforces: nothing may be attached to a
+          // night that is about to be removed.
+          const removalBlock = nightRemovalBlock(row);
           const tone: StatusTone =
             row.status === "cancelled" || row.overCommitted
               ? "stop"
@@ -310,21 +331,15 @@ export function NightsPanel({
                       </button>
                     </span>
                   ) : (
-                    <span
-                      title={
-                        row.bookedPeople > 0 || row.bookedBookings > 0 || row.passesIssued > 0
-                          ? "This night has bookings and cannot be removed — close booking instead."
-                          : undefined
-                      }
-                      className="inline-flex"
-                    >
+                    <span title={removalBlock ?? undefined} className="inline-flex">
                       <button
                         type="button"
                         onClick={() => {
                           setConfirmDelete(row.id);
                           setEditing(null);
+                          setRemoveError(null);
                         }}
-                        disabled={busy || row.bookedPeople > 0 || row.bookedBookings > 0 || row.passesIssued > 0}
+                        disabled={busy || removalBlock !== null}
                         className={buttonClasses({
                           variant: "ghost",
                           size: "sm",
@@ -351,6 +366,12 @@ export function NightsPanel({
               {capacityError[row.id] ? (
                 <p role="alert" className="text-rani-soft text-xs font-medium">
                   {capacityError[row.id]}
+                </p>
+              ) : null}
+
+              {removeError?.id === row.id ? (
+                <p role="alert" className="border-rani/40 bg-rani/5 text-rani-soft rounded-xl border px-3.5 py-2.5 text-xs/5">
+                  {removeError.message}
                 </p>
               ) : null}
 

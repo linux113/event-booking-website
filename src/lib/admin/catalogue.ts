@@ -365,7 +365,8 @@ export const CATALOGUE_REFUSALS: Record<string, RefusalCopy> = {
   PT011: { field: "notes", message: "That note is too long." },
   PT012: {
     field: "date",
-    message: "This night has bookings and cannot be removed — close booking instead.",
+    message:
+      "This night has bookings, passes or check-ins attached to it and cannot be removed — close booking or cancel the night instead.",
   },
 
   // --- passes -----------------------------------------------------------------
@@ -496,6 +497,56 @@ export function capacityCopy(night: AdminNight): string {
   const seats = `${night.seatsAvailable.toLocaleString("en-IN")} of ${night.capacity.toLocaleString("en-IN")} seats left`;
 
   return night.capacityHeld > 0 ? `${seats} · ${night.capacityHeld.toLocaleString("en-IN")} held back` : seats;
+}
+
+/**
+ * Why this night cannot be removed — or null when it can be.
+ *
+ * The rule itself lives in `admin_delete_event_date`, and it is deliberately
+ * strict: a night is removable only while *nothing* is attached to it, because an
+ * unpaid booking can still become a paid one and a printed pass can still walk
+ * through the gate. The screen states that same rule in the organiser's words,
+ * with the number in the way, so the control never offers a removal the database
+ * will refuse.
+ *
+ * `removable` is the database's own answer; the counts are only there to make the
+ * sentence specific. When a night is not removable but the counts have not been
+ * loaded yet (a save that has not been followed by a re-read), the plain sentence
+ * is still the truthful thing to say.
+ */
+export function nightRemovalBlock(
+  night: Pick<
+    AdminNight,
+    "removable" | "attachedBookings" | "attachedPasses" | "attachedCheckIns"
+  >,
+): string | null {
+  if (night.removable) {
+    return null;
+  }
+
+  const attached = [
+    night.attachedBookings > 0 ? counted(night.attachedBookings, "booking") : null,
+    night.attachedPasses > 0 ? counted(night.attachedPasses, "pass") : null,
+    night.attachedCheckIns > 0 ? counted(night.attachedCheckIns, "check-in") : null,
+  ].filter((part): part is string => part !== null);
+
+  const closing = "so it cannot be removed — close booking or cancel the night instead.";
+
+  if (attached.length === 0) {
+    return `This night has bookings attached to it, ${closing}`;
+  }
+
+  const list =
+    attached.length === 1
+      ? attached[0]
+      : `${attached.slice(0, -1).join(", ")} and ${attached[attached.length - 1]}`;
+
+  return `This night has ${list} attached to it, ${closing}`;
+}
+
+/** `1 booking` / `4 bookings`. */
+function counted(count: number, word: string): string {
+  return `${count.toLocaleString("en-IN")} ${word}${count === 1 ? "" : "s"}`;
 }
 
 /** `18+` / `All ages` for a pass's age restriction. */

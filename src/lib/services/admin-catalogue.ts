@@ -83,6 +83,15 @@ interface DateRow {
   seats_available: number;
   over_committed: boolean;
   is_full: boolean;
+  attached_bookings: number;
+  attached_passes: number;
+  attached_check_ins: number;
+  /**
+   * Optional because it arrived with a later migration: a database that has not
+   * run it yet answers without the column, and the screen then falls back to the
+   * paid-only figures rather than locking every night against removal.
+   */
+  removable?: boolean;
   updated_at: string;
 }
 
@@ -122,6 +131,14 @@ function toNight(row: DateRow): AdminNight {
     bookedPeople: Number(row.booked_people),
     bookedBookings: Number(row.booked_bookings),
     passesIssued: Number(row.passes_issued),
+    attachedBookings: Number(row.attached_bookings ?? 0),
+    attachedPasses: Number(row.attached_passes ?? 0),
+    attachedCheckIns: Number(row.attached_check_ins ?? 0),
+    removable:
+      row.removable ??
+      (Number(row.booked_people) === 0 &&
+        Number(row.booked_bookings) === 0 &&
+        Number(row.passes_issued) === 0),
     seatsOnSale: Number(row.seats_on_sale),
     seatsAvailable: Number(row.seats_available),
     overCommitted: row.over_committed,
@@ -351,6 +368,14 @@ export async function saveNight(input: SaveNightInput): Promise<WriteOutcome<Adm
       bookedPeople: Number(row.booked_people),
       bookedBookings: 0,
       passesIssued: 0,
+      // `admin_save_event_date` answers with the night as it was written and its
+      // paid figures; what is attached to it is the list's business. A brand-new
+      // night has nothing attached, which is what the screen keeps for an edited
+      // one (see `NightsPanel.applySaved`).
+      attachedBookings: 0,
+      attachedPasses: 0,
+      attachedCheckIns: 0,
+      removable: true,
       seatsOnSale: capacity - capacityHeld,
       seatsAvailable,
       overCommitted: Number(row.booked_people) + capacityHeld > capacity,
